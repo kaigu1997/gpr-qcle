@@ -1,0 +1,41 @@
+# ELF files and intermediates
+*.d
+*.d.*
+*.o
+*.pchi
+*.gch
+*.x
+
+# scripts, especially for submission
+*.sh
+*PBS*
+*pbs*
+
+# output and input files
+*.txt
+*.png
+*.gif
+*log
+*out*
+*put
+*result*/
+
+# IDE configuration
+.vs*/
+*.sln
+*.vcxproj*
+__pycache__/
+
+# Doxygen document
+*Doxyfile*
+html/
+latex/
+
+# notes
+notes/
+
+# never ignore source code
+!*.c*
+!*.h*
+# ... except for gnu precompiled header
+*.h.gch

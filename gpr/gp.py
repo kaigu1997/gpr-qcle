@@ -1,4 +1,4 @@
-import evolve
+import pes
 
 import copy
 import gpytorch
@@ -20,7 +20,7 @@ class GP(gpytorch.models.ExactGP):
 		self.cov: gpytorch.kernels.Kernel = kernel
 
 	def forward(self, x: torch.Tensor) -> gpytorch.distributions.MultivariateNormal:
-		return gpytorch.distributions.MultivariateNormal(self.mean(x), self.cov(x))
+		return gpytorch.distributions.MultivariateNormal(self.mean.forward(x), self.cov(x))
 
 
 def sr_pred(
@@ -58,7 +58,7 @@ class Predictor:
 		likelihood: gpytorch.likelihoods.FixedNoiseGaussianLikelihood = gpytorch.likelihoods.FixedNoiseGaussianLikelihood(torch.full((2,), Predictor.NOISE))
 		self.x_all: torch.Tensor = torch.Tensor()
 		self.y_all: torch.Tensor = torch.Tensor()
-		self.model: GP = GP(torch.zeros((2, evolve.PHASEDIM)), torch.zeros((2,)), likelihood, self.kernel)
+		self.model: GP = GP(torch.zeros((2, pes.PHASEDIM)), torch.zeros((2,)), likelihood, self.kernel)
 		self.model_param: dict[str, torch.Tensor] = copy.deepcopy(self.model.state_dict())
 
 	def train(self) -> None:
@@ -111,23 +111,23 @@ class Predictor:
 				# print_stuff(loss, optimizer, self.model, True)
 				if loss < last_value:
 					# print('loss < last_value\n')
-					while loss < last_value:
-						second_last_value: float = last_value
-						last_value = loss.item()
-						self.model.load_state_dict(old_prm)
-						optimizer = optimizer.__class__(self.model.parameters(), lr=get_lr(optimizer) * 2.0)
-						optimizer.step()
-						loss = self.loss_func(x, y, self.model, likelihood, self.x_all, self.y_all)
-						# print_stuff(loss, optimizer, self.model, True)
-						if loss >= last_value:
-							# goes back, not only loss but also last value, for stop criteria judgment
-							last_value = second_last_value
-							break
-					# when exit, loss >= last value, so learning rate should be halved
-					self.model.load_state_dict(old_prm)
-					optimizer = optimizer.__class__(self.model.parameters(), lr=get_lr(optimizer) / 2.0)
-					optimizer.step()
-					loss = self.loss_func(x, y, self.model, likelihood, self.x_all, self.y_all)
+					# while loss < last_value:
+					# 	second_last_value: float = last_value
+					# 	last_value = loss.item()
+					# 	self.model.load_state_dict(old_prm)
+					# 	optimizer = optimizer.__class__(self.model.parameters(), lr=get_lr(optimizer) * 2.0)
+					# 	optimizer.step()
+					# 	loss = self.loss_func(x, y, self.model, likelihood, self.x_all, self.y_all)
+					# 	# print_stuff(loss, optimizer, self.model, True)
+					# 	if loss >= last_value:
+					# 		# goes back, not only loss but also last value, for stop criteria judgment
+					# 		last_value = second_last_value
+					# 		break
+					# # when exit, loss >= last value, so learning rate should be halved
+					# self.model.load_state_dict(old_prm)
+					optimizer = optimizer.__class__(self.model.parameters(), lr=get_lr(optimizer) * 2.0)
+					# optimizer.step()
+					# loss = self.loss_func(x, y, self.model, likelihood, self.x_all, self.y_all)
 					# print_stuff(loss, optimizer, self.model, True)
 				else:
 					# print('loss > last_value')
@@ -173,35 +173,53 @@ class Predictor:
 			self.model_param = copy.deepcopy(self.model.state_dict())
 
 
-predictors: list[Predictor] = [Predictor(gpytorch.kernels.RBFKernel(evolve.PHASEDIM), sr_se, sr_pred) for i in range(evolve.NUM_ELM)]
+predictors: list[Predictor] = [Predictor(gpytorch.kernels.RBFKernel(pes.PHASEDIM), sr_se, sr_pred) for i in range(pes.NUM_ELM)]
 
 
-def update(x_all: npt.NDArray[np.double], y_all: npt.NDArray[np.double], num_pts: int) -> None:
-	for x, y, pred in zip(x_all, y_all, predictors):
-		pred.model.set_train_data(torch.from_numpy(x[:num_pts]), torch.from_numpy(y[:num_pts]), False)
-		pred.x_all = torch.from_numpy(x)
-		pred.y_all = torch.from_numpy(y)
+def update(x_all: npt.NDArray[np.double], y_all: npt.NDArray[np.cdouble], num_pts: int) -> None:
+	for iElement, pred in enumerate(predictors):
+		pred.x_all = torch.from_numpy(x_all[iElement])
+		if iElement // pes.NUM_PES <= iElement % pes.NUM_PES:
+			pred.y_all = torch.from_numpy(y_all[iElement].real)
+		else:
+			pred.y_all = torch.from_numpy(y_all[iElement].imag)
+		pred.model.set_train_data(pred.x_all[:num_pts], pred.y_all[:num_pts], False)
+
+
+def check_predictor(predictor: Predictor) -> bool:
+	return isinstance(predictor.model.train_targets, torch.Tensor) and not torch.all(predictor.model.train_targets == 0)
 
 
 def train() -> None:
 	for pred in predictors:
-		if isinstance(pred.model.train_targets, torch.Tensor) and not torch.all(pred.model.train_targets == 0):
+		if check_predictor(pred):
 			pred.train()
 
 
-def predict(x_input: npt.NDArray[np.double], ElementIndex: int) -> npt.NDArray[np.double]:
-	x_test: torch.Tensor = torch.from_numpy(x_input)
-	pred: Predictor = predictors[ElementIndex]
-	if not isinstance(pred.model.train_targets, torch.Tensor) or (isinstance(pred.model.train_targets, torch.Tensor) and torch.all(pred.model.train_targets == 0)):
-		return np.zeros(x_input.shape[0])
-	else:
-		# train model
-		assert pred.model.train_inputs is not None and isinstance(pred.model.train_inputs[0], torch.Tensor)
-		likelihood: gpytorch.likelihoods.FixedNoiseGaussianLikelihood = gpytorch.likelihoods.FixedNoiseGaussianLikelihood(torch.full((pred.model.train_inputs[0].shape[0],), Predictor.NOISE))
-		# predict
-		pred.model.eval()
-		likelihood.eval()
-		if pred.predictor is None:
-			return likelihood(pred.model.__call__(x_test), noise=torch.full((x_test.shape[0],), Predictor.NOISE)).mean.detach().numpy()
+def predict(x_input: npt.NDArray[np.double], ElementIndex: int) -> npt.NDArray[np.cdouble]:
+	x_test: torch.Tensor = torch.from_numpy(x_input.reshape(-1, pes.PHASEDIM))
+
+	def call_single_predictor(pred: Predictor) -> npt.NDArray[np.double]:
+		if check_predictor(pred):
+			assert pred.model.train_inputs is not None and isinstance(pred.model.train_inputs[0], torch.Tensor)
+			likelihood: gpytorch.likelihoods.FixedNoiseGaussianLikelihood = gpytorch.likelihoods.FixedNoiseGaussianLikelihood(torch.full((pred.model.train_inputs[0].shape[0],), Predictor.NOISE))
+			# predict
+			pred.model.eval()
+			likelihood.eval()
+			if pred.predictor is None:
+				return likelihood(pred.model(x_test), noise=torch.full((x_test.shape[0],), Predictor.NOISE)).mean.detach().numpy()
+			else:
+				return pred.predictor(pred.model, likelihood, pred.model.train_inputs[0], pred.x_all, pred.y_all, x_test).detach().numpy()
 		else:
-			return pred.predictor(pred.model, likelihood, pred.model.train_inputs[0], pred.x_all, pred.y_all, x_test).detach().numpy()
+			return np.zeros(x_test.size()[0], np.double)
+
+	RowIndex: int = ElementIndex // pes.NUM_PES
+	ColIndex: int = ElementIndex % pes.NUM_PES
+	result: npt.NDArray[np.cdouble] = np.empty(x_test.shape[0], np.cdouble)
+	if RowIndex == ColIndex:
+		result.real = call_single_predictor(predictors[ElementIndex])
+		result.imag = 0.0
+	else:
+		result.real = call_single_predictor(predictors[ColIndex * pes.NUM_PES + RowIndex])
+		result.imag = call_single_predictor(predictors[ElementIndex])
+	return result.reshape(x_input.shape[:-1])

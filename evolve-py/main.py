@@ -31,10 +31,8 @@ def read_input() -> npt.NDArray[np.cdouble]:
 	length: int = int(np.round(np.sqrt(data.shape[1])))
 	data = data.reshape((ticks, pes.NUM_ELM, 2, length, length))
 	result: npt.NDArray[np.cdouble] = np.empty((ticks, pes.NUM_ELM, length, length), np.cdouble)
-	for iPES in range(pes.NUM_PES):
-		for jPES in range(pes.NUM_PES):
-			result[:, iPES * pes.NUM_PES + jPES, :, :].real = data[:, iPES * pes.NUM_PES + jPES, 0, :, :]
-			result[:, iPES * pes.NUM_PES + jPES, :, :].imag = data[:, iPES * pes.NUM_PES + jPES, 1, :, :]
+	result.real = data[:, :, 0]
+	result.imag = data[:, :, 1]
 	return result
 
 
@@ -64,12 +62,6 @@ if __name__ == "__main__":
 	# 2 cases: evolve to these places
 	interpolators: list[tuple[scipy.interpolate.RegularGridInterpolator, scipy.interpolate.RegularGridInterpolator]] = [(scipy.interpolate.RegularGridInterpolator((x_grids, p_grids), data[0, iElement].real, 'cubic'), scipy.interpolate.RegularGridInterpolator((x_grids, p_grids), data[0, iElement].imag, 'cubic')) for iElement in range(pes.NUM_ELM)]
 
-	# def pred(x: np.double, p: np.double, i: int, j: int) -> np.cdouble:
-	# 	rho: npt.NDArray[np.double] = interpolator(np.array([x, p], dtype=np.double))[0]
-	# 	result: np.cdouble = rho[min(i, j) * pes.NUM_PES + max(i, j)]
-	# 	if i != j:
-	# 		result += 1.0j * rho[max(i, j) * pes.NUM_PES + min(i, j)]
-	# 	return result
 	def pred(r: npt.NDArray[np.double], i: int) -> npt.NDArray[np.cdouble]:
 		if i // pes.NUM_PES == i % pes.NUM_PES:
 			return interpolators[i][0](r).astype(np.cdouble)
@@ -94,9 +86,9 @@ if __name__ == "__main__":
 			for jPES in range(iPES + 1):
 				ElementIndex: int = iPES * pes.NUM_PES + jPES
 				all_density[ElementIndex] = evolve.evolve_density_non_adiabatically(
+					None,
 					all_pts[ElementIndex, :, :pes.DIM],
 					all_pts[ElementIndex, :, pes.DIM:],
-					None,
 					mass,
 					# evolve.is_coupling(
 					# 	all_pts[ElementIndex, :, :pes.DIM],
@@ -114,14 +106,6 @@ if __name__ == "__main__":
 					all_density[jPES * pes.NUM_PES + iPES] = np.conj(all_density[ElementIndex])
 		end_time = time.time()
 	print("Full evolution costs {} seconds".format(end_time - start_time))
-	# for point, density in zip(all_pts, all_density):
-	# 	for iPES in range(pes.NUM_PES):
-	# 		for jPES in range(iPES, pes.NUM_PES):
-	# 			z: np.cdouble = evolve.non_adiabatic_evolve_predict(point[0], point[1], None, pred, iPES, jPES)
-	# 			density[iPES * pes.NUM_PES + jPES] = np.real(z)
-	# 			if iPES != jPES:
-	# 				density[jPES * pes.NUM_PES + iPES] = np.imag(z)
-	# files for output
 	real_view: typing.Callable[[npt.NDArray[np.cdouble]], npt.NDArray[np.double]] = lambda arr: arr.view(np.double).reshape(arr.shape + (2,))
 	with open('density.txt', 'w') as den_f, open('points.txt', 'w') as pts_f:
 		np.savetxt(pts_f, exact_pts)

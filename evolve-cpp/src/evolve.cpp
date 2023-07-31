@@ -11,16 +11,12 @@
 #endif
 #define DEF_ATTR(NAME) m.attr(#NAME) = NAME
 
-#ifdef DEF_FUNC
-#	undef DEF_FUNC
-#endif
-#define DEF_FUNC(NAME) m.def(#NAME, &NAME)
-
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
 #include <execution>
 #include <functional>
+#include <limits>
 #include <numeric>
 #include <optional>
 #include <random>
@@ -249,7 +245,7 @@ std::complex<double> non_adiabatic_evolve_predict(
 	const double x0,
 	const double p0,
 	const std::optional<std::complex<double>> density,
-	const std::function<std::complex<double>(const double, const double, const std::size_t, const std::size_t)>& distribution,
+	const std::function<std::complex<double>(const xt::pyarray<double>&, const std::size_t, const std::size_t)>& distribution,
 	const std::size_t RowIndex,
 	const std::size_t ColIndex
 )
@@ -350,7 +346,7 @@ std::complex<double> non_adiabatic_evolve_predict(
 					}
 					else
 					{
-						result(TrigIndex, iOffDiagonalBranch) = distribution(r(0, iOffDiagonalBranch), r(1, iOffDiagonalBranch), iPES, jPES);
+						result(TrigIndex, iOffDiagonalBranch) = distribution(xt::pyarray<double>(xt::adapt(r.col(iOffDiagonalBranch).data(), xt::xshape<PHASEDIM>{})), iPES, jPES);
 					}
 				}
 			}
@@ -422,13 +418,14 @@ std::complex<double> non_adiabatic_evolve_predict(
 
 PYBIND11_MODULE(evolve, m)
 {
+	using namespace py::literals;
 	xt::import_numpy();
 
 	DEF_ATTR(NUM_PES);
 	DEF_ATTR(NUM_ELM);
 	DEF_ATTR(NUM_TRIG);
 	DEF_ATTR(PHASEDIM);
-	DEF_FUNC(non_adiabatic_evolve_predict);
+	m.def("non_adiabatic_evolve_predict", non_adiabatic_evolve_predict, "x0"_a, "p0"_a, "density"_a, "distribution"_a, "RowIndex"_a, "ColIndex"_a);
 }
 
 #undef DEF_ATTR

@@ -1,9 +1,14 @@
+"""
+evolve
+======
+
+This module provides the adiabatic and non-adiabatic evolution scheme.
+"""
 import pes
 
 import enum
 import numpy as np
 import numpy.typing as npt
-import time
 import typing
 
 
@@ -127,7 +132,7 @@ def evolve_coordinates_adiabatically(
 
 def get_points(condition: npt.NDArray[np.bool_], *args: npt.NDArray) -> tuple[npt.NDArray, ...]:
 	"""
-	_summary_
+	To get the quantities that satisfies given condition
 
 	Parameters
 	----------
@@ -145,25 +150,45 @@ def get_points(condition: npt.NDArray[np.bool_], *args: npt.NDArray) -> tuple[np
 	return tuple(x[condition_broadcast].reshape(-1, pes.DIM) for x in args)
 
 
-def calculate_omega0(
+def evolve_density_adiabatically(
+	density: npt.NDArray[np.cdouble],
 	x0: npt.NDArray[np.double],
 	x2: npt.NDArray[np.double],
 	drc: Direction,
+	dt: float,
 	RowIndex: int,
 	ColIndex: int
-) -> npt.NDArray[np.double]:
-	if RowIndex == ColIndex:
-		return np.zeros(np.broadcast_shapes(x0.shape[:-1], x2.shape[:-1]), np.double)
-	else:
+) -> None:
+	"""
+	To evolve the given density matrix element adiabatically
+
+	Parameters
+	----------
+	density : npt.NDArray[np.cdouble], shape of (...)
+		The density matrix elements to evolve adiabatically
+	x0 : npt.NDArray[np.double], shape of (..., DIM)
+		The initial positions
+	x2 : npt.NDArray[np.double], shape of (..., DIM)
+		The final positions
+	drc : Direction
+		The direction of evolution
+	dt : float
+		Time interval
+	RowIndex : int
+		Index of row of the element in density matrix
+	ColIndex : int
+		Index of column of the element in density matrix
+	"""
+	if RowIndex != ColIndex:
 		E0: npt.NDArray[np.double] = pes.adiabatic_potential(x0)
 		E2: npt.NDArray[np.double] = pes.adiabatic_potential(x2)
-		return drc.value * (E0[..., RowIndex] - E0[..., ColIndex] + E2[..., RowIndex] - E2[..., ColIndex]) / 2.0 / pes.HBAR
+		density *= np.exp(-drc.value * dt / 2.0 / pes.HBAR * 1.0j * (E0[..., RowIndex] - E0[..., ColIndex] + E2[..., RowIndex] - E2[..., ColIndex]))
 
 
 def evolve_density_non_adiabatically(
+	density: npt.NDArray[np.cdouble] | None,
 	x0: npt.NDArray[np.double],
 	p0: npt.NDArray[np.double],
-	density: npt.NDArray[np.cdouble] | None,
 	mass: npt.NDArray[np.double],
 	IsCouple: npt.NDArray[np.bool_],
 	dt: float,
@@ -212,16 +237,16 @@ def evolve_density_non_adiabatically(
 		case 2:
 			def offdiagonal_rotation(rho_part: npt.NDArray[np.cdouble], x_part: npt.NDArray[np.double], p_part: npt.NDArray[np.double], dt_offdiag: float) -> None:
 				"""
-				_summary_
+				To have a off-diagonal rotation on the given density matrices
 
 				Parameters
 				----------
 				rho_part : npt.NDArray[np.cdouble], shape of ((N(N+1)/2) * ...)
-					_description_
+					The density matrices
 				x_part : npt.NDArray[np.double], shape of (... * D)
-					_description_
+					The positions corresponding to the density matrices
 				p_part : npt.NDArray[np.double], shape of (... * D)
-					_description_
+					The momenta corresponding to the density matrices
 				dt : float
 					Time interval
 				"""
@@ -229,15 +254,12 @@ def evolve_density_non_adiabatically(
 				sinphi: npt.NDArray[np.double] = np.sin(2.0 * dt_offdiag * phi)
 				cosphi: npt.NDArray[np.double] = np.cos(2.0 * dt_offdiag * phi)
 				rho_save: npt.NDArray[np.cdouble] = np.copy(rho_part)
-				rho_part[0].real = (1.0 + cosphi) / 2.0 * rho_save[0].real - sinphi * rho_save[1].real + (1.0 - cosphi) / 2.0 * rho_save[2].real
-				rho_part[0].imag = 0.0
-				rho_part[1].real = sinphi / 2.0 * rho_save[0].real + cosphi * rho_save[1].real - sinphi / 2.0 * rho_save[2].real
-				rho_part[1].imag = rho_save[1].imag
-				rho_part[2].real = (1.0 - cosphi) / 2.0 * rho_save[0].real + sinphi * rho_save[1].real + (1.0 + cosphi) / 2.0 * rho_save[2].real
-				rho_part[2].imag = 0.0
-				# rho_part[0] = (1.0 + cosphi) / 2.0 * rho_save[0] - sinphi * rho_save[1].real + (1.0 - cosphi) / 2.0 * rho_save[2]
-				# rho_part[1] = sinphi / 2.0 * (rho_save[0] - rho_save[2]) + cosphi * rho_save[1].real + 1.0j * rho_save[1].imag
-				# rho_part[2] = (1.0 - cosphi) / 2.0 * rho_save[0] + sinphi * rho_save[1].real + (1.0 + cosphi) / 2.0 * rho_save[2]
+				rho_part.real[0] = (1.0 + cosphi) / 2.0 * rho_save[0].real - sinphi * rho_save[1].real + (1.0 - cosphi) / 2.0 * rho_save[2].real
+				rho_part.imag[0] = 0.0
+				rho_part.real[1] = sinphi / 2.0 * rho_save[0].real + cosphi * rho_save[1].real - sinphi / 2.0 * rho_save[2].real
+				rho_part.imag[1] = rho_save[1].imag
+				rho_part.real[2] = (1.0 - cosphi) / 2.0 * rho_save[0].real + sinphi * rho_save[1].real + (1.0 + cosphi) / 2.0 * rho_save[2].real
+				rho_part.imag[2] = 0.0
 			# first step: (x0, p0) -> (x2, p1)
 			x2: npt.NDArray[np.double] # ... * D
 			p1: npt.NDArray[np.double] # ... * D
@@ -256,17 +278,14 @@ def evolve_density_non_adiabatically(
 			for index, iElement in enumerate(pes.tril_element_indices):
 				branch_row_index: int = iElement // pes.NUM_PES
 				branch_col_index: int = iElement % pes.NUM_PES
-				start_time: float = time.time()
 				rho_predict[index] = predictor(np.concatenate((x4[index], p3[index]), -1), iElement)
 				# # assign the known density to it
 				if branch_row_index == RowIndex and branch_col_index == ColIndex and density is not None:
 					rho_predict[index, evolve_density_non_adiabatically.offdiagonal_zero_branch_index] = density
-				end_time = time.time()
-				print("\tPrediction costs {} seconds".format(end_time - start_time))
+				# first half-step adiabatic evolve. (x4, p3) -> (x2, p2) with an adiabatic rotation
+				evolve_density_adiabatically(rho_predict[index], x2, x4[index], Direction.Forward, dt / 2.0, branch_row_index, branch_col_index)
 			rho_combined_offdiag: npt.NDArray[np.cdouble] = np.zeros((pes.NUM_TRIG,) + rho_predict.shape[2:], np.cdouble) # (N(N+1)/2) * ...
 			for index, branch in enumerate(evolve_density_non_adiabatically.offdiagonal_branches):
-				# first half-step adiabatic evolve. (x4, p3) -> (x2, p2) with an adiabatic rotation
-				rho_predict[1, index] *= np.exp(dt / 2.0 * 1.0j * calculate_omega0(x2, x4[1, index], Direction.Forward, 0, 1))
 				# now they are at (x2, p2). A off-diagonal rotation is needed.
 				offdiagonal_rotation(rho_predict[:, index], x2, p2[index], dt / 2.0)
 				# then the off-diagonal force evolution combination with a rotation matrix, (x2, p2) -> (x2, p1)
@@ -276,36 +295,21 @@ def evolve_density_non_adiabatically(
 						rho_combined_offdiag.real += (rho_predict[0, index].real + 2.0 * rho_predict[1, index].real + rho_predict[2, index].real) / 4.0
 					case 0:
 						value = (rho_predict[0, index].real - rho_predict[2, index].real) / 2.0
-						rho_combined_offdiag[0].real += value
-						rho_combined_offdiag[1].imag += rho_predict[1, index].imag
-						rho_combined_offdiag[2].real -= value
+						rho_combined_offdiag.real[0] += value
+						rho_combined_offdiag.imag[1] += rho_predict[1, index].imag
+						rho_combined_offdiag.real[2] -= value
 					case 1:
 						value = (rho_predict[0, index].real - 2.0 * rho_predict[1, index].real + rho_predict[2, index].real) / 4.0
-						rho_combined_offdiag[0].real += value
-						rho_combined_offdiag[1].real -= value
-						rho_combined_offdiag[2].real += value
-				# value: npt.NDArray[np.cdouble]
-				# match branch:
-				# 	case -1:
-				# 		rho_combined_offdiag += (rho_predict[0, index] + 2.0 * rho_predict[1, index].real + rho_predict[2, index]) / 4.0
-				# 	case 0:
-				# 		value = (rho_predict[0, index] - rho_predict[2, index]) / 2.0
-				# 		rho_combined_offdiag[0] += value
-				# 		rho_combined_offdiag[1] += 1.0j * rho_predict[1, index].imag
-				# 		rho_combined_offdiag[2] -= value
-				# 	case 1:
-				# 		value = (rho_predict[0, index] - 2.0 * rho_predict[1, index].real + rho_predict[2, index]) / 4.0
-				# 		rho_combined_offdiag[0] += value
-				# 		rho_combined_offdiag[1] -= value
-				# 		rho_combined_offdiag[2] += value
+						rho_combined_offdiag.real[0] += value
+						rho_combined_offdiag.real[1] -= value
+						rho_combined_offdiag.real[2] += value
 					case _:
 						raise ValueError('Unexpected Off-Diagonal Branch!')
 			# the other off-diagonal rotation at (x2, p1)
 			offdiagonal_rotation(rho_combined_offdiag, x2, p1, dt / 2.0)
 			# another adiabatic step, (x2, p1) -> (x0, p0)
 			trig_index: int = np.argwhere(pes.tril_element_indices == RowIndex * pes.NUM_PES + ColIndex)[0, 0]
-			if RowIndex != ColIndex:
-				rho_combined_offdiag[trig_index] *= np.exp(dt / 2.0 * 1.0j * calculate_omega0(x0, x2, Direction.Forward, 0, 1))
+			evolve_density_adiabatically(rho_combined_offdiag[trig_index], x0, x2, Direction.Forward, dt / 2.0, RowIndex, ColIndex)
 			return rho_combined_offdiag[trig_index]
 		case _:
 			raise NotImplementedError('Model NOT Implemented!')
@@ -319,20 +323,20 @@ def evolve(
 	predictor: typing.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
 ) -> None:
 	"""
-	_summary_
+	To evolve the given points and density matrices
 
 	Parameters
 	----------
 	points : npt.NDArray[np.double], shape of (NUM_ELM, NUM_PTS, PHASEDIM)
-		_description_
+		Phase space coordinates of selected points for each density matrix element
 	densities : npt.NDArray[np.double], shape of (NUM_ELM, NUM_PTS)
-		_description_
+		Density matrix element of the points
 	mass : npt.NDArray[np.double], shape of (DIM,)
 		Mass of classical degree of freedom
 	dt : float
 		Time interval
 	predictor : typing.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
-		_description_
+		It predicts the density matrix element based on given coordinates and element index
 	"""
 	evolve.drc = Direction.Forward
 	# lower triangular loop, evolve coordinates and density
@@ -356,17 +360,17 @@ def evolve(
 			x2_uncouple: npt.NDArray[np.double] # M' * D
 			x4_uncouple: npt.NDArray[np.double] # M' * D
 			x0_uncouple, x2_uncouple, x4_uncouple = get_points(np.logical_not(IsCouplePerPoint), x0, x2, x4)
-			if iPES != jPES:
-				densities[ElementIndex] *= np.exp(-dt / 2.0 * 1.0j * (calculate_omega0(x0_uncouple, x2_uncouple, evolve.drc, iPES, jPES) + calculate_omega0(x2_uncouple, x4_uncouple, evolve.drc, iPES, jPES)))
+			evolve_density_adiabatically(densities[ElementIndex][np.logical_not(IsCouplePerPoint)], x0_uncouple, x2_uncouple, evolve.drc, dt / 2.0, iPES, jPES)
+			evolve_density_adiabatically(densities[ElementIndex][IsCouplePerPoint], x2_uncouple, x4_uncouple, evolve.drc, dt / 2.0, iPES, jPES)
 			# evolve non-adiabatic_points
 			x4_couple: npt.NDArray[np.double] # M'' * D
 			p2_couple: npt.NDArray[np.double] # M'' * D
 			is_couple_couple: npt.NDArray[np.bool_] # M'' * D
 			x4_couple, p2_couple, is_couple_couple = get_points(IsCouplePerPoint, x4, p2, IsCouple)
 			densities[ElementIndex][IsCouplePerPoint] = evolve_density_non_adiabatically(
+				densities[ElementIndex][IsCouplePerPoint],
 				x4_couple,
 				p2_couple,
-				densities[ElementIndex][IsCouplePerPoint],
 				mass,
 				is_couple_couple,
 				dt,

@@ -1,6 +1,6 @@
 """
 pes
-======
+===
 
 This module provides methods for the model, including adiabatic potential energy surfaces,
 corresponding Hellmann-Feynmann forces, and non-adiabatic coupling.
@@ -9,7 +9,6 @@ corresponding Hellmann-Feynmann forces, and non-adiabatic coupling.
 import enum
 import jax
 import jax.numpy as jnp
-import matplotlib.pyplot as plt
 import numpy as np
 import numpy.typing as npt
 import typing
@@ -115,7 +114,7 @@ def force(x: jax.Array) -> jax.Array:
 	This function is done by autograd from jax. An colwise jacobian is calculated to fulfill the goal.
 	"""
 	assert x.shape[-1] == DIM
-	return jnp.moveaxis(jax.vmap(jax.jacrev(potential), 0)(x.reshape(-1, DIM)), -1, -3).reshape(x.shape[:-1] + (DIM, NUM_PES, NUM_PES))
+	return -jnp.moveaxis(jax.vmap(jax.jacrev(potential), 0)(x.reshape(-1, DIM)), -1, -3).reshape(x.shape[:-1] + (DIM, NUM_PES, NUM_PES))
 
 
 def diabatic_potential(x: npt.NDArray[np.double]) -> npt.NDArray:

@@ -39,3 +39,5 @@ notes/
 !*.h*
 # ... except for gnu precompiled header
 *.h.gch
+# never ignore cmake file
+!CMakeLists.txt

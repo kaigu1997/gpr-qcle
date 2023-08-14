@@ -64,7 +64,7 @@ if __name__ == "__main__":
 
 	for point, density in zip(all_pts, all_density):
 		for iPES in range(evolve.NUM_PES):
-			for jPES in range(0, iPES + 1):
+			for jPES in range(iPES + 1):
 				z: np.cdouble = evolve.non_adiabatic_evolve_predict(point[0], point[1], None, pred, iPES, jPES)
 				density[iPES * evolve.NUM_PES + jPES] = z
 				if iPES != jPES:

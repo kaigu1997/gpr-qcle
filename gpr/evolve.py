@@ -4,12 +4,13 @@ evolve
 
 This module provides the adiabatic and non-adiabatic evolution scheme.
 """
-import pes
-
 import enum
+import typing
+
 import numpy as np
 import numpy.typing as npt
-import typing
+
+import pes
 
 
 class Direction(enum.IntEnum):

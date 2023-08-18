@@ -7,11 +7,12 @@ corresponding Hellmann-Feynmann forces, and non-adiabatic coupling.
 """
 
 import enum
+import typing
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 import numpy.typing as npt
-import typing
 
 jax.config.update('jax_enable_x64', True)
 

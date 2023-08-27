@@ -308,7 +308,7 @@ class SinglePredictor:
 		self.model.train()
 		likelihood.train()
 		self.model.load_state_dict(self.model_param)
-		# print_model(model)
+		# print_model(self.model)
 		finish_early: bool = False
 		optimizer: torch.optim.Optimizer = torch.optim.Rprop(self.model.parameters(), lr=1.0)
 		optimizer.zero_grad()
@@ -353,6 +353,7 @@ class SinglePredictor:
 					loss = self.loss_func(x, y, self.model, likelihood, self.x_all, self.y_all)
 					# print_stuff(loss, optimizer, self.model, True)
 					if last_loop_value == loss.item():
+						print('No stepping forward')
 						# no stepping forward, but still larger than last, meaning last is the best
 						self.model.load_state_dict(old_prm)
 						loss = self.loss_func(x, y, self.model, likelihood, self.x_all, self.y_all)
@@ -534,6 +535,7 @@ class GPRPredictors:
 		"""
 		for iElement in range(pes.NUM_ELM):
 			if check_predictor(self.predictors[iElement]):
+				print("Training " + get_RI_label(iElement // pes.NUM_PES, iElement % pes.NUM_PES))
 				self.predictors[iElement].train()
 
 	def predict(self, x_input: npt.NDArray[np.double], ElementIndex: int) -> npt.NDArray[np.cdouble]:

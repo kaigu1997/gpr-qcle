@@ -159,7 +159,7 @@ def sample_extra_points(all_points: npt.NDArray[np.double], num_points: int, pre
 			ElementIndex: int = iPES * pes.NUM_PES + jPES
 			var: npt.NDArray[np.double]
 			if predictors is not None:
-				var = VARIANCE_RATIO * np.maximum(predictors[ElementIndex].variance(), VARIANCE_RATIO * predictors[jPES * pes.NUM_PES + iPES].variance())
+				var = VARIANCE_RATIO * np.maximum(predictors[ElementIndex].variance(), predictors[jPES * pes.NUM_PES + iPES].variance())
 			else:
 				var = np.var(all_points[ElementIndex, :num_points], 0)
 			var = np.diag(var)

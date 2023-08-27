@@ -31,7 +31,35 @@ import pes
 import sample
 
 
-def read_input() -> npt.NDArray[np.cdouble]:
+def read_input() -> tuple[npt.NDArray[np.double], npt.NDArray[np.double], npt.NDArray[np.double], float, float]:
+	"""
+	To read input
+
+	Returns
+	-------
+	tuple[npt.NDArray[np.double], npt.NDArray[np.double], npt.NDArray[np.double], float, float]
+		mass, center, standard deviation, output interval and time step
+	"""
+	with open('input', 'r', encoding='UTF-8') as in_f:
+		lines: list[str] = in_f.readlines()
+		mass: npt.NDArray[np.double] = np.array(lines[3][:-1].split(' '), dtype=np.double)
+		assert pes.DIM % mass.size == 0
+		mass = np.tile(mass, pes.DIM // mass.size)
+		x0: npt.NDArray[np.double] = np.array(lines[5][:-1].split(' '), dtype=np.double)
+		assert pes.DIM % x0.size == 0
+		x0 = np.tile(x0, pes.DIM // x0.size)
+		p0: npt.NDArray[np.double] = np.array(lines[7][:-1].split(' '), dtype=np.double)
+		assert pes.DIM % p0.size == 0
+		p0 = np.tile(p0, pes.DIM // p0.size)
+		sigma_p0: npt.NDArray[np.double] = np.array(lines[9][:-1].split(' '), dtype=np.double)
+		assert pes.DIM % sigma_p0.size == 0
+		sigma_p0 = np.tile(sigma_p0, pes.DIM // sigma_p0.size)
+		output_time: float = float(lines[13])
+		dt: float = float(lines[15])
+		return mass, np.concatenate((x0, p0)), np.concatenate((pes.HBAR / 2.0 / sigma_p0, sigma_p0)), output_time, dt
+
+
+def read_data() -> npt.NDArray[np.cdouble]:
 	"""
 	To read input data
 
@@ -122,20 +150,23 @@ def main() -> None:
 	main.CMAP = 'seismic'
 	main.LOCATOR = matplotlib.ticker.MaxNLocator(nbins=21)
 	main.NORM = matplotlib.colors.CenteredNorm(0.0, main.LIMIT, True)
-	main.MASS = np.full(pes.DIM, 2000.0, np.double)
-	main.DT = 0.1
 	main.NUM_PTS = 200
 	main.NUM_XTR_RATIO = 50
-	main.OUTPUT_INTERVAL = 5.0
 	title: list[str] = ['Scattered ', '', 'Exact ', 'Difference of ']
 	NUM_PLOTS: int = len(title)
-	r0: npt.NDArray[np.double] = np.array([-8.0, 14.112], np.double)
-	sigma_r0: npt.NDArray[np.double] = np.array([10.0 / r0[1], r0[1] / 20.0], np.double)
+	mass: npt.NDArray[np.double]
+	r0: npt.NDArray[np.double]
+	sigma_r0: npt.NDArray[np.double]
+	output_interval: float
+	dt: float
+	mass, r0, sigma_r0, output_interval, dt = read_input()
+	output_steps: int = int(round(output_interval / dt))
+	print(mass, r0, sigma_r0, dt, output_steps)
 	# read input
-	data: npt.NDArray[np.cdouble] = read_input()
+	data: npt.NDArray[np.cdouble] = read_data()
 	total_ticks: int = data.shape[0]
 	n_grids: int = data.shape[-1]
-	x_grids: npt.NDArray[np.double] = np.linspace(-16.0, 16.0, n_grids, True, dtype=np.double)
+	x_grids: npt.NDArray[np.double] = 2.0 * np.abs(r0[0]) * np.linspace(-1.0, 1.0, n_grids, True, dtype=np.double)
 	dx: np.double = (x_grids[-1] - x_grids[0]) / (n_grids - 1)
 	p_grids: npt.NDArray[np.double] = r0[1] + np.pi / 2.0 / dx * np.linspace(-1.0, 1.0, n_grids, True, dtype=np.double)
 	xv: npt.NDArray[np.double]
@@ -166,12 +197,14 @@ def main() -> None:
 	err_f: io.TextIOWrapper
 	scl_f: io.TextIOWrapper
 	prm_f: io.TextIOWrapper
+	lss_f: io.TextIOWrapper
 	with open('points.txt', 'w', encoding='UTF-8') as pts_f,\
 		open('density.txt', 'w', encoding='UTF-8') as den_f,\
 		open('all_grids.txt', 'w', encoding='UTF-8') as all_f,\
 		open('error.txt', 'w', encoding='UTF-8') as err_f,\
 		open('scale.txt', 'w', encoding='UTF-8') as scl_f,\
-		open('parameters.txt', 'w', encoding='UTF-8') as prm_f:
+		open('parameters.txt', 'w', encoding='UTF-8') as prm_f,\
+		open('loss.txt', 'w', encoding='UTF-8') as lss_f:
 		def train_pred_draw(iTick: int) -> None:
 			"""
 			To train the parameter, doing prediction on all grids, and draw it
@@ -200,9 +233,11 @@ def main() -> None:
 						interpolator_im: scipy.interpolate.RegularGridInterpolator = scipy.interpolate.RegularGridInterpolator((x_grids, p_grids), data[iTick, ElementIndex].imag, 'cubic', False, 0.0)
 						y_all.imag[ElementIndex] = interpolator_im(all_pts[ElementIndex])
 						y_all[jPES * pes.NUM_PES + iPES] = np.conj(y_all[ElementIndex])
+			if iTick == 0:
+				all_density[...] = y_all
 			evolving_errors[iTick] = np.sum((real_part(y_all) - real_part(all_density)) ** 2, -1)
 			# fit
-			predictors.update(all_pts, y_all, main.NUM_PTS, scale)
+			predictors.update(all_pts, all_density, main.NUM_PTS, scale)
 			predictors.train()
 			# predict
 			pred: npt.NDArray[np.cdouble] = np.empty((pes.NUM_ELM, n_grids, n_grids), np.cdouble)
@@ -307,14 +342,17 @@ def main() -> None:
 				figure and axes
 			"""
 			# evolve
-			for _ in range(int(round(main.OUTPUT_INTERVAL / main.DT))):
+			for _ in range(output_steps):
 				predictors.print(prm_f)
 				print('\n', file=prm_f)
-				evolve.evolve(all_pts, all_density, main.MASS, main.DT, predictors.predict)
+				evolve.evolve(all_pts, all_density, mass, dt, predictors.predict)
 				scale: npt.NDArray[np.double] = get_scale(real_part(all_density))
 				np.savetxt(scl_f, scale)
 				print('\n', file=scl_f)
 				predictors.update(all_pts, all_density, main.NUM_PTS, scale)
+				for i in range(pes.NUM_ELM):
+					print(predictors[i].error(), file=lss_f)
+				print('\n', file=lss_f)
 				element_currently_populated: npt.NDArray[np.bool_] = np.any(all_density != 0.0, -1)
 				if np.any(element_populated != element_currently_populated):
 					predictors.train()
@@ -329,10 +367,12 @@ def main() -> None:
 					all_density[ElementIndex, main.NUM_PTS:] = predictors.predict(all_pts[ElementIndex, main.NUM_PTS:], ElementIndex)
 					if iPES != jPES:
 						all_density[jPES * pes.NUM_PES + iPES, main.NUM_PTS:] = np.conj(all_density[ElementIndex, main.NUM_PTS:])
+			predictors.update(all_pts, all_density, main.NUM_PTS, get_scale(real_part(all_density)))
 			return fig, axs
 
-	# draw animation
-	matplotlib.animation.FuncAnimation(fig, draw, range(1, total_ticks), init).save('gpr.gif', 'imagemagick')
+		# draw animation
+		matplotlib.animation.FuncAnimation(fig, draw, range(1, total_ticks), init).save('gpr.gif', 'imagemagick')
+
 	# then plot errors
 	plt.close(fig)
 	fig, axs = plt.subplots(1, 3, figsize=(main.FIGSIZE[0] * 3, main.FIGSIZE[1]))

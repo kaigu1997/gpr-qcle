@@ -93,76 +93,6 @@ class GP(gpytorch.models.ExactGP):
 		return gpytorch.distributions.MultivariateNormal(Mean, self.cov(x))
 
 
-def sr_pred(
-	model: GP,
-	likelihood: gpytorch.likelihoods.GaussianLikelihood,
-	x: torch.Tensor,
-	x_all: torch.Tensor,
-	y_all: torch.Tensor,
-	x_test: torch.Tensor
-) -> torch.Tensor:
-	"""
-	Instance of prediction of subset of regressor (SR) / projected process (PP)
-
-	Parameters
-	----------
-	model : GP
-		Gaussian process model, including mean and covariance information
-	likelihood : gpytorch.likelihoods.GaussianLikelihood
-		Likelihood, containing noise information
-	x : torch.Tensor
-		Training inputs of the selected subset
-	x_all : torch.Tensor
-		All training inputs
-	y_all : torch.Tensor
-		All training targets
-	x_test : torch.Tensor
-		Validation/Test inputs
-
-	Returns
-	-------
-	torch.Tensor
-		Corresponding validation/test targets based on noise-free SR/PP mean.
-	"""
-	return (model.cov(x_test, x) @ (linear_operator.utils.stable_pinverse(model.cov(x_all, x).to_dense()) @ y_all)).to_dense()
-
-
-def sr_se(
-	x: torch.Tensor,
-	y: torch.Tensor,
-	model: GP,
-	likelihood: gpytorch.likelihoods.GaussianLikelihood,
-	x_all: torch.Tensor,
-	y_all: torch.Tensor
-) -> torch.Tensor:
-	"""
-	Error function of subset of regressor (SR) / projected process (PP)
-
-	This function gives the sum of squared error
-
-	Parameters
-	----------
-	x : torch.Tensor
-		Training inputs of the selected subset
-	y : torch.Tensor
-		Training targets of the selected subset
-	model : GP
-		Gaussian process model, including mean and covariance information
-	likelihood : gpytorch.likelihoods.GaussianLikelihood
-		Likelihood, containing noise information
-	x_all : torch.Tensor
-		All training inputs
-	y_all : torch.Tensor
-		All training targets
-
-	Returns
-	-------
-	torch.Tensor, shape of (1,)
-		Sum of squared error, remaining in tensor form for autograd
-	"""
-	return ((y_all - sr_pred(model, likelihood, x, x_all, y_all, x_all)) ** 2).sum()
-
-
 class SinglePredictor:
 	"""
 	The instantiation of gaussian process predictor
@@ -171,10 +101,6 @@ class SinglePredictor:
 	----------
 	kernel : gpytorch.kernels.Kernel
 		The kernel to use
-	loss_func : typing.Callable[[torch.Tensor, torch.Tensor, GP, gpytorch.likelihoods.GaussianLikelihood, torch.Tensor, torch.Tensor], torch.Tensor], optional
-		The loss function for optimization, by default sr_se
-	predictor : typing.Callable[[GP, gpytorch.likelihoods.GaussianLikelihood, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor] | None, optional
-		The way to do prediction, by default sr_pred
 
 	Attributes
 	----------
@@ -189,10 +115,18 @@ class SinglePredictor:
 
 	Methods
 	-------
+	get_training_features()
+		To get the training features of the core subset
+	update_weights()
+		To update the weights, :math:`K^{-1}y`
+	get_weights()
+		To get the weights, :math:`K^{-1}y`
+	predict(x_test)
+		To predict the average
+	error()
+		To get the error by comparing label with prediction
 	train()
 		To train the parameters
-	error()
-		To get the error from the loss function
 	variance()
 		To get the variance of the predictor
 	"""
@@ -201,26 +135,114 @@ class SinglePredictor:
 	GTOL: float = 1e-5
 	NOISE: float = 1e-4
 
-	def __init__(
-		self,
-		kernel: gpytorch.kernels.Kernel,
-		loss_func: typing.Callable[[torch.Tensor, torch.Tensor, GP, gpytorch.likelihoods.GaussianLikelihood, torch.Tensor, torch.Tensor], torch.Tensor] = sr_se,
-		predictor: typing.Callable[[GP, gpytorch.likelihoods.GaussianLikelihood, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor] | None = sr_pred
-	):
+	def __init__(self, kernel: gpytorch.kernels.Kernel):
 		self.kernel: gpytorch.kernels.Kernel = copy.deepcopy(kernel)
-		self.loss_func: typing.Callable = loss_func
-		self.predictor: typing.Callable | None = predictor
 		likelihood: gpytorch.likelihoods.FixedNoiseGaussianLikelihood = gpytorch.likelihoods.FixedNoiseGaussianLikelihood(torch.full((2,), SinglePredictor.NOISE))
 		self.x_all: torch.Tensor = torch.Tensor()
 		self.y_all: torch.Tensor = torch.Tensor()
 		self.model: GP = GP(torch.zeros((2, pes.PHASEDIM)), torch.zeros((2,)), likelihood, self.kernel)
 		self.model_param: dict[str, torch.Tensor] = copy.deepcopy(self.model.state_dict())
+		self.k_inv_y: torch.Tensor = torch.Tensor()
+		self.weights_updated: bool = False
+
+	def get_training_features(self) -> torch.Tensor:
+		"""
+		To get the training features of the core subset
+
+		Returns
+		-------
+		torch.Tensor
+			The training features
+		"""
+		assert self.model.train_inputs is not None
+		return self.model.train_inputs[0].detach()
+
+	def update_weights(self) -> None:
+		"""
+		To update the weights, :math:`K^{-1}y`
+		"""
+		self.k_inv_y = (linear_operator.utils.stable_pinverse(self.model.cov(self.x_all, self.get_training_features()).to_dense()) @ self.y_all).to_dense()
+		self.weights_updated = True
+
+	def get_weights(self) -> torch.Tensor:
+		"""
+		To get the weights, :math:`K^{-1}y`
+
+		Returns
+		-------
+		torch.Tensor
+			Weights, :math:`K^{-1}y`
+		"""
+		if not self.weights_updated:
+			self.update_weights()
+		return self.k_inv_y
+
+	def predict(self, x_test: torch.Tensor) -> torch.Tensor:
+		"""
+		Instance of prediction of subset of regressor (SR) / projected process (PP)
+
+		Parameters
+		----------
+		x_test : torch.Tensor, shape of (N, PHASEDIM)
+			Validation/Test inputs
+
+		Returns
+		-------
+		torch.Tensor, shape of (N,)
+			Corresponding validation/test targets based on noise-free SR/PP mean.
+		"""
+		if not self.weights_updated:
+			self.update_weights()
+		return (self.model.cov(x_test, self.get_training_features()) @ self.k_inv_y).to_dense()
+
+	# def derivative(self, x_test: torch.Tensor) -> torch.Tensor:
+	# 	"""
+	# 	To calculate the derivative of prediction over coordinates
+
+	# 	Parameters
+	# 	----------
+	# 	x_test : torch.Tensor, shape of (N, PHASEDIM)
+	# 		Validation/Test inputs
+
+	# 	Returns
+	# 	-------
+	# 	torch.Tensor, shape of (N, PHASEDIM)
+	# 		Corresponding gradient of prediction at input coordinates based on noise-free SR/PP mean.
+	# 	"""
+	# 	for param in self.model.parameters():
+	# 		param.requires_grad = False
+	# 		param.grad = None
+	# 	x_test.requires_grad = True
+	# 	x_test.grad = None
+	# 	pred: torch.Tensor = self.predict(x_test)
+	# 	pred.backward(torch.ones_like(pred))
+	# 	assert x_test.grad is not None
+	# 	x_test.requires_grad = False
+	# 	for param in self.model.parameters():
+	# 		param.requires_grad = True
+	# 	return x_test.grad
+
+	def error(self, use_weight: bool = True) -> torch.Tensor:
+		"""
+		Error function of subset of regressor (SR) / projected process (PP)
+
+		This function gives the sum of squared error
+
+		Returns
+		-------
+		torch.Tensor
+			The sum of squared prediction error
+		"""
+		if use_weight:
+			return torch.sum((self.y_all - self.predict(self.x_all)) ** 2)
+		else:
+			kmn: torch.Tensor = self.model.cov(self.x_all, self.get_training_features()).to_dense()
+			return torch.sum((self.y_all - (kmn @ (linear_operator.utils.stable_pinverse(kmn) @ self.y_all)).to_dense()) ** 2)
 
 	def train(self) -> None:
 		"""
 		To train the parameters
 		"""
-
 		def print_model(model: gpytorch.models.ExactGP, print_grad: bool = False) -> None:
 			"""
 			To print the parameters of the model
@@ -299,20 +321,18 @@ class SinglePredictor:
 			print_model(model, print_grad)
 			print('\n')
 
-		assert self.model.train_inputs is not None and isinstance(self.model.train_targets, torch.Tensor)
-		x: torch.Tensor = self.model.train_inputs[0]
-		y: torch.Tensor = self.model.train_targets
+		self.weights_updated = False
+		assert isinstance(self.model.train_targets, torch.Tensor)
 		# train model
-		likelihood: gpytorch.likelihoods.FixedNoiseGaussianLikelihood = gpytorch.likelihoods.FixedNoiseGaussianLikelihood(torch.full((x.shape[0],), SinglePredictor.NOISE))
-		self.model.likelihood = likelihood
+		self.model.likelihood = gpytorch.likelihoods.FixedNoiseGaussianLikelihood(torch.full((self.get_training_features().shape[0],), SinglePredictor.NOISE))
 		self.model.train()
-		likelihood.train()
+		self.model.likelihood.train()
 		self.model.load_state_dict(self.model_param)
 		# print_model(self.model)
 		finish_early: bool = False
 		optimizer: torch.optim.Optimizer = torch.optim.Rprop(self.model.parameters(), lr=1.0)
 		optimizer.zero_grad()
-		loss: torch.Tensor = self.loss_func(x, y, self.model, likelihood, self.x_all, self.y_all)
+		loss: torch.Tensor = self.error(False)
 		loss.backward()
 		last_value: float = loss.item()
 		print_stuff(loss, optimizer, self.model, True, "\n\nInit")
@@ -320,7 +340,7 @@ class SinglePredictor:
 			# adjust lr
 			old_prm: dict[str, torch.Tensor] = copy.deepcopy(self.model.state_dict())
 			optimizer.step()
-			loss = self.loss_func(x, y, self.model, likelihood, self.x_all, self.y_all)
+			loss = self.error(False)
 			# print_stuff(loss, optimizer, self.model, True)
 			if loss < last_value:
 				optimizer = optimizer.__class__(self.model.parameters(), lr=get_lr(optimizer) * 2.0)
@@ -331,7 +351,7 @@ class SinglePredictor:
 				# 	self.model.load_state_dict(old_prm)
 				# 	optimizer = optimizer.__class__(self.model.parameters(), lr=get_lr(optimizer) * 2.0)
 				# 	optimizer.step()
-				# 	loss = self.loss_func(x, y, self.model, likelihood, self.x_all, self.y_all)
+				# 	loss = self.error(False)
 				# 	# print_stuff(loss, optimizer, self.model, True)
 				# 	if loss >= last_value:
 				# 		# goes back, not only loss but also last value, for stop criteria judgment
@@ -341,7 +361,7 @@ class SinglePredictor:
 				# self.model.load_state_dict(old_prm)
 				# optimizer = optimizer.__class__(self.model.parameters(), lr=get_lr(optimizer) * 2.0)
 				# optimizer.step()
-				# loss = self.loss_func(x, y, self.model, likelihood, self.x_all, self.y_all)
+				# loss = self.error(False)
 				# print_stuff(loss, optimizer, self.model, True)
 			else:
 				# print('loss > last_value')
@@ -350,13 +370,13 @@ class SinglePredictor:
 					self.model.load_state_dict(old_prm)
 					optimizer = optimizer.__class__(self.model.parameters(), lr=get_lr(optimizer) / 2.0)
 					optimizer.step()
-					loss = self.loss_func(x, y, self.model, likelihood, self.x_all, self.y_all)
+					loss = self.error(False)
 					# print_stuff(loss, optimizer, self.model, True)
 					if last_loop_value == loss.item():
 						print('No stepping forward')
 						# no stepping forward, but still larger than last, meaning last is the best
 						self.model.load_state_dict(old_prm)
-						loss = self.loss_func(x, y, self.model, likelihood, self.x_all, self.y_all)
+						loss = self.error(False)
 						break
 			if i % (SinglePredictor.MAX_ITER // 100) == 0:
 				print('\n')
@@ -384,22 +404,8 @@ class SinglePredictor:
 			print('Iter {} - Loss: {:.15e} - lr: {}'.format(SinglePredictor.MAX_ITER, last_value, [param['lr'] for param in optimizer.param_groups]))
 			print("Stop: Total No. iterations reached limit.")
 		print_model(self.model)
-		print('\n')
+		print('\n', flush=True)
 		self.model_param = copy.deepcopy(self.model.state_dict())
-
-	def error(self) -> float:
-		"""
-		To calculate the error from the loss function
-
-		Returns
-		-------
-		float
-			The error
-		"""
-		assert self.model.train_inputs is not None and isinstance(self.model.train_targets, torch.Tensor)
-		x: torch.Tensor = self.model.train_inputs[0]
-		y: torch.Tensor = self.model.train_targets
-		return self.loss_func(x, y, self.model, gpytorch.likelihoods.FixedNoiseGaussianLikelihood(torch.full((x.shape[0],), SinglePredictor.NOISE)), self.x_all, self.y_all).item()
 
 	def variance(self) -> npt.NDArray[np.double]:
 		"""
@@ -462,10 +468,6 @@ class GPRPredictors:
 	----------
 	kernel : gpytorch.kernels.Kernel, optional
 		The kernel of predictors, by default gpytorch.kernels.RBFKernel(pes.PHASEDIM)
-	loss_func : typing.Callable[[torch.Tensor, torch.Tensor, GP, gpytorch.likelihoods.GaussianLikelihood, torch.Tensor, torch.Tensor], torch.Tensor], optional
-		The loss function for optimization of predictors, by default sr_se
-	predictor : typing.Callable[[GP, gpytorch.likelihoods.GaussianLikelihood, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor] | None, optional
-		The way to do prediction, by default sr_pred
 
 	Methods
 	-------
@@ -478,13 +480,8 @@ class GPRPredictors:
 	print(f)
 		To print hyperparameters to file
 	"""
-	def __init__(
-		self,
-		kernel: gpytorch.kernels.Kernel = gpytorch.kernels.RBFKernel(pes.PHASEDIM),
-		loss_func: typing.Callable[[torch.Tensor, torch.Tensor, GP, gpytorch.likelihoods.GaussianLikelihood, torch.Tensor, torch.Tensor], torch.Tensor] = sr_se,
-		predictor: typing.Callable[[GP, gpytorch.likelihoods.GaussianLikelihood, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor] | None = sr_pred
-	):
-		self.predictors: npt.NDArray[np.object_] = np.array([SinglePredictor(kernel, loss_func, predictor) for i in range(pes.NUM_ELM)], np.object_)
+	def __init__(self, kernel: gpytorch.kernels.Kernel = gpytorch.kernels.RBFKernel(pes.PHASEDIM)):
+		self.predictors: npt.NDArray[np.object_] = np.array([SinglePredictor(kernel) for i in range(pes.NUM_ELM)], np.object_)
 		self.scale: npt.NDArray[np.double] = np.ones(pes.NUM_ELM, np.double)
 
 	def __getitem__(self, ElementIndex: int) -> SinglePredictor:
@@ -520,14 +517,17 @@ class GPRPredictors:
 			The rescale factor
 		"""
 		self.scale[...] = scale
-		for iElement in range(pes.NUM_ELM):
-			self.predictors[iElement].x_all = copy.deepcopy(torch.from_numpy(x_all[iElement]))
+		iElement: int
+		pred: SinglePredictor
+		for iElement, pred in enumerate(self.predictors):
+			pred.x_all = copy.deepcopy(torch.from_numpy(x_all[iElement]).detach())
 			if iElement // pes.NUM_PES <= iElement % pes.NUM_PES:
-				self.predictors[iElement].y_all = copy.deepcopy(torch.from_numpy(y_all[iElement].real))
+				pred.y_all = copy.deepcopy(torch.from_numpy(y_all[iElement].real).detach())
 			else:
-				self.predictors[iElement].y_all = copy.deepcopy(torch.from_numpy(y_all[iElement].imag))
-			self.predictors[iElement].y_all *= self.scale[iElement]
-			self.predictors[iElement].model.set_train_data(self.predictors[iElement].x_all[:num_pts], self.predictors[iElement].y_all[:num_pts], False)
+				pred.y_all = copy.deepcopy(torch.from_numpy(y_all[iElement].imag).detach())
+			pred.y_all *= self.scale[iElement]
+			pred.model.set_train_data(pred.x_all[:num_pts].detach(), pred.y_all[:num_pts].detach(), False)
+			pred.weights_updated = False
 
 	def train(self) -> None:
 		"""
@@ -538,20 +538,28 @@ class GPRPredictors:
 				print("Training " + get_RI_label(iElement // pes.NUM_PES, iElement % pes.NUM_PES))
 				self.predictors[iElement].train()
 
+	def update_weights(self) -> None:
+		"""
+		To update weights of each predictor
+		"""
+		pred: SinglePredictor
+		for pred in self.predictors:
+			pred.update_weights()
+
 	def predict(self, x_input: npt.NDArray[np.double], ElementIndex: int) -> npt.NDArray[np.cdouble]:
 		"""
 		To predict test targets based on input and corresponding density matrix element
 
 		Parameters
 		----------
-		x_input : npt.NDArray[np.double]
+		x_input : npt.NDArray[np.double], shape of (..., PHASEDIM)
 			Test inputs
 		ElementIndex : int
 			Index of the element
 
 		Returns
 		-------
-		npt.NDArray[np.cdouble]
+		npt.NDArray[np.cdouble], shape of (...)
 			Density of the element of all test inputs
 		"""
 		x_test: torch.Tensor = torch.from_numpy(x_input.reshape(-1, pes.PHASEDIM))
@@ -562,24 +570,16 @@ class GPRPredictors:
 
 			Parameters
 			----------
-			pred : SinglePredictor
+			pred : SinglePredictor, shape of (N, PHASEDIM)
 				The predictor
 
 			Returns
 			-------
-			npt.NDArray[np.double]
+			npt.NDArray[np.double], shape of (N,)
 				Test targets by the predictor
 			"""
 			if check_predictor(pred):
-				assert pred.model.train_inputs is not None and isinstance(pred.model.train_inputs[0], torch.Tensor)
-				likelihood: gpytorch.likelihoods.FixedNoiseGaussianLikelihood = gpytorch.likelihoods.FixedNoiseGaussianLikelihood(torch.full((pred.model.train_inputs[0].shape[0],), SinglePredictor.NOISE))
-				# predict
-				pred.model.eval()
-				likelihood.eval()
-				if pred.predictor is None:
-					return likelihood(pred.model(x_test), noise=torch.full((x_test.shape[0],), SinglePredictor.NOISE)).mean.detach().numpy()
-				else:
-					return pred.predictor(pred.model, likelihood, pred.model.train_inputs[0], pred.x_all, pred.y_all, x_test).detach().numpy()
+				return pred.predict(x_test).detach().numpy()
 			else:
 				return np.zeros(x_test.shape[0], np.double)
 
@@ -588,6 +588,7 @@ class GPRPredictors:
 		result: npt.NDArray[np.cdouble] = np.empty(x_test.shape[0], np.cdouble)
 		if RowIndex == ColIndex:
 			result.real = call_single_predictor(self.predictors[ElementIndex]) / get_scale(self.scale[ElementIndex])
+			result.imag = 0
 		elif RowIndex > ColIndex:
 			result.real = call_single_predictor(self.predictors[ColIndex * pes.NUM_PES + RowIndex]) / get_scale(self.scale[ColIndex * pes.NUM_PES + RowIndex])
 			result.imag = call_single_predictor(self.predictors[ElementIndex]) / get_scale(self.scale[ElementIndex])
@@ -595,6 +596,95 @@ class GPRPredictors:
 			result.real = call_single_predictor(self.predictors[ElementIndex]) / get_scale(self.scale[ElementIndex])
 			result.imag = -call_single_predictor(self.predictors[ColIndex * pes.NUM_PES + RowIndex]) / get_scale(self.scale[ColIndex * pes.NUM_PES + RowIndex])
 		return result.reshape(x_input.shape[:-1])
+
+	def predict_full(self, x_input: npt.NDArray[np.double]) -> npt.NDArray[np.cdouble]:
+		"""
+		To predict test targets based on input and corresponding density matrix element
+
+		Parameters
+		----------
+		x_input : npt.NDArray[np.double], shape of (..., PHASEDIM)
+			Test inputs
+
+		Returns
+		-------
+		npt.NDArray[np.cdouble], shape of (..., NUM_PES, NUM_PES)
+			Density matrix of all element of all test inputs
+		"""
+		result: npt.NDArray[np.cdouble] = np.empty(x_input.shape[:-1] + (pes.NUM_PES, pes.NUM_PES), np.cdouble)
+		for iElement in range(pes.NUM_ELM):
+			result[..., iElement // pes.NUM_PES, iElement % pes.NUM_PES] = self.predict(x_input, iElement)
+		return result
+
+	# def derivative(self, x_input: npt.NDArray[np.double], ElementIndex: int) -> npt.NDArray[np.cdouble]:
+	# 	"""
+	# 	To predict test target derivatives based on input and corresponding density matrix element
+
+	# 	Parameters
+	# 	----------
+	# 	x_input : npt.NDArray[np.double], shape of (..., PHASEDIM)
+	# 		Test inputs
+	# 	ElementIndex : int
+	# 		Index of the element
+
+	# 	Returns
+	# 	-------
+	# 	npt.NDArray[np.cdouble], shape of (..., PHASEDIM)
+	# 		Derivatives of the element of all test inputs
+	# 	"""
+	# 	x_test: torch.Tensor = torch.from_numpy(x_input.reshape(-1, pes.PHASEDIM))
+
+	# 	def call_single_predictor(pred: SinglePredictor) -> npt.NDArray[np.double]:
+	# 		"""
+	# 		To do prediction of a single predictor
+
+	# 		Parameters
+	# 		----------
+	# 		pred : SinglePredictor
+	# 			The predictor
+
+	# 		Returns
+	# 		-------
+	# 		npt.NDArray[np.double], shape of (..., PHASEDIM)
+	# 			Derivatives by the predictor
+	# 		"""
+	# 		if check_predictor(pred):
+	# 			assert pred.model.train_inputs is not None and isinstance(pred.model.train_inputs[0], torch.Tensor)
+	# 			return pred.derivative(x_test).detach().numpy()
+	# 		else:
+	# 			return np.zeros(x_test.shape, np.double)
+
+	# 	RowIndex: int = ElementIndex // pes.NUM_PES
+	# 	ColIndex: int = ElementIndex % pes.NUM_PES
+	# 	result: npt.NDArray[np.cdouble] = np.empty(x_test.shape, np.cdouble)
+	# 	if RowIndex == ColIndex:
+	# 		result.real = call_single_predictor(self.predictors[ElementIndex]) / get_scale(self.scale[ElementIndex])
+	# 	elif RowIndex > ColIndex:
+	# 		result.real = call_single_predictor(self.predictors[ColIndex * pes.NUM_PES + RowIndex]) / get_scale(self.scale[ColIndex * pes.NUM_PES + RowIndex])
+	# 		result.imag = call_single_predictor(self.predictors[ElementIndex]) / get_scale(self.scale[ElementIndex])
+	# 	else: # RowIndex < ColIndex
+	# 		result.real = call_single_predictor(self.predictors[ElementIndex]) / get_scale(self.scale[ElementIndex])
+	# 		result.imag = -call_single_predictor(self.predictors[ColIndex * pes.NUM_PES + RowIndex]) / get_scale(self.scale[ColIndex * pes.NUM_PES + RowIndex])
+	# 	return result.reshape(x_input.shape)
+
+	# def derivative_full(self, x_input: npt.NDArray[np.double]) -> npt.NDArray[np.cdouble]:
+	# 	"""
+	# 	To predict test target derivatives based on input and corresponding density matrix element
+
+	# 	Parameters
+	# 	----------
+	# 	x_input : npt.NDArray[np.double], shape of (..., PHASEDIM)
+	# 		Test inputs
+
+	# 	Returns
+	# 	-------
+	# 	npt.NDArray[np.cdouble], shape of (..., PHASEDIM, NUM_PES, NUM_PES)
+	# 		Density matrix derivatives of all element of all test inputs
+	# 	"""
+	# 	result: npt.NDArray[np.cdouble] = np.empty(x_input.shape + (pes.NUM_PES, pes.NUM_PES), np.cdouble)
+	# 	for iElement in range(pes.NUM_ELM):
+	# 		result[..., iElement // pes.NUM_PES, iElement % pes.NUM_PES] = self.derivative(x_input, iElement)
+	# 	return result
 
 	def print(self, f: io.TextIOWrapper) -> None:
 		"""

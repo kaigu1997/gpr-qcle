@@ -46,6 +46,7 @@ tril_element_indices: npt.NDArray[np.int_] = np.arange(NUM_ELM).reshape(NUM_PES,
 DIM: typing.Literal[1] = 1
 PHASEDIM: typing.Literal[2] = 2
 HBAR: float = 1.0
+PURITY_FACTOR: float = (2.0 * np.pi * HBAR) ** DIM
 
 
 def potential(x: jax.Array) -> jax.Array:
@@ -171,7 +172,7 @@ def adiabatic_potential(x: npt.NDArray[np.double]) -> npt.NDArray[np.double]:
 
 	Returns
 	-------
-	npt.NDArray[np.double], shape of (..., UM_PES)
+	npt.NDArray[np.double], shape of (..., NUM_PES)
 		Diagonal elements of adiabatic potential at give positions
 
 	Raises

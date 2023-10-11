@@ -26,6 +26,7 @@ import numpy.typing as npt
 import scipy.interpolate
 
 import evolve
+import expectation
 import gp
 import pes
 import sample
@@ -68,7 +69,7 @@ def read_data() -> npt.NDArray[np.cdouble]:
 	npt.NDArray[np.cdouble]
 		Input data
 	"""
-	data: npt.NDArray[np.double] = np.loadtxt('pwtdm.txt')
+	data: npt.NDArray[np.double] = np.loadtxt('pwtdm.txt', np.double)
 	ticks: int = data.shape[0] // (pes.NUM_ELM * 2)
 	length: int = int(np.round(np.sqrt(data.shape[1])))
 	data = data.reshape((ticks, pes.NUM_ELM, 2, length, length))
@@ -150,7 +151,7 @@ def main() -> None:
 	main.CMAP = 'seismic'
 	main.LOCATOR = matplotlib.ticker.MaxNLocator(nbins=21)
 	main.NORM = matplotlib.colors.CenteredNorm(0.0, main.LIMIT, True)
-	main.NUM_PTS = 200
+	main.NUM_PTS = 256
 	main.NUM_XTR_RATIO = 50
 	title: list[str] = ['Scattered ', '', 'Exact ', 'Difference of ']
 	NUM_PLOTS: int = len(title)
@@ -161,7 +162,7 @@ def main() -> None:
 	dt: float
 	mass, r0, sigma_r0, output_interval, dt = read_input()
 	output_steps: int = int(round(output_interval / dt))
-	print(mass, r0, sigma_r0, dt, output_steps)
+	print("Mass = {}\nInitial center = {}\nInitial deviation = {}\nTime step = {}\nSteps between output = {}\n".format(mass, r0, sigma_r0, dt, output_steps))
 	# read input
 	data: npt.NDArray[np.cdouble] = read_data()
 	total_ticks: int = data.shape[0]
@@ -184,12 +185,23 @@ def main() -> None:
 	axs: np.ndarray[collections.abc.Sequence[collections.abc.Sequence[matplotlib.axes.Axes]], np.dtype[np.object_]]
 	fig, axs = plt.subplots(NUM_PLOTS, pes.NUM_PES ** 2, figsize=(main.FIGSIZE[0] * (pes.NUM_PES ** 2), main.FIGSIZE[1] * NUM_PLOTS))
 	# sampling. Initial sample from gaussian directly
-	all_pts: npt.NDArray[np.double] = np.tile(sample.init_sample(main.NUM_PTS, r0, sigma_r0), (1 + main.NUM_XTR_RATIO, 1))
-	sample.sample_extra_points(all_pts, main.NUM_PTS)
+	all_pts: npt.NDArray[np.double] = np.tile(sample.normal_sample(main.NUM_PTS, r0, sigma_r0)[np.newaxis], (pes.NUM_ELM, 1 + main.NUM_XTR_RATIO, 1))
+	sample.sample_extra_points(main.NUM_PTS, all_pts)
+	sample.sample_central_points(main.NUM_PTS, all_pts)
+	sample.sample_extra_points(main.NUM_PTS, all_pts)
 	all_density: npt.NDArray[np.cdouble] = np.zeros(all_pts.shape[:-1], np.cdouble)
-	all_density.real[0] = np.exp(-np.sum(np.square((all_pts[0] - r0) / sigma_r0), axis=-1) / 2.0) / (2.0 * np.pi * np.prod(sigma_r0))
-	element_populated: npt.NDArray[np.bool_] = np.zeros(pes.NUM_ELM, np.bool_)
-	element_populated[0] = True
+	for iPES in range(pes.NUM_PES):
+		for jPES in range(iPES + 1):
+			ElementIndex: int = iPES * pes.NUM_PES + jPES
+			interpolator_re: scipy.interpolate.RegularGridInterpolator = scipy.interpolate.RegularGridInterpolator((x_grids, p_grids), data[0, ElementIndex].real, 'cubic', False, 0.0)
+			all_density.real[ElementIndex] = interpolator_re(all_pts[ElementIndex])
+			if iPES != jPES:
+				interpolator_im: scipy.interpolate.RegularGridInterpolator = scipy.interpolate.RegularGridInterpolator((x_grids, p_grids), data[0, ElementIndex].imag, 'cubic', False, 0.0)
+				all_density.imag[ElementIndex] = interpolator_im(all_pts[ElementIndex])
+				all_density[jPES * pes.NUM_PES + iPES] = np.conj(all_density[ElementIndex])
+	# average evaluators
+	mca: expectation.MonteCarloAverage = expectation.MonteCarloAverage(1_000_000)
+	aia: expectation.AnalyticalAverager = expectation.AnalyticalAverager(predictors)
 	# files for output
 	pts_f: io.TextIOWrapper
 	den_f: io.TextIOWrapper
@@ -204,7 +216,8 @@ def main() -> None:
 		open('error.txt', 'w', encoding='UTF-8') as err_f,\
 		open('scale.txt', 'w', encoding='UTF-8') as scl_f,\
 		open('parameters.txt', 'w', encoding='UTF-8') as prm_f,\
-		open('loss.txt', 'w', encoding='UTF-8') as lss_f:
+		open('loss.txt', 'w', encoding='UTF-8') as lss_f,\
+		open('ave.txt', 'w', encoding='UTF-8') as ave_f:
 		def train_pred_draw(iTick: int) -> None:
 			"""
 			To train the parameter, doing prediction on all grids, and draw it
@@ -221,7 +234,7 @@ def main() -> None:
 			"""
 			# get scale
 			scale: npt.NDArray[np.double] = get_scale(real_part(data[iTick]))
-			print(iTick, scale)
+			print("Tick {}, scales = {}".format(iTick, scale))
 			# interpolate the data
 			y_all: npt.NDArray[np.cdouble] = np.empty(all_density.shape, np.cdouble)
 			for iPES in range(pes.NUM_PES):
@@ -233,8 +246,8 @@ def main() -> None:
 						interpolator_im: scipy.interpolate.RegularGridInterpolator = scipy.interpolate.RegularGridInterpolator((x_grids, p_grids), data[iTick, ElementIndex].imag, 'cubic', False, 0.0)
 						y_all.imag[ElementIndex] = interpolator_im(all_pts[ElementIndex])
 						y_all[jPES * pes.NUM_PES + iPES] = np.conj(y_all[ElementIndex])
-			if iTick == 0:
-				all_density[...] = y_all
+					else:
+						y_all.imag = 0
 			evolving_errors[iTick] = np.sum((real_part(y_all) - real_part(all_density)) ** 2, -1)
 			# fit
 			predictors.update(all_pts, all_density, main.NUM_PTS, scale)
@@ -247,21 +260,24 @@ def main() -> None:
 					pred[ElementIndex] = predictors.predict(grids, ElementIndex).reshape(n_grids, n_grids)
 					if iPES != jPES:
 						pred[jPES * pes.NUM_PES + iPES] = np.conj(pred[ElementIndex])
-			original_errors[iTick] = np.sum(real_part(pred - data[iTick]) ** 2, (-2, -1))
-			rescaled_errors[iTick] = np.sum((real_part(pred - data[iTick]) * scale[:, np.newaxis, np.newaxis]) ** 2, (-2, -1))
+			real_pred: npt.NDArray[np.double] = real_part(pred)
+			real_data: npt.NDArray[np.double] = real_part(data[iTick])
+			diff: npt.NDArray[np.double] = real_pred - real_data
+			original_errors[iTick] = np.sum(diff ** 2, (-2, -1))
+			rescaled_errors[iTick] = original_errors[iTick] * scale ** 2
 
 			for iPlot in range(NUM_PLOTS):
-				contour_data: npt.NDArray[np.cdouble]
+				contour_data: npt.NDArray[np.double]
 				match iPlot:
 					case 0 | 1:
-						contour_data = pred
+						contour_data = real_pred
 					case 2:
-						contour_data = data[iTick]
+						contour_data = real_data
 					case 3:
-						contour_data = pred - data[iTick]
+						contour_data = diff
 					case _:
 						raise NotImplementedError("Unexpected Plot for Contour")
-				ct_data: npt.NDArray[np.double] = real_part(contour_data) * scale[:, np.newaxis, np.newaxis]
+				ct_data: npt.NDArray[np.double] = contour_data * scale[:, np.newaxis, np.newaxis]
 				for iElement in range(pes.NUM_ELM):
 					ax: matplotlib.axes.Axes = axs[iPlot, iElement]
 					ax.contourf(
@@ -287,6 +303,10 @@ def main() -> None:
 						ax.set_title('Rescaled {}\nRescale Factor = {}'.format(title[0] + gp.get_RI_label(iElement // pes.NUM_PES, iElement % pes.NUM_PES), scale[iElement]))
 					elif iPlot == 1:
 						ax.set_title('Rescaled Error = {}\nRescaled Predict Error = {}'.format(rescaled_errors[iTick, iElement], evolving_errors[iTick, iElement]))
+					elif iPlot == 3:
+						max_idx: np.intp = np.argmax(np.abs(diff[iElement]).reshape(-1))
+						ax.scatter(x_grids[max_idx // n_grids], p_grids[max_idx % n_grids], 15, 'black')
+						ax.set_title('Rescaled {}\nRescaled Max Abs diff = {}'.format(title[iPlot] + gp.get_RI_label(iElement // pes.NUM_PES, iElement % pes.NUM_PES), np.abs(diff[iElement])[max_idx // n_grids, max_idx % n_grids]))
 			fig.suptitle('Tick = {}\nTotal Rescaled Error = {}\nTotal Rescaled Predict Error = {}'.format(iTick, np.sum(rescaled_errors[iTick]), np.sum(evolving_errors[iTick])))
 			fig.savefig('Tick = {:03}.png'.format(iTick))
 			# print to file
@@ -305,6 +325,13 @@ def main() -> None:
 			print('\n', end='\n', file=den_f)
 			np.savetxt(all_f, real_part(pred).reshape(pes.NUM_ELM, n_grids ** 2), footer='\n', comments='')
 			np.savetxt(err_f, (original_errors[iTick], rescaled_errors[iTick], evolving_errors[iTick]), footer='\n', comments='')
+			# calculate averages
+			print(iTick * output_interval, end=" ", file=ave_f)
+			mca.update_pts(all_pts[:, :main.NUM_PTS], predictors.predict)
+			aver: expectation.Averager
+			for aver in [mca, aia]:
+				print(*aver.population(), *aver.coordinates(), aver.potential(), aver.kinetic(mass), *aver.purity().reshape(-1), end=" ", file=ave_f)
+			print("", file=ave_f, flush=True)
 
 		def init() -> typing.Iterable[matplotlib.artist.Artist | typing.Iterable[matplotlib.artist.Artist]]:
 			"""
@@ -351,29 +378,28 @@ def main() -> None:
 				print('\n', file=scl_f)
 				predictors.update(all_pts, all_density, main.NUM_PTS, scale)
 				for i in range(pes.NUM_ELM):
-					print(predictors[i].error(), file=lss_f)
+					print(predictors[i].error().item(), file=lss_f)
 				print('\n', file=lss_f)
-				element_currently_populated: npt.NDArray[np.bool_] = np.any(all_density != 0.0, -1)
-				if np.any(element_populated != element_currently_populated):
-					predictors.train()
-					element_populated[...] = element_currently_populated
 			train_pred_draw(iTick)
-			if iTick % 1 == 0:
-				sample.sample_central_points(all_pts, all_density, main.NUM_PTS, predictors)
-			sample.sample_extra_points(all_pts, main.NUM_PTS, predictors)
+			DoResample: bool = False #iTick % 50 == 0
+			if DoResample:
+				sample.sample_central_points(main.NUM_PTS, all_pts, all_density)
+			sample.sample_extra_points(main.NUM_PTS, all_pts, predictors)
+			pred_starting_idx: int = main.NUM_PTS
 			for iPES in range(pes.NUM_PES):
 				for jPES in range(iPES + 1):
 					ElementIndex: int = iPES * pes.NUM_PES + jPES
-					all_density[ElementIndex, main.NUM_PTS:] = predictors.predict(all_pts[ElementIndex, main.NUM_PTS:], ElementIndex)
+					all_density[ElementIndex, pred_starting_idx:] = predictors.predict(all_pts[ElementIndex, pred_starting_idx:], ElementIndex)
 					if iPES != jPES:
-						all_density[jPES * pes.NUM_PES + iPES, main.NUM_PTS:] = np.conj(all_density[ElementIndex, main.NUM_PTS:])
+						all_density[jPES * pes.NUM_PES + iPES, pred_starting_idx:] = np.conj(all_density[ElementIndex, pred_starting_idx:])
 			predictors.update(all_pts, all_density, main.NUM_PTS, get_scale(real_part(all_density)))
 			return fig, axs
 
 		# draw animation
 		matplotlib.animation.FuncAnimation(fig, draw, range(1, total_ticks), init).save('gpr.gif', 'imagemagick')
 
-	# then plot errors
+	# then plots
+	# error
 	plt.close(fig)
 	fig, axs = plt.subplots(1, 3, figsize=(main.FIGSIZE[0] * 3, main.FIGSIZE[1]))
 	error_titles: list[str] = ['Original', 'Rescaled', 'Evolving']
@@ -399,7 +425,22 @@ def main() -> None:
 		ax.legend()
 		ax.set_title(error_titles[iPlot] + ' Error')
 	fig.savefig('error.png')
+	# param
+	fig, axs = plt.subplots(1, pes.PHASEDIM, figsize=(main.FIGSIZE[0] * pes.PHASEDIM, main.FIGSIZE[1]))
+	param: npt.NDArray[np.double] = np.loadtxt('parameters.txt').reshape(-1, pes.NUM_ELM, pes.PHASEDIM)
+	param_total_ticks = param.shape[0] # This should be (total_ticks - 1) * output_steps
+	for iDim in range(pes.PHASEDIM):
+		ax: matplotlib.axes.Axes = axs[iDim]
+		for iPES in range(pes.NUM_PES):
+			for jPES in range(pes.NUM_PES):
+				ElementIndex: int = iPES * pes.NUM_PES + jPES
+				ax.plot(np.arange(param_total_ticks) * dt, param[:, ElementIndex, iDim], label=gp.get_RI_label(iPES, jPES))
+			ax.set_xlabel('Time')
+			ax.set_title(('x' if iDim < pes.DIM else 'p') + str(iDim % pes.DIM))
+			ax.legend()
+	fig.savefig('param.png')
 	plt.close(fig)
+	# tar figures
 	with tarfile.open('ticks.tar.gz', 'w:gz') as tf:
 		for iTick in range(total_ticks):
 			name: str = 'Tick = {:03}.png'.format(iTick)

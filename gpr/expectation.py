@@ -204,7 +204,7 @@ class MonteCarloAverage(Averager):
 		result: float = 0.0
 		for iPES in range(pes.NUM_PES):
 			ElementIndex: int = iPES * pes.NUM_PES + iPES
-			result += np.average(np.sum(self.point_set[ElementIndex, :, pes.DIM] ** 2 / mass, -1) * self.density.real[ElementIndex] / self.weight[ElementIndex])
+			result += np.average(np.sum(self.point_set[ElementIndex, :, pes.DIM:] ** 2 / mass, -1) * self.density.real[ElementIndex] / self.weight[ElementIndex])
 		return result
 
 	def purity(self) -> npt.NDArray[np.double]:
@@ -307,7 +307,7 @@ class AnalyticalAverager(Averager):
 		for iPES in range(pes.NUM_PES):
 			ElementIndex: int = iPES * pes.NUM_PES + iPES
 			pred: gp.SinglePredictor = self._predictors[ElementIndex]
-			result += pred.model.cov.lengthscale.prod().item() * ((pred.get_training_features()[:, pes.DIM] ** 2 / torch.from_numpy(mass)).sum(-1) * pred.get_weights().unsqueeze(-1)).sum().item() / self._predictors.scale[ElementIndex]
+			result += pred.model.cov.lengthscale.prod().item() * ((pred.get_training_features()[:, pes.DIM:] ** 2 / torch.from_numpy(mass)).sum(-1) * pred.get_weights().unsqueeze(-1)).sum().item() / self._predictors.scale[ElementIndex]
 		return result * AnalyticalAverager.AVERAGE_CONSTANT
 
 	def purity(self) -> npt.NDArray[np.double]:

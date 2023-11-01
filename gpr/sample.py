@@ -101,12 +101,12 @@ def normal_sample(
 		The number of points needed
 	mean : npt.NDArray[np.double], shape of (PHASEDIM,)
 		The center of the points
-	stddev : npt.NDArray[np.double], shape of (PHASEpes.PHASEDIM,)
+	stddev : npt.NDArray[np.double], shape of (PHASEDIM,)
 		The standard deviation of the points
 
 	Returns
 	-------
-	npt.NDArray[np.double], shape of (NUM_ELM, NUM_PTS, PHASEDIM)
+	npt.NDArray[np.double], shape of (NUM_PTS, PHASEDIM)
 		Normally distributed point test
 	"""
 	return torch.randn((num_points, pes.PHASEDIM), dtype=torch.float).detach().numpy() * stddev + mean

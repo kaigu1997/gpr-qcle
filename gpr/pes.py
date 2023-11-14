@@ -38,14 +38,46 @@ MODEL: typing.Literal[Model.DAC] = Model.DAC
 NUM_PES: typing.Literal[2] = 2
 NUM_ELM: typing.Literal[4] = NUM_PES * NUM_PES
 NUM_TRIG: typing.Literal[3] = NUM_PES * (NUM_PES + 1) // 2
-tril_row_indices: npt.NDArray[np.int_]
-tril_col_indices: npt.NDArray[np.int_]
-tril_row_indices, tril_col_indices = np.tril_indices(NUM_PES)
-tril_element_indices: npt.NDArray[np.int_] = tril_row_indices * NUM_PES + tril_col_indices
 DIM: typing.Literal[1] = 1
 PHASEDIM: typing.Literal[2] = 2
 HBAR: float = 1.0
 PURITY_FACTOR: float = (2.0 * np.pi * HBAR) ** DIM
+tril_row_indices: npt.NDArray[np.int_]
+tril_col_indices: npt.NDArray[np.int_]
+tril_row_indices, tril_col_indices = np.tril_indices(NUM_PES)
+tril_element_indices: npt.NDArray[np.int_] = tril_row_indices * NUM_PES + tril_col_indices
+
+
+def lower_triangular_to_full(tril_part: np.ndarray) -> np.ndarray:
+	"""
+	To turn the lower triangular part of the matrix into the full matrix
+
+	Parameters
+	----------
+	tril_part : np.ndarray
+		The array of lower triangular part.
+		If it is 1d, it corresponds to linearized lower triangular part (i.e., without strictly upper part).
+		Otherwise, take the lower triangular part of last two dimension and flip them up.
+
+	Returns
+	-------
+	np.ndarray
+		Indices range [0, NUM_TRIG)
+	"""
+	mat_size: int
+	if tril_part.ndim == 1:
+		mat_size = int(np.sqrt(2 * tril_part.size))
+		assert tril_part.size == mat_size * (mat_size + 1) // 2
+		result: np.ndarray = np.zeros((mat_size, mat_size), tril_part.dtype)
+		result[tril_row_indices, tril_col_indices] = tril_part
+		return result + np.tril(result, -1).T.conj()
+	else:
+		assert tril_part.shape[-1] == tril_part.shape[-2]
+		mat_size = tril_part.shape[-1]
+		return np.tril(tril_part) + np.tril(tril_part, -1).T.conj()
+
+
+flatten_tril_index: npt.NDArray[np.int_] = lower_triangular_to_full(np.arange(NUM_TRIG, dtype=np.int_))
 
 
 def potential(x: torch.Tensor) -> torch.Tensor:

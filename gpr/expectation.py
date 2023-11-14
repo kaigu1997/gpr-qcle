@@ -4,6 +4,7 @@ expectation
 
 This module evaluates the expectation values (population, <x> and <p>, energy, etc)
 """
+
 import abc
 import copy
 import typing
@@ -114,11 +115,15 @@ class MonteCarloAverage(Averager):
 	"""
 	def __init__(self, num_pts: int):
 		self.num_pts: int = num_pts
-		self.point_set: npt.NDArray[np.double] = np.empty((pes.NUM_ELM, num_pts, pes.PHASEDIM))
-		self.weight: npt.NDArray[np.double] = np.empty((pes.NUM_ELM, num_pts))
-		self.density: npt.NDArray[np.cdouble] = np.empty((pes.NUM_ELM, num_pts), np.cdouble)
+		self.point_set: npt.NDArray[np.double] = np.empty((pes.NUM_TRIG, num_pts, pes.PHASEDIM))
+		self.weight: npt.NDArray[np.double] = np.empty((pes.NUM_TRIG, num_pts))
+		self.density: npt.NDArray[np.cdouble] = np.empty((pes.NUM_TRIG, num_pts), np.cdouble)
 
-	def update_pts(self, ref_pts: npt.NDArray[np.double], predictor: typing.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]):
+	def update_pts(
+		self,
+		ref_pts: list[npt.NDArray[np.double]],
+		predictor: typing.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
+	):
 		"""
 		To update the point set used
 
@@ -131,16 +136,12 @@ class MonteCarloAverage(Averager):
 		"""
 		for iPES in range(pes.NUM_PES):
 			for jPES in range(iPES + 1):
-				ElementIndex: int = iPES * pes.NUM_PES + jPES
-				center: npt.NDArray[np.double] = np.mean(ref_pts[ElementIndex], 0)
-				stddev: npt.NDArray[np.double] = 1.5 * np.std(ref_pts[ElementIndex], 0)
-				self.point_set[ElementIndex] = sample.normal_sample(self.num_pts, center, stddev)
-				self.weight[ElementIndex] = np.exp(-np.sum(((self.point_set[ElementIndex] - center) / stddev) ** 2, -1) / 2.0) / ((2.0 * np.pi) ** pes.DIM * stddev.prod()) # N
-				self.density[ElementIndex] = predictor(self.point_set[ElementIndex], ElementIndex)
-				if iPES != jPES:
-					self.point_set[jPES * pes.NUM_PES + iPES] = self.point_set[ElementIndex]
-					self.weight[jPES * pes.NUM_PES + iPES] = self.weight[ElementIndex]
-					self.density[jPES * pes.NUM_PES + iPES] = np.conj(self.density[ElementIndex])
+				TrilIndex: int = pes.flatten_tril_index[iPES, jPES]
+				center: npt.NDArray[np.double] = np.mean(ref_pts[TrilIndex], 0)
+				stddev: npt.NDArray[np.double] = 1.5 * np.std(ref_pts[TrilIndex], 0)
+				self.point_set[TrilIndex] = sample.normal_sample(self.num_pts, center, stddev)
+				self.weight[TrilIndex] = np.exp(-np.sum(((self.point_set[TrilIndex] - center) / stddev) ** 2, -1) / 2.0) / ((2.0 * np.pi) ** pes.DIM * stddev.prod()) # N
+				self.density[TrilIndex] = predictor(self.point_set[TrilIndex], iPES * pes.NUM_PES + jPES)
 
 	def population(self) -> npt.NDArray[np.double]:
 		"""
@@ -153,8 +154,8 @@ class MonteCarloAverage(Averager):
 		"""
 		result: npt.NDArray[np.double] = np.empty(pes.NUM_PES, np.double)
 		for iPES in range(pes.NUM_PES):
-			ElementIndex: int = iPES * pes.NUM_PES + iPES
-			result[iPES] = np.average(self.density.real[ElementIndex] / self.weight[ElementIndex])
+			TrilIndex: int = pes.flatten_tril_index[iPES, iPES]
+			result[iPES] = np.average(self.density[TrilIndex].real / self.weight[TrilIndex])
 		return result
 
 	def coordinates(self) -> npt.NDArray[np.double]:
@@ -168,8 +169,8 @@ class MonteCarloAverage(Averager):
 		"""
 		result: npt.NDArray[np.double] = np.zeros(pes.PHASEDIM, np.double)
 		for iPES in range(pes.NUM_PES):
-			ElementIndex: int = iPES * pes.NUM_PES + iPES
-			result += np.average(np.swapaxes(self.point_set[ElementIndex], -1, -2) * self.density.real[ElementIndex] / self.weight[ElementIndex], axis=-1)
+			TrilIndex: int = pes.flatten_tril_index[iPES, iPES]
+			result += np.average(np.swapaxes(self.point_set[TrilIndex], -1, -2) * self.density[TrilIndex].real / self.weight[TrilIndex], axis=-1)
 		return result
 
 	def potential(self) -> float:
@@ -183,8 +184,8 @@ class MonteCarloAverage(Averager):
 		"""
 		result: float = 0.0
 		for iPES in range(pes.NUM_PES):
-			ElementIndex: int = iPES * pes.NUM_PES + iPES
-			result += np.average(pes.adiabatic_potential(self.point_set[ElementIndex, :, :pes.DIM])[..., iPES] * self.density.real[ElementIndex] / self.weight[ElementIndex])
+			TrilIndex: int = pes.flatten_tril_index[iPES, iPES]
+			result += np.average(pes.adiabatic_potential(self.point_set[TrilIndex, :, :pes.DIM])[..., iPES] * self.density[TrilIndex].real / self.weight[TrilIndex])
 		return result
 
 	def kinetic(self, mass: npt.NDArray[np.double]) -> float:
@@ -203,9 +204,9 @@ class MonteCarloAverage(Averager):
 		"""
 		result: float = 0.0
 		for iPES in range(pes.NUM_PES):
-			ElementIndex: int = iPES * pes.NUM_PES + iPES
-			result += np.average(np.sum(self.point_set[ElementIndex, :, pes.DIM:] ** 2 / mass, -1) * self.density.real[ElementIndex] / self.weight[ElementIndex])
-		return result
+			TrilIndex: int = pes.flatten_tril_index[iPES, iPES]
+			result += np.average(np.sum(self.point_set[TrilIndex, :, pes.DIM:] ** 2 / mass, -1) * self.density[TrilIndex].real / self.weight[TrilIndex])
+		return result / 2.0
 
 	def purity(self) -> npt.NDArray[np.double]:
 		"""
@@ -216,7 +217,8 @@ class MonteCarloAverage(Averager):
 		npt.NDArray[np.double]
 			Purity of each element
 		"""
-		return pes.PURITY_FACTOR * np.average((self.density.real ** 2 + self.density.imag ** 2) / self.weight, -1)
+		result: npt.NDArray[np.double] = np.zeros((pes.NUM_PES, pes.NUM_PES), np.double)
+		return pes.PURITY_FACTOR * pes.lower_triangular_to_full(np.average((self.density.real ** 2 + self.density.imag ** 2) / self.weight, -1))
 
 
 class AnalyticalAverager(Averager):
@@ -307,8 +309,8 @@ class AnalyticalAverager(Averager):
 		for iPES in range(pes.NUM_PES):
 			ElementIndex: int = iPES * pes.NUM_PES + iPES
 			pred: gp.SinglePredictor = self._predictors[ElementIndex]
-			result += pred.model.cov.lengthscale.prod().item() * ((pred.get_training_features()[:, pes.DIM:] ** 2 / torch.from_numpy(mass)).sum(-1) * pred.get_weights().unsqueeze(-1)).sum().item() / self._predictors.scale[ElementIndex]
-		return result * AnalyticalAverager.AVERAGE_CONSTANT
+			result += pred.model.cov.lengthscale.prod().item() * ((pred.get_training_features()[:, pes.DIM:] ** 2 / torch.from_numpy(mass)).sum(-1) * pred.get_weights()).sum().item() / self._predictors.scale[ElementIndex]
+		return result * AnalyticalAverager.AVERAGE_CONSTANT / 2.0
 
 	def purity(self) -> npt.NDArray[np.double]:
 		"""

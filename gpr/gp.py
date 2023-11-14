@@ -22,7 +22,7 @@ torch.set_default_dtype(torch.float64)
 torch.manual_seed(0)
 
 
-def get_RI_label(row: int, col: int) -> str:
+def get_RI_label(ElementIndex: int) -> str:
 	"""
 	To have the real/imaginary part name of the given input row and column.
 
@@ -30,22 +30,22 @@ def get_RI_label(row: int, col: int) -> str:
 
 	Parameters
 	----------
-	row : int
-		Index of row
-	col : int
-		Index of column
+	ElementIndex: int
+		Index of the element
 
 	Returns
 	-------
 	str
 		Name of the real/imaginary part. 
 	"""
-	if row == col:
-		return r'$\rho_{%d,%d}$' % (row, col)
-	elif row < col:
-		return r'$\Re\rho_{%d,%d}$' % (col, row)
+	RowIndex: int = ElementIndex // pes.NUM_PES
+	ColIndex: int = ElementIndex % pes.NUM_PES
+	if RowIndex == ColIndex:
+		return r"$\rho_{%d,%d}$" % (RowIndex, ColIndex)
+	elif RowIndex < ColIndex:
+		return r"$\Re\rho_{%d,%d}$" % (RowIndex, ColIndex)
 	else:
-		return r'$\Im\rho_{%d,%d}$' % (row, col)
+		return r"$\Im\rho_{%d,%d}$" % (RowIndex, ColIndex)
 
 
 class GP(gpytorch.models.ExactGP):
@@ -195,33 +195,6 @@ class SinglePredictor:
 			self.update_weights()
 		return (self.model.cov(x_test, self.get_training_features()) @ self.k_inv_y).to_dense()
 
-	# def derivative(self, x_test: torch.Tensor) -> torch.Tensor:
-	# 	"""
-	# 	To calculate the derivative of prediction over coordinates
-
-	# 	Parameters
-	# 	----------
-	# 	x_test : torch.Tensor, shape of (N, PHASEDIM)
-	# 		Validation/Test inputs
-
-	# 	Returns
-	# 	-------
-	# 	torch.Tensor, shape of (N, PHASEDIM)
-	# 		Corresponding gradient of prediction at input coordinates based on noise-free SR/PP mean.
-	# 	"""
-	# 	for param in self.model.parameters():
-	# 		param.requires_grad = False
-	# 		param.grad = None
-	# 	x_test.requires_grad = True
-	# 	x_test.grad = None
-	# 	pred: torch.Tensor = self.predict(x_test)
-	# 	pred.backward(torch.ones_like(pred))
-	# 	assert x_test.grad is not None
-	# 	x_test.requires_grad = False
-	# 	for param in self.model.parameters():
-	# 		param.requires_grad = True
-	# 	return x_test.grad
-
 	def error(self, use_weight: bool = True) -> torch.Tensor:
 		"""
 		Error function of subset of regressor (SR) / projected process (PP)
@@ -254,7 +227,7 @@ class SinglePredictor:
 			print_grad : bool, optional
 				Whether to print the gradient or not, by default False
 			"""
-			def print_tensor(t: torch.Tensor) -> float | npt.NDArray[np.double]:
+			def make_tensor_printable(t: torch.Tensor) -> float | npt.NDArray[np.double]:
 				"""
 				To transform a torch Tensor to read-friendly form
 
@@ -276,13 +249,13 @@ class SinglePredictor:
 				else:
 					return t.detach().numpy().ravel()
 
-			fmt: str = 'Parameter name: {0:42} value = {1}'
-			fmt_grad: str = fmt + ' grad = {2}'
+			fmt: str = "Parameter name: {0:42} value = {1}"
+			fmt_grad: str = fmt + " grad = {2}"
 			for param_name, param, constraint in model.named_parameters_and_constraints():
 				if print_grad and param.grad is not None:
-					print(fmt_grad.format(param_name, print_tensor(param), print_tensor(param.grad)))
+					print(fmt_grad.format(param_name, make_tensor_printable(param), make_tensor_printable(param.grad)))
 				else:
-					print(fmt.format(''.join(param_name.split('raw_')), print_tensor(constraint.transform(param) if isinstance(constraint, gpytorch.constraints.Interval) else param)))
+					print(fmt.format("".join(param_name.split("raw_")), make_tensor_printable(constraint.transform(param) if isinstance(constraint, gpytorch.constraints.Interval) else param)))
 
 		def get_lr(optimizer: torch.optim.Optimizer) -> float:
 			"""
@@ -298,7 +271,7 @@ class SinglePredictor:
 			float
 				Learning rate
 			"""
-			return optimizer.param_groups[0]['lr']
+			return optimizer.param_groups[0]["lr"]
 
 		def print_stuff(loss: torch.Tensor, optimizer: torch.optim.Optimizer, model: gpytorch.models.ExactGP, print_grad: bool = False, extra_str="\t") -> None:
 			"""
@@ -319,7 +292,6 @@ class SinglePredictor:
 			"""
 			print(extra_str + "loss = {:.15e}, lr = {}".format(loss.item(), get_lr(optimizer)))
 			print_model(model, print_grad)
-			print('\n')
 
 		self.weights_updated = False
 		assert isinstance(self.model.train_targets, torch.Tensor)
@@ -335,7 +307,7 @@ class SinglePredictor:
 		loss: torch.Tensor = self.error(False)
 		loss.backward()
 		last_value: float = loss.item()
-		print_stuff(loss, optimizer, self.model, True, "\n\nInit")
+		print_stuff(loss, optimizer, self.model, True, "Init")
 		for i in range(1, SinglePredictor.MAX_ITER + 1):
 			# adjust lr
 			old_prm: dict[str, torch.Tensor] = copy.deepcopy(self.model.state_dict())
@@ -344,27 +316,10 @@ class SinglePredictor:
 			# print_stuff(loss, optimizer, self.model, True)
 			if loss < last_value:
 				optimizer = optimizer.__class__(self.model.parameters(), lr=get_lr(optimizer) * 2.0)
-				# print('loss < last_value\n')
-				# while loss < last_value:
-				# 	second_last_value: float = last_value
-				# 	last_value = loss.item()
-				# 	self.model.load_state_dict(old_prm)
-				# 	optimizer = optimizer.__class__(self.model.parameters(), lr=get_lr(optimizer) * 2.0)
-				# 	optimizer.step()
-				# 	loss = self.error(False)
-				# 	# print_stuff(loss, optimizer, self.model, True)
-				# 	if loss >= last_value:
-				# 		# goes back, not only loss but also last value, for stop criteria judgment
-				# 		last_value = second_last_value
-				# 		break
-				# # when exit, loss >= last value, so learning rate should be halved
-				# self.model.load_state_dict(old_prm)
-				# optimizer = optimizer.__class__(self.model.parameters(), lr=get_lr(optimizer) * 2.0)
-				# optimizer.step()
-				# loss = self.error(False)
+				# print("loss < last_value")
 				# print_stuff(loss, optimizer, self.model, True)
 			else:
-				# print('loss > last_value')
+				# print("loss > last_value")
 				while loss >= last_value:
 					last_loop_value: float = loss.item()
 					self.model.load_state_dict(old_prm)
@@ -373,38 +328,36 @@ class SinglePredictor:
 					loss = self.error(False)
 					# print_stuff(loss, optimizer, self.model, True)
 					if last_loop_value == loss.item():
-						print('No stepping forward')
+						print("No stepping forward")
 						# no stepping forward, but still larger than last, meaning last is the best
 						self.model.load_state_dict(old_prm)
 						loss = self.error(False)
 						break
 			if i % (SinglePredictor.MAX_ITER // 100) == 0:
-				print('\n')
-				print('Iter {} - Loss: {:.15e} - lr: {}'.format(i, loss.item(), get_lr(optimizer)))
+				print("Iter {} - Loss: {:.15e} - lr: {}".format(i, loss.item(), get_lr(optimizer)))
 				print_model(self.model, True)
 				print_model(self.model)
-				print('\n')
 			# stopping criteria
 			if (last_value - loss.item()) / max(abs(last_value), abs(loss.item()), 1.0) < SinglePredictor.FTOL:
 				finish_early = True
 				print("Convergence: |f_i - f_{i+1}| <= FTOL")
-				print('Iter {} - Loss: {:.15e} - lr: {}'.format(i, loss.item(), get_lr(optimizer)))
+				print("Iter {} - Loss: {:.15e} - lr: {}".format(i, loss.item(), get_lr(optimizer)))
 				break
 			if np.sqrt(sum(torch.sum(param.grad ** 2).item() if param.grad is not None else 0.0 for param in self.model.parameters())) < SinglePredictor.GTOL:
 				finish_early = True
 				print("Convergence: |Gradient| <= GTOL")
-				print('Iter {} - Loss: {:.15e} - lr: {}'.format(i, loss.item(), get_lr(optimizer)))
+				print("Iter {} - Loss: {:.15e} - lr: {}".format(i, loss.item(), get_lr(optimizer)))
 				break
 			optimizer = optimizer.__class__(self.model.parameters(), lr=get_lr(optimizer))
 			optimizer.zero_grad()
 			last_value = loss.item()
 			loss.backward()
-			# print_stuff(loss, optimizer, self.model, True, "\n\n\tlast = {}, ".format(last_value))
+			# print_stuff(loss, optimizer, self.model, True, "\tlast = {}, ".format(last_value))
 		if not finish_early:
-			print('Iter {} - Loss: {:.15e} - lr: {}'.format(SinglePredictor.MAX_ITER, last_value, [param['lr'] for param in optimizer.param_groups]))
+			print("Iter {} - Loss: {:.15e} - lr: {}".format(SinglePredictor.MAX_ITER, last_value, [param["lr"] for param in optimizer.param_groups]))
 			print("Stop: Total No. iterations reached limit.")
 		print_model(self.model)
-		print('\n', flush=True)
+		print("", flush=True)
 		self.model_param = copy.deepcopy(self.model.state_dict())
 
 	def variance(self) -> npt.NDArray[np.double]:
@@ -501,33 +454,45 @@ class GPRPredictors:
 		assert 0 <= ElementIndex < pes.NUM_ELM
 		return self.predictors[ElementIndex]
 
-	def update(self, x_all: npt.NDArray[np.double], y_all: npt.NDArray[np.cdouble], num_pts: int, scale: npt.NDArray[np.double]) -> None:
+	def update(
+		self,
+		x_all: list[npt.NDArray[np.double]],
+		y_all: list[npt.NDArray[np.cdouble]],
+		num_points: int | npt.NDArray[np.int_],
+		scale: npt.NDArray[np.double]
+	) -> None:
 		"""
 		To update the training inputs and targets, as well as the rescale factor
 
 		Parameters
 		----------
-		x_all : npt.NDArray[np.double], shape of (NUM_ELM, NUM_PTS * (1 + NUM_XTR_RATIO), PHASEDIM)
+		x_all : list[npt.NDArray[np.double]], len of NUM_TRIG, each of shape (num_points * (1 + NUM_XTR_RATIO), PHASEDIM)
 			All training inputs
-		y_all : npt.NDArray[np.cdouble], shape of (NUM_ELM, NUM_PTS * (1 + NUM_XTR_RATIO))
+		y_all : list[npt.NDArray[np.cdouble]], len of NUM_TRIG, each of shape (num_points * (1 + NUM_XTR_RATIO))
 			All training targets
-		num_pts : int
+		num_points : int | npt.NDArray[np.int_], shape of (NUM_TRIG,)
 			The number of points located at the front of all points that is used as the subset
-		scale : npt.NDArray[np.double]
+		scale : npt.NDArray[np.double], shape of (NUM_ELM,)
 			The rescale factor
 		"""
+		if isinstance(num_points, int):
+			num_points = np.full(pes.NUM_TRIG, num_points, np.int_)
 		self.scale[...] = scale
 		iElement: int
 		pred: SinglePredictor
 		for iElement, pred in enumerate(self.predictors):
-			pred.x_all = copy.deepcopy(torch.from_numpy(x_all[iElement]).detach())
-			if iElement // pes.NUM_PES <= iElement % pes.NUM_PES:
-				pred.y_all = copy.deepcopy(torch.from_numpy(y_all[iElement].real).detach())
+			RowIndex: int = iElement // pes.NUM_PES
+			ColIndex: int = iElement % pes.NUM_PES
+			TrilIndex: int = pes.flatten_tril_index[RowIndex, ColIndex]
+			pred.x_all = copy.deepcopy(torch.from_numpy(x_all[TrilIndex]).detach())
+			if RowIndex <= ColIndex:
+				pred.y_all = copy.deepcopy(torch.from_numpy(y_all[TrilIndex].real).detach())
 			else:
-				pred.y_all = copy.deepcopy(torch.from_numpy(y_all[iElement].imag).detach())
+				pred.y_all = copy.deepcopy(torch.from_numpy(y_all[TrilIndex].imag).detach())
 			pred.y_all *= self.scale[iElement]
-			pred.model.set_train_data(pred.x_all[:num_pts].detach(), pred.y_all[:num_pts].detach(), False)
+			pred.model.set_train_data(pred.x_all[:num_points[TrilIndex]].detach(), pred.y_all[:num_points[TrilIndex]].detach(), False)
 			pred.weights_updated = False
+
 
 	def train(self) -> None:
 		"""
@@ -535,7 +500,7 @@ class GPRPredictors:
 		"""
 		for iElement in range(pes.NUM_ELM):
 			if check_predictor(self.predictors[iElement]):
-				print("Training " + get_RI_label(iElement // pes.NUM_PES, iElement % pes.NUM_PES))
+				print("Training " + get_RI_label(iElement))
 				self.predictors[iElement].train()
 
 	def update_weights(self) -> None:
@@ -616,76 +581,6 @@ class GPRPredictors:
 			result[..., iElement // pes.NUM_PES, iElement % pes.NUM_PES] = self.predict(x_input, iElement)
 		return result
 
-	# def derivative(self, x_input: npt.NDArray[np.double], ElementIndex: int) -> npt.NDArray[np.cdouble]:
-	# 	"""
-	# 	To predict test target derivatives based on input and corresponding density matrix element
-
-	# 	Parameters
-	# 	----------
-	# 	x_input : npt.NDArray[np.double], shape of (..., PHASEDIM)
-	# 		Test inputs
-	# 	ElementIndex : int
-	# 		Index of the element
-
-	# 	Returns
-	# 	-------
-	# 	npt.NDArray[np.cdouble], shape of (..., PHASEDIM)
-	# 		Derivatives of the element of all test inputs
-	# 	"""
-	# 	x_test: torch.Tensor = torch.from_numpy(x_input.reshape(-1, pes.PHASEDIM))
-
-	# 	def call_single_predictor(pred: SinglePredictor) -> npt.NDArray[np.double]:
-	# 		"""
-	# 		To do prediction of a single predictor
-
-	# 		Parameters
-	# 		----------
-	# 		pred : SinglePredictor
-	# 			The predictor
-
-	# 		Returns
-	# 		-------
-	# 		npt.NDArray[np.double], shape of (..., PHASEDIM)
-	# 			Derivatives by the predictor
-	# 		"""
-	# 		if check_predictor(pred):
-	# 			assert pred.model.train_inputs is not None and isinstance(pred.model.train_inputs[0], torch.Tensor)
-	# 			return pred.derivative(x_test).detach().numpy()
-	# 		else:
-	# 			return np.zeros(x_test.shape, np.double)
-
-	# 	RowIndex: int = ElementIndex // pes.NUM_PES
-	# 	ColIndex: int = ElementIndex % pes.NUM_PES
-	# 	result: npt.NDArray[np.cdouble] = np.empty(x_test.shape, np.cdouble)
-	# 	if RowIndex == ColIndex:
-	# 		result.real = call_single_predictor(self.predictors[ElementIndex]) / get_scale(self.scale[ElementIndex])
-	# 	elif RowIndex > ColIndex:
-	# 		result.real = call_single_predictor(self.predictors[ColIndex * pes.NUM_PES + RowIndex]) / get_scale(self.scale[ColIndex * pes.NUM_PES + RowIndex])
-	# 		result.imag = call_single_predictor(self.predictors[ElementIndex]) / get_scale(self.scale[ElementIndex])
-	# 	else: # RowIndex < ColIndex
-	# 		result.real = call_single_predictor(self.predictors[ElementIndex]) / get_scale(self.scale[ElementIndex])
-	# 		result.imag = -call_single_predictor(self.predictors[ColIndex * pes.NUM_PES + RowIndex]) / get_scale(self.scale[ColIndex * pes.NUM_PES + RowIndex])
-	# 	return result.reshape(x_input.shape)
-
-	# def derivative_full(self, x_input: npt.NDArray[np.double]) -> npt.NDArray[np.cdouble]:
-	# 	"""
-	# 	To predict test target derivatives based on input and corresponding density matrix element
-
-	# 	Parameters
-	# 	----------
-	# 	x_input : npt.NDArray[np.double], shape of (..., PHASEDIM)
-	# 		Test inputs
-
-	# 	Returns
-	# 	-------
-	# 	npt.NDArray[np.cdouble], shape of (..., PHASEDIM, NUM_PES, NUM_PES)
-	# 		Density matrix derivatives of all element of all test inputs
-	# 	"""
-	# 	result: npt.NDArray[np.cdouble] = np.empty(x_input.shape + (pes.NUM_PES, pes.NUM_PES), np.cdouble)
-	# 	for iElement in range(pes.NUM_ELM):
-	# 		result[..., iElement // pes.NUM_PES, iElement % pes.NUM_PES] = self.derivative(x_input, iElement)
-	# 	return result
-
 	def print(self, f: io.TextIOWrapper) -> None:
 		"""
 		To print the parameters to file
@@ -697,30 +592,4 @@ class GPRPredictors:
 		"""
 		for predictor in self.predictors:
 			np.savetxt(f, predictor.model.cov.lengthscale.detach().numpy().reshape(1, -1))
-		print('\n', file=f)
-
-
-def construct_kernel_matrix(predictor: SinglePredictor, x1: npt.NDArray[np.double], x2: npt.NDArray[np.double] | None = None) -> npt.NDArray[np.double]:
-	"""
-	To construct the kernel (covariance) matrix of the predictor
-
-	Parameters
-	----------
-	predictor : SinglePredictor
-		The predictor, containing information of constructing the covariance matrix
-	x1 : npt.NDArray[np.double]
-		Features
-	x2 : npt.NDArray[np.double] | None, optional
-		Another feature, by default None (meaning the same as x1)
-
-	Returns
-	-------
-	npt.NDArray[np.double]
-		Covariance matrix
-	"""
-	if x2 is None:
-		x2 = x1
-	if check_predictor(predictor):
-		return predictor.model.cov(torch.from_numpy(x1), torch.from_numpy(x2)).detach().numpy()
-	else:
-		return np.eye(x1.shape[-2], x2.shape[-2], dtype=np.double)
+		print("\n", file=f)

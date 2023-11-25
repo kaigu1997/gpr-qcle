@@ -18,7 +18,7 @@ import torch
 
 import pes
 
-torch.set_default_dtype(torch.float64)
+torch.set_default_dtype(torch.double)
 torch.manual_seed(0)
 
 
@@ -41,11 +41,11 @@ def get_RI_label(ElementIndex: int) -> str:
 	RowIndex: int = ElementIndex // pes.NUM_PES
 	ColIndex: int = ElementIndex % pes.NUM_PES
 	if RowIndex == ColIndex:
-		return r"$\rho_{%d,%d}$" % (RowIndex, ColIndex)
+		return "$\\rho_{{{},{}}}$".format(RowIndex, ColIndex)
 	elif RowIndex < ColIndex:
-		return r"$\Re\rho_{%d,%d}$" % (RowIndex, ColIndex)
+		return "$\\Re\\rho_{{{},{}}}$".format(ColIndex, RowIndex)
 	else:
-		return r"$\Im\rho_{%d,%d}$" % (RowIndex, ColIndex)
+		return "$\\Im\\rho_{{{},{}}}$".format(RowIndex, ColIndex)
 
 
 class GP(gpytorch.models.ExactGP):
@@ -127,8 +127,6 @@ class SinglePredictor:
 		To get the error by comparing label with prediction
 	train()
 		To train the parameters
-	variance()
-		To get the variance of the predictor
 	"""
 	MAX_ITER: typing.Literal[50000] = 50000
 	FTOL: float = 2.2204460492503131e-09
@@ -360,19 +358,6 @@ class SinglePredictor:
 		print("", flush=True)
 		self.model_param = copy.deepcopy(self.model.state_dict())
 
-	def variance(self) -> npt.NDArray[np.double]:
-		"""
-		To calculate the variance based on the squared density.
-
-		The variance is half the square of characteristic lengths for each dimension.
-
-		Returns
-		-------
-		npt.NDArray[np.double]
-			Variance
-		"""
-		return self.model.cov.lengthscale.detach().numpy().reshape(-1) ** 2 / 2.0
-
 
 def check_predictor(predictor: SinglePredictor) -> bool:
 	"""
@@ -434,7 +419,7 @@ class GPRPredictors:
 		To print hyperparameters to file
 	"""
 	def __init__(self, kernel: gpytorch.kernels.Kernel = gpytorch.kernels.RBFKernel(pes.PHASEDIM)):
-		self.predictors: npt.NDArray[np.object_] = np.array([SinglePredictor(kernel) for i in range(pes.NUM_ELM)], np.object_)
+		self.predictors: list[SinglePredictor] = [SinglePredictor(kernel) for _ in range(pes.NUM_ELM)]
 		self.scale: npt.NDArray[np.double] = np.ones(pes.NUM_ELM, np.double)
 
 	def __getitem__(self, ElementIndex: int) -> SinglePredictor:
@@ -478,8 +463,6 @@ class GPRPredictors:
 		if isinstance(num_points, int):
 			num_points = np.full(pes.NUM_TRIG, num_points, np.int_)
 		self.scale[...] = scale
-		iElement: int
-		pred: SinglePredictor
 		for iElement, pred in enumerate(self.predictors):
 			RowIndex: int = iElement // pes.NUM_PES
 			ColIndex: int = iElement % pes.NUM_PES
@@ -492,7 +475,6 @@ class GPRPredictors:
 			pred.y_all *= self.scale[iElement]
 			pred.model.set_train_data(pred.x_all[:num_points[TrilIndex]].detach(), pred.y_all[:num_points[TrilIndex]].detach(), False)
 			pred.weights_updated = False
-
 
 	def train(self) -> None:
 		"""
@@ -507,7 +489,6 @@ class GPRPredictors:
 		"""
 		To update weights of each predictor
 		"""
-		pred: SinglePredictor
 		for pred in self.predictors:
 			pred.update_weights()
 

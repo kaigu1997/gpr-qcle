@@ -158,6 +158,57 @@ def plot_region(arr: npt.NDArray[np.double]) -> npt.NDArray[np.double]:
 	return arr[::4, ::4]
 
 
+def format_array(arr_name: str, arr: npt.NDArray | float | int | complex) -> str:
+	"""
+	To print the flatten array as well as raw number
+
+	Parameters
+	----------
+	arr_name : str
+		The name of the array or variable
+	arr : npt.NDArray | float | int
+		The array or raw number
+
+	Returns
+	-------
+	str
+		_description_
+	"""
+	if isinstance(arr, np.ndarray):
+		return (arr_name + " =" + " {}" * arr.size).format(*arr.ravel())
+	elif isinstance(arr, complex):
+		return arr_name + " = {} + {}i".format(arr.real, arr.imag)
+	else:
+		return arr_name + " = " + str(arr)
+
+
+def dimension_name(DimIndex: int) -> str:
+	"""
+	Name corresponding to the dimension in phase space
+
+	Parameters
+	----------
+	DimIndex : int
+		Index of the dimension, range in [0, PHASEDIM)
+
+	Returns
+	-------
+	str
+		The name of the dimension
+	"""
+	assert 0 <= DimIndex < pes.PHASEDIM
+	if pes.DIM == 1:
+		if DimIndex == 0:
+			return "x"
+		else:
+			return "p"
+	else:
+		if DimIndex < pes.DIM:
+			return r"$x_{}$".format(DimIndex)
+		else:
+			return r"$p_{}$".format(DimIndex - pes.DIM)
+
+
 def main() -> None:
 	"""
 	The main routine
@@ -176,7 +227,7 @@ def main() -> None:
 	dt: float
 	mass, r0, sigma_r0, output_interval, dt = read_input()
 	output_steps: int = int(round(output_interval / dt))
-	print("Mass = {}\nInitial center = {}\nInitial deviation = {}\nTime step = {}\nSteps between output = {}\n".format(mass, r0, sigma_r0, dt, output_steps))
+	print(format_array("Mass", mass), format_array("Initial center", r0), format_array("Initial deviation", sigma_r0), format_array("Time step", dt), format_array("Steps between output", output_steps), sep='\n')
 	# read input
 	data: npt.NDArray[np.cdouble] = read_data()
 	total_ticks: int = data.shape[0]
@@ -331,13 +382,13 @@ def main() -> None:
 							0.5,
 							"black"
 						)
-						ax.set_title("Rescaled {}\nRescale Factor = {}".format(title[0] + gp.get_RI_label(iElement), scale[iElement]))
+						ax.set_title("Rescaled {}\nRescale Factor = {:.6e}".format(title[0] + gp.get_RI_label(iElement), scale[iElement]))
 					elif iPlot == 1:
-						ax.set_title("Rescaled Error = {}\nRescaled Predict Error = {}".format(rescaled_errors[iElement], evolving_errors[iElement]))
+						ax.set_title("Rescaled Error = {:.6e}\nRescaled Predict Error = {:.6e}".format(rescaled_errors[iElement], evolving_errors[iElement]))
 					elif iPlot == 3:
 						max_idx: np.intp = np.argmax(np.abs(diff[iElement]).reshape(-1))
 						ax.scatter(x_grids[max_idx // n_grids], p_grids[max_idx % n_grids], 15, "black")
-						ax.set_title("Rescaled {}\nRescaled Max Abs diff = {}".format(title[iPlot] + gp.get_RI_label(iElement), np.abs(diff[iElement])[max_idx // n_grids, max_idx % n_grids]))
+						ax.set_title("Rescaled {}\nRescaled Max Abs diff = {:.6e}".format(title[iPlot] + gp.get_RI_label(iElement), np.abs(diff[iElement])[max_idx // n_grids, max_idx % n_grids]))
 			fig.suptitle("Tick = {}\nTotal Rescaled Error = {}\nTotal Rescaled Predict Error = {}".format(iTick, np.sum(rescaled_errors), np.sum(evolving_errors)))
 			fig.savefig("Tick = {:03}.png".format(iTick))
 			# print to file
@@ -354,7 +405,7 @@ def main() -> None:
 			mca.update_pts(gp_pts, predictors.predict)
 			aver: expectation.Averager
 			for aver in [mca, aia]:
-				print(*aver.population(), *aver.coordinates(), aver.potential(), aver.kinetic(mass), *aver.purity().reshape(-1), end=' ', file=ave_f)
+				print(*aver.population(), *aver.coordinates(), *aver.covariance()[np.tril_indices(pes.PHASEDIM)], aver.potential(), aver.kinetic(mass), *aver.purity().reshape(-1), end=' ', file=ave_f)
 			print("", file=ave_f, flush=True)
 
 		def init() -> typing.Iterable[matplotlib.artist.Artist | typing.Iterable[matplotlib.artist.Artist]]:
@@ -374,6 +425,13 @@ def main() -> None:
 					ax.set_title("Rescaled " + title[iPlot] + gp.get_RI_label(iElement))
 			fig.colorbar(matplotlib.cm.ScalarMappable(cmap=CMAP, norm=NORM), ax=axs.ravel().tolist())
 			train_pred_draw(0)
+			predictors.print(prm_f)
+			print('\n', file=prm_f)
+			np.savetxt(scl_f, get_scale(gp_density))
+			print('\n', file=scl_f)
+			for i in range(pes.NUM_ELM):
+				print(predictors[i].error().item(), file=lss_f)
+			print('\n', file=lss_f)
 			return fig, axs
 
 		def draw(iTick: int) -> typing.Iterable[matplotlib.artist.Artist | typing.Iterable[matplotlib.artist.Artist]]:
@@ -393,14 +451,14 @@ def main() -> None:
 			nonlocal gp_pts, gp_density, num_points
 			# evolve
 			for _ in range(output_steps):
-				predictors.print(prm_f)
-				print('\n', file=prm_f)
 				evolve.evolve(gp_pts, gp_density, mass, dt, predictors.predict)
 				evolve.sh_evolve(sh_pts, sh_density, sh_belonging_idx, mass, dt, predictors.predict)
 				scale: npt.NDArray[np.double] = get_scale(gp_density)
+				predictors.update(gp_pts, gp_density, num_points, scale)
+				predictors.print(prm_f)
+				print('\n', file=prm_f)
 				np.savetxt(scl_f, scale)
 				print('\n', file=scl_f)
-				predictors.update(gp_pts, gp_density, num_points, scale)
 				for i in range(pes.NUM_ELM):
 					print(predictors[i].error().item(), file=lss_f)
 				print('\n', file=lss_f)
@@ -411,13 +469,20 @@ def main() -> None:
 			gp_pts = [np.tile(sh_pts[sh_belonging_idx == iTril], (1 + NUM_XTR_RATIO, 1)) for iTril in pes.tril_element_indices]
 			gp_density = [np.tile(sh_density[sh_belonging_idx == iTril], 1 + NUM_XTR_RATIO) for iTril in pes.tril_element_indices]
 			# sample extra points and predict them
-			sample.sample_extra_points(num_points, gp_pts, predictors)
+			sample.sample_extra_points(num_points, gp_pts)
 			for iPES in range(pes.NUM_PES):
 				for jPES in range(iPES + 1):
 					TrilIndex: int = pes.flatten_tril_index[iPES, jPES]
 					gp_density[TrilIndex][num_points[TrilIndex]:] = predictors.predict(gp_pts[TrilIndex][num_points[TrilIndex]:], iPES * pes.NUM_PES + jPES)
 			predictors.update(gp_pts, gp_density, num_points, get_scale(gp_density))
 			predictors.train()
+			predictors.print(prm_f)
+			print('\n', file=prm_f)
+			np.savetxt(scl_f, get_scale(gp_density))
+			print('\n', file=scl_f)
+			for i in range(pes.NUM_ELM):
+				print(predictors[i].error().item(), file=lss_f)
+			print('\n', file=lss_f)
 			return fig, axs
 
 		# draw animation
@@ -426,68 +491,88 @@ def main() -> None:
 	# then plots
 	plt.close(fig)
 	# error
+	error_average_ticks: npt.NDArray[np.double] = np.arange(total_ticks) * output_interval
 	fig, axs = plt.subplots(1, 3, figsize=(FIGSIZE[0] * 3, FIGSIZE[1]))
 	error: npt.NDArray[np.double] = np.loadtxt(ERR_FNAME + ".txt").reshape(-1, 3, pes.NUM_ELM)
 	error_titles: list[str] = ["Original", "Rescaled", "Evolving"]
 	for iPlot in range(axs.size):
 		ax: matplotlib.axes.Axes = axs[iPlot]
 		for iElement in range(pes.NUM_ELM):
-			ax.semilogy(np.arange(total_ticks) * output_interval, error[:, iPlot, iElement], label=gp.get_RI_label(iElement))
-		ax.set_xlabel("Time")
+			ax.semilogy(error_average_ticks, error[:, iPlot, iElement], label=gp.get_RI_label(iElement))
+		ax.set_xlabel("Time / a.u.")
 		ax.set_ylabel("Error")
 		ax.legend()
 		ax.set_title(error_titles[iPlot] + " Error")
 	fig.savefig(ERR_FNAME + ".png")
 	plt.close(fig)
-	# param and loss
-	fig, axs = plt.subplots(1, pes.PHASEDIM + 2, figsize=(FIGSIZE[0] * (pes.PHASEDIM + 2), FIGSIZE[1]))
-	param_loss_scale: npt.NDArray[np.double] = np.concatenate((np.loadtxt(PRM_FNAME + ".txt").reshape(-1, pes.NUM_ELM, pes.PHASEDIM), np.loadtxt(LSS_FNAME + ".txt").reshape(-1, pes.NUM_ELM, 1), np.loadtxt(SCL_FNAME + ".txt").reshape(-1, pes.NUM_ELM, 1)), -1)
-	param_loss_scale_total_ticks = param_loss_scale.shape[0] # This should be (total_ticks - 1) * output_steps
-	param_loss_scale_titles: list[str] = [('x' if iDim < pes.DIM else 'p') + str(iDim % pes.DIM) for iDim in range(pes.PHASEDIM)] + ["Loss on Sample Points", "Rescale Factor"]
-	for iPlot in range(axs.size):
-		ax: matplotlib.axes.Axes = axs[iPlot]
-		for iElement in range(pes.NUM_ELM):
-			if iPlot < pes.PHASEDIM:
-				ax.plot(np.arange(param_loss_scale_total_ticks) * dt, param_loss_scale[:, iElement, iPlot], label=gp.get_RI_label(iElement))
-			else:
-				ax.semilogy(np.arange(param_loss_scale_total_ticks) * dt, param_loss_scale[:, iElement, iPlot], label=gp.get_RI_label(iElement))
-		ax.set_xlabel("Time")
-		ax.set_ylabel("Characteristic Length / a.u." if iPlot < pes.PHASEDIM else "")
-		ax.set_title(param_loss_scale_titles[iPlot])
-		ax.legend()
-	fig.savefig(PRM_FNAME + "-" + LSS_FNAME + "-" + SCL_FNAME + ".png")
-	plt.close(fig)
 	# averages
 	ave_type_titles: list[str] = ["Monte Carlo", "Analytical"]
-	plot_titles = ["Population"] + [('x' if iDim < pes.DIM else 'p') + str(iDim % pes.DIM) for iDim in range(pes.PHASEDIM)] + ["Energy", "Purity"]
+	plot_titles = ["Population"] + [dimension_name(iDim) for iDim in range(pes.PHASEDIM)] + [("Cov(" + dimension_name(jDim) + ", " + dimension_name(iDim) + ")") if iDim != jDim else ("Var[" + dimension_name(iDim) + "]") for iDim in range(pes.PHASEDIM) for jDim in range(iDim + 1)] + ["Energy", "Purity"]
 	fig, axs = plt.subplots(len(ave_type_titles), len(plot_titles), figsize=(FIGSIZE[0] * len(plot_titles), FIGSIZE[1] * len(ave_type_titles))) # population, <x> and <p>, energy, purity
 	averages: npt.NDArray[np.double] = np.loadtxt(AVE_FNAME + ".txt")
-	averages = averages[:, 1:].reshape(averages.shape[0], 2, (averages.shape[1] - 1) // 2)
+	assert averages.shape[0] == total_ticks
+	averages = averages[:, 1:].reshape(total_ticks, 2, (averages.shape[1] - 1) // 2)
 	for iRow in range(axs.shape[0]):
 		for iCol in range(axs.shape[1]):
 			ax: matplotlib.axes.Axes = axs[iRow, iCol]
+			y_label: str = plot_titles[iCol]
 			if iCol == 0: # population
 				for iPES in range(pes.NUM_PES):
-					ax.plot(np.arange(total_ticks) * output_interval, averages[:, iRow, iPES], label="State " + str(iPES))
-				ax.plot(np.arange(total_ticks) * output_interval, np.sum(averages[:, iRow, :pes.NUM_PES], -1), label="Total")
+					ax.plot(error_average_ticks, averages[:, iRow, iPES], label="State " + str(iPES))
+				ax.plot(error_average_ticks, np.sum(averages[:, iRow, :pes.NUM_PES], -1), label="Total")
 				ax.legend()
-			elif iCol < pes.PHASEDIM + 1: # <x> and <p>
-				ax.plot(np.arange(total_ticks) * output_interval, averages[:, iRow, iCol - 1 + pes.NUM_PES])
-			elif iCol == pes.PHASEDIM + 1: # energies
-				ax.plot(np.arange(total_ticks) * output_interval, averages[:, iRow, pes.NUM_PES + pes.PHASEDIM + 1], label="Kinetic Energy")
+			elif iCol <= pes.PHASEDIM * (pes.PHASEDIM + 3) // 2: # <x>, <p>, and covariances
+				ax.plot(error_average_ticks, averages[:, iRow, iCol - 1 + pes.NUM_PES])
+				y_label += " / a.u."
+				if iCol > pes.PHASEDIM:
+					y_label += r"$^2$"
+			elif iCol == pes.PHASEDIM * (pes.PHASEDIM + 3) // 2 + 1: # energies
+				ax.plot(error_average_ticks, averages[:, iRow, pes.NUM_PES + pes.PHASEDIM * (pes.PHASEDIM + 3) // 2 + 1], label="Kinetic Energy")
 				if iRow == 0: # only mc has potential and thus total energy
-					ax.plot(np.arange(total_ticks) * output_interval, averages[:, iRow, pes.NUM_PES + pes.PHASEDIM], label="Potential Energy")
-					ax.plot(np.arange(total_ticks) * output_interval, np.sum(averages[:, iRow, pes.NUM_PES + pes.PHASEDIM:pes.NUM_PES + pes.PHASEDIM + 2], -1), label="Total Energy")
+					ax.plot(error_average_ticks, averages[:, iRow, pes.NUM_PES + pes.PHASEDIM * (pes.PHASEDIM + 3) // 2], label="Potential Energy")
+					ax.plot(error_average_ticks, np.sum(averages[:, iRow, pes.NUM_PES + pes.PHASEDIM * (pes.PHASEDIM + 3) // 2:pes.NUM_PES + pes.PHASEDIM * (pes.PHASEDIM + 3) // 2 + 2], -1), label="Total Energy")
 				ax.legend()
+				y_label += " / a.u."
 			else: # purity
 				for iElement in range(pes.NUM_ELM):
-					ax.plot(np.arange(total_ticks) * output_interval, averages[:, iRow, pes.NUM_PES + pes.PHASEDIM + 2 + iElement], label=gp.get_RI_label(iElement))
-				ax.plot(np.arange(total_ticks) * output_interval, np.sum(averages[:, iRow, pes.NUM_PES + pes.PHASEDIM + 2:pes.NUM_PES + pes.PHASEDIM + 2 + pes.NUM_ELM], -1), label="Total")
+					ax.plot(error_average_ticks, averages[:, iRow, pes.NUM_PES + pes.PHASEDIM * (pes.PHASEDIM + 3) // 2 + 2 + iElement], label=gp.get_RI_label(iElement))
+				ax.plot(error_average_ticks, np.sum(averages[:, iRow, pes.NUM_PES + pes.PHASEDIM * (pes.PHASEDIM + 3) // 2 + 2:], -1), label="Total")
 				ax.legend()
-			ax.set_xlabel("Time")
-			ax.set_ylabel(plot_titles[iCol] + ("" if iCol in (0, len(plot_titles) - 1) else " / a.u."))
+			ax.set_xlabel("Time / a.u.")
+			ax.set_ylabel(y_label)
 			ax.set_title(ave_type_titles[iRow] + " Average of " + plot_titles[iCol])
 	fig.savefig(AVE_FNAME + ".png")
+	plt.close(fig)
+	# parameters
+	param_loss_scale_ticks: npt.NDArray[np.double] = np.concatenate([np.arange(i * output_steps, (i + 1) * output_steps + 1) for i in range(total_ticks - 1)]) * dt # This should be size of (total_ticks - 1) * (output_steps + 1)
+	fig, axs = plt.subplots(1, pes.PHASEDIM, figsize=(FIGSIZE[0] * pes.PHASEDIM, FIGSIZE[1]))
+	parameters: npt.NDArray[np.double] = np.loadtxt(PRM_FNAME + ".txt").reshape(-1, pes.NUM_ELM, pes.PHASEDIM)[:-1]
+	assert param_loss_scale_ticks.size == parameters.shape[0]
+	parameter_names: list[str] = [dimension_name(iDim) for iDim in range(pes.PHASEDIM)]
+	for iDim in range(pes.PHASEDIM):
+		ax: matplotlib.axes.Axes = axs[iDim]
+		for iElement in range(pes.NUM_ELM):
+			ax.plot(param_loss_scale_ticks, np.sqrt(parameters[:, iElement, iDim]), label=gp.get_RI_label(iElement))
+		ax.set_xlabel("Time / a.u.")
+		ax.set_ylabel("Characteristic Length / a.u.")
+		ax.set_title("Characteristic Length of " + parameter_names[iDim])
+		ax.legend()
+	fig.savefig(PRM_FNAME + ".png")
+	plt.close(fig)
+	# loss and rescale factor
+	loss_scale: npt.NDArray[np.double] = np.concatenate((np.loadtxt(LSS_FNAME + ".txt").reshape(-1, pes.NUM_ELM, 1), np.loadtxt(SCL_FNAME + ".txt").reshape(-1, pes.NUM_ELM, 1)), -1)[:-1]
+	assert param_loss_scale_ticks.size == loss_scale.shape[0]
+	loss_scale_titles: list[str] = ["Loss on Sample Points", "Rescale Factor"]
+	fig, axs = plt.subplots(1, 2, figsize=(FIGSIZE[0] * 2, FIGSIZE[1]))
+	for iPlot in range(axs.size):
+		ax: matplotlib.axes.Axes = axs[iPlot]
+		for iElement in range(pes.NUM_ELM):
+				ax.semilogy(param_loss_scale_ticks, loss_scale[:, iElement, iPlot], label=gp.get_RI_label(iElement))
+		ax.set_xlabel("Time / a.u.")
+		ax.set_ylabel("Characteristic Length / a.u." if iPlot < pes.PHASEDIM else "")
+		ax.set_title(loss_scale_titles[iPlot])
+		ax.legend()
+	fig.savefig(LSS_FNAME + "-" + SCL_FNAME + ".png")
 	plt.close(fig)
 	# tar figures
 	with tarfile.open("ticks.tar.gz", "w:gz") as tf:

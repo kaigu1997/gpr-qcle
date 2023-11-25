@@ -19,6 +19,7 @@
 *out*
 *put
 *result*/
+*.tar.*
 
 # IDE configuration
 .vs*/

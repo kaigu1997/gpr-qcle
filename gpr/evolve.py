@@ -492,7 +492,7 @@ def sh_evolve(
 			# surface hopping
 			# choose the one to jump to
 			num_pts: int = indices.size
-			idx_of_dest_idx: npt.NDArray[np.int_] = sample.np_rng.integers(2 * pes.NUM_PES - 2, size=num_pts, dtype=np.int_) # n
+			idx_of_dest_idx: npt.NDArray[np.int_] = sample.np_rng.integers(0, 2 * pes.NUM_PES - 2, size=num_pts, dtype=np.int_) # n
 			velocity: npt.NDArray[np.double] = p2[indices] / mass # n * D
 			coupling: npt.NDArray[np.double] = pes.adiabatic_coupling(x4[indices])[np.arange(num_pts), :, coup_row_idx[TrilIndex, idx_of_dest_idx], coup_col_idx[TrilIndex, idx_of_dest_idx]] # n * D
 			transition_rate: npt.NDArray[np.double] = np.abs(np.sum(velocity * coupling, -1) * dt) # n

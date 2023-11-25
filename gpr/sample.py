@@ -10,7 +10,6 @@ import numpy.typing as npt
 import sklearn.cluster
 import torch
 
-import gp
 import pes
 
 VARIANCE_RATIO: float = 5.0
@@ -64,11 +63,7 @@ def sample_central_points(num_points: int | npt.NDArray[np.int_], all_points: li
 			print("rho({}, {}), <r> = {}, stddev = {}".format(iPES, jPES, np.average(all_points[TrilIndex][:num_points[TrilIndex]], 0), np.std(all_points[TrilIndex][:num_points[TrilIndex]], 0)), flush=True)
 
 
-def sample_extra_points(
-	num_points: int | npt.NDArray[np.int_],
-	all_points: list[npt.NDArray[np.double]],
-	predictors: gp.GPRPredictors | None = None
-) -> None:
+def sample_extra_points(num_points: int | npt.NDArray[np.int_], all_points: list[npt.NDArray[np.double]]) -> None:
 	"""
 	To create the extra point set
 
@@ -80,8 +75,6 @@ def sample_extra_points(
 		The number of central points. The rest of the points are resampled
 	all_points : list[npt.NDArray[np.double]], len of NUM_TRIG, each of shape (num_point * (1 + NUM_XTR_RATIO), PHASEDIM)
 		Points of all elements and dimensions
-	predictors : gp.GPRPredictors | None, optional
-		Predictor, which provides the variance, by default None
 	"""
 	if isinstance(num_points, int):
 		num_points = np.full(pes.NUM_TRIG, num_points, np.int_)

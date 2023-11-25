@@ -24,6 +24,15 @@ import scipy.interpolate
 import evolve
 import pes
 
+FIGSIZE: tuple[float, float] = (6.4, 4.8)
+LIMIT: float = 1.0
+CMAP: typing.Literal["seismic"] = "seismic"
+LOCATOR: matplotlib.ticker.Locator = matplotlib.ticker.MaxNLocator(nbins=21)
+NORM: matplotlib.colors.Normalize = matplotlib.colors.CenteredNorm(0.0, LIMIT, True)
+NUM_PTS: typing.Literal[256] = 256
+NUM_XTR_RATIO: typing.Literal[50] = 50
+NUM_MC_PTS: typing.Literal[1_000_000] = 1_000_000
+
 
 def read_input() -> tuple[npt.NDArray[np.double], npt.NDArray[np.double], npt.NDArray[np.double], float, float]:
 	"""
@@ -62,7 +71,7 @@ def read_data() -> npt.NDArray[np.cdouble]:
 	npt.NDArray[np.cdouble]
 		Input data
 	"""
-	data: npt.NDArray[np.double] = np.loadtxt('pwtdm.txt', np.double, max_rows=168)
+	data: npt.NDArray[np.double] = np.loadtxt('pwtdm.txt', np.double)
 	ticks: int = data.shape[0] // (pes.NUM_ELM * 2)
 	length: int = int(np.round(np.sqrt(data.shape[1])))
 	data = data.reshape((ticks, pes.NUM_ELM, 2, length, length))

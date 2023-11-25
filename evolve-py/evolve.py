@@ -51,7 +51,7 @@ def is_coupling(x: npt.NDArray[np.double], p: npt.NDArray[np.double], mass: npt.
 	is_coupling.CouplingCriterion = 0.0
 	force: npt.NDArray[np.double] = pes.adiabatic_force(x) # ... * D * N * N
 	diag_f: npt.NDArray[np.double] = np.average(np.diagonal(force, 0, -2, -1), -1)[..., np.newaxis, np.newaxis] # ... * D * 1 * 1
-	nac: npt.NDArray[np.double] = pes.non_adiabatic_coupling(x) # ... * D * N * N
+	nac: npt.NDArray[np.double] = pes.adiabatic_coupling(x) # ... * D * N * N
 	return np.any(np.logical_or(np.abs(np.tril(force, -1)) > np.abs(is_coupling.CouplingCriterion * diag_f), dt * (p / mass)[:, np.newaxis, np.newaxis] * nac > is_coupling.CouplingCriterion), axis=(-2, -1))
 
 
@@ -251,7 +251,7 @@ def evolve_density_non_adiabatically(
 				dt : float
 					Time interval
 				"""
-				phi: npt.NDArray[np.double] = np.sum(p_part / mass * pes.non_adiabatic_coupling(x_part)[..., 0, 1] * is_coupling(x_part, p_part, mass, dt_offdiag).astype(np.double), -1) # v.dot(NAC), ...
+				phi: npt.NDArray[np.double] = np.sum(p_part / mass * pes.adiabatic_coupling(x_part)[..., 0, 1] * is_coupling(x_part, p_part, mass, dt_offdiag).astype(np.double), -1) # v.dot(NAC), ...
 				sinphi: npt.NDArray[np.double] = np.sin(2.0 * dt_offdiag * phi)
 				cosphi: npt.NDArray[np.double] = np.cos(2.0 * dt_offdiag * phi)
 				rho_save: npt.NDArray[np.cdouble] = np.copy(rho_part)

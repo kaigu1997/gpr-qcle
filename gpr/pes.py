@@ -13,7 +13,7 @@ import numpy as np
 import numpy.typing as npt
 import torch
 
-torch.set_default_dtype(torch.float64)
+torch.set_default_dtype(torch.double)
 
 
 class Model(enum.IntEnum):

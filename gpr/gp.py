@@ -17,35 +17,10 @@ import numpy.typing as npt
 import torch
 
 import pes
+import utility
 
 torch.set_default_dtype(torch.double)
 torch.manual_seed(0)
-
-
-def get_RI_label(ElementIndex: int) -> str:
-	"""
-	To have the real/imaginary part name of the given input row and column.
-
-	Strictly-upper triangular is real, strictly-lower triangular is imaginary, and diagonal elements are as they are.
-
-	Parameters
-	----------
-	ElementIndex: int
-		Index of the element
-
-	Returns
-	-------
-	str
-		Name of the real/imaginary part. 
-	"""
-	RowIndex: int = ElementIndex // pes.NUM_PES
-	ColIndex: int = ElementIndex % pes.NUM_PES
-	if RowIndex == ColIndex:
-		return "$\\rho_{{{},{}}}$".format(RowIndex, ColIndex)
-	elif RowIndex < ColIndex:
-		return "$\\Re\\rho_{{{},{}}}$".format(ColIndex, RowIndex)
-	else:
-		return "$\\Im\\rho_{{{},{}}}$".format(RowIndex, ColIndex)
 
 
 class GP(gpytorch.models.ExactGP):
@@ -225,35 +200,18 @@ class SinglePredictor:
 			print_grad : bool, optional
 				Whether to print the gradient or not, by default False
 			"""
-			def make_tensor_printable(t: torch.Tensor) -> float | npt.NDArray[np.double]:
-				"""
-				To transform a torch Tensor to read-friendly form
-
-				If the tensor contains only 1 element, return the element;
-				otherwise, return the flattened numpy array
-
-				Parameters
-				----------
-				t : torch.Tensor
-					The tensor
-
-				Returns
-				-------
-				float | npt.NDArray[np.double]
-					Return the only element or the flattened array
-				"""
-				if t.dim() == 0 or np.prod(t.shape) == 1:
-					return t.item()
-				else:
-					return t.detach().numpy().ravel()
-
-			fmt: str = "Parameter name: {0:42} value = {1}"
-			fmt_grad: str = fmt + " grad = {2}"
 			for param_name, param, constraint in model.named_parameters_and_constraints():
 				if print_grad and param.grad is not None:
-					print(fmt_grad.format(param_name, make_tensor_printable(param), make_tensor_printable(param.grad)))
+					print(
+						"Parameter name: {}".format(param_name),
+						utility.format_array("value", param),
+						utility.format_array("grad", param.grad)
+					)
 				else:
-					print(fmt.format("".join(param_name.split("raw_")), make_tensor_printable(constraint.transform(param) if isinstance(constraint, gpytorch.constraints.Interval) else param)))
+					print(
+						"Parameter name: {}".format("".join(param_name.split("raw_"))),
+						utility.format_array("value", constraint.transform(param) if isinstance(constraint, gpytorch.constraints.Interval) else param)
+					)
 
 		def get_lr(optimizer: torch.optim.Optimizer) -> float:
 			"""
@@ -482,7 +440,7 @@ class GPRPredictors:
 		"""
 		for iElement in range(pes.NUM_ELM):
 			if check_predictor(self.predictors[iElement]):
-				print("Training " + get_RI_label(iElement))
+				print("Training " + utility.get_RI_label(iElement))
 				self.predictors[iElement].train()
 
 	def update_weights(self) -> None:

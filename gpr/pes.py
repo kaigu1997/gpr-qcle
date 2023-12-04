@@ -41,7 +41,6 @@ NUM_TRIG: typing.Literal[3] = NUM_PES * (NUM_PES + 1) // 2
 DIM: typing.Literal[1] = 1
 PHASEDIM: typing.Literal[2] = 2
 HBAR: float = 1.0
-PURITY_FACTOR: float = (2.0 * np.pi * HBAR) ** DIM
 tril_row_indices: npt.NDArray[np.int_]
 tril_col_indices: npt.NDArray[np.int_]
 tril_row_indices, tril_col_indices = np.tril_indices(NUM_PES)

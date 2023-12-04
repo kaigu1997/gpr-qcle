@@ -17,6 +17,9 @@ import gp
 import pes
 import sample
 
+PURITY_FACTOR: float = (2.0 * np.pi * pes.HBAR) ** pes.DIM
+
+
 class Averager(abc.ABC):
 	"""
 	To calculate averages
@@ -76,7 +79,8 @@ class Averager(abc.ABC):
 		npt.NDArray[np.double]
 			PHASEDIM-by-PHASEDIM covariance matrix
 		"""
-		return self.square_coordinates() - self.coordinates()[:, np.newaxis] * self.coordinates()[np.newaxis, :]
+		coord_ave: npt.NDArray[np.double] = self.coordinates()
+		return self.square_coordinates() + (self.population().sum() - 2.0) * coord_ave[:, np.newaxis] * coord_ave[np.newaxis, :]
 
 	def standard_deviation(self) -> npt.NDArray[np.double]:
 		"""
@@ -87,7 +91,7 @@ class Averager(abc.ABC):
 		npt.NDArray[np.double]
 			Standard deviation of each dimension
 		"""
-		return np.sqrt(np.diagonal(self.square_coordinates()) - self.coordinates() ** 2)
+		return np.sqrt(np.diagonal(self.covariance()))
 
 	@abc.abstractmethod
 	def potential(self) -> float:
@@ -184,36 +188,12 @@ class MonteCarloAverage(Averager):
 				self.density[TrilIndex] = predictor(self.point_set[TrilIndex], iPES * pes.NUM_PES + jPES)
 
 	def population(self) -> npt.NDArray[np.double]:
-		"""
-		To calculate the population on each potential energy surfaces
-
-		Returns
-		-------
-		npt.NDArray[np.double]
-			Population on each surfaces
-		"""
 		return np.average(self.density[MonteCarloAverage.DIAGONAL_TRIL_INDEX].real / self.weight[MonteCarloAverage.DIAGONAL_TRIL_INDEX], -1)
 
 	def coordinates(self) -> npt.NDArray[np.double]:
-		"""
-		To calculate the average of phase space coordinates
-
-		Returns
-		-------
-		npt.NDArray[np.double]
-			Average positions and momenta
-		"""
 		return np.sum(np.average(np.moveaxis(self.point_set[MonteCarloAverage.DIAGONAL_TRIL_INDEX], -1, 0) * self.density[MonteCarloAverage.DIAGONAL_TRIL_INDEX].real / self.weight[MonteCarloAverage.DIAGONAL_TRIL_INDEX], axis=-1), 1)
 
 	def square_coordinates(self) -> npt.NDArray[np.double]:
-		"""
-		To calculate averages of product of phase space coordinates
-
-		Returns
-		-------
-		npt.NDArray[np.double]
-			A PHASEDIM-by-PHASEDIM matrix, whose ij term is <x_i*x_j>
-		"""
 		return np.sum(
 			np.average(
 				self.density[MonteCarloAverage.DIAGONAL_TRIL_INDEX, :, np.newaxis, np.newaxis].real
@@ -225,28 +205,24 @@ class MonteCarloAverage(Averager):
 			0
 		)
 
-	def potential(self) -> float:
-		"""
-		To calculate the average potential energy
+	def covariance(self) -> npt.NDArray[np.double]:
+		coord_ave: npt.NDArray[np.double] = self.coordinates()
+		return np.sum(
+			np.average(
+				self.density[MonteCarloAverage.DIAGONAL_TRIL_INDEX, :, np.newaxis, np.newaxis].real
+				* (self.point_set[MonteCarloAverage.DIAGONAL_TRIL_INDEX, :, :, np.newaxis] - coord_ave[:, np.newaxis])
+				* (self.point_set[MonteCarloAverage.DIAGONAL_TRIL_INDEX, :, np.newaxis, :] - coord_ave[np.newaxis, :])
+				/ self.weight[MonteCarloAverage.DIAGONAL_TRIL_INDEX, :, np.newaxis, np.newaxis],
+				1
+			),
+			0
+		)
 
-		Returns
-		-------
-		float
-			Average potential energy
-		"""
+	def potential(self) -> float:
 		return np.sum(np.average(pes.adiabatic_potential(self.point_set[MonteCarloAverage.DIAGONAL_TRIL_INDEX, :, :pes.DIM])[np.arange(pes.NUM_PES), :, np.arange(pes.NUM_PES)] * self.density[MonteCarloAverage.DIAGONAL_TRIL_INDEX].real / self.weight[MonteCarloAverage.DIAGONAL_TRIL_INDEX], -1))
 
 	def purity(self) -> npt.NDArray[np.double]:
-		"""
-		To calculate contribution to purity of each element
-
-		Returns
-		-------
-		npt.NDArray[np.double]
-			Purity of each element
-		"""
-		result: npt.NDArray[np.double] = np.zeros((pes.NUM_PES, pes.NUM_PES), np.double)
-		return pes.PURITY_FACTOR * pes.lower_triangular_to_full(np.average((self.density.real ** 2 + self.density.imag ** 2) / self.weight, -1))
+		return PURITY_FACTOR * pes.lower_triangular_to_full(np.average((self.density.real ** 2 + self.density.imag ** 2) / self.weight, -1))
 
 
 class AnalyticalAverager(Averager):
@@ -269,14 +245,6 @@ class AnalyticalAverager(Averager):
 		self._predictors: gp.GPRPredictors = pred
 
 	def population(self) -> npt.NDArray[np.double]:
-		"""
-		To calculate the population on each potential energy surfaces
-
-		Returns
-		-------
-		npt.NDArray[np.double]
-			Population on each surfaces
-		"""
 		result: npt.NDArray[np.double] = np.empty(pes.NUM_PES, np.double)
 		for iPES in range(pes.NUM_PES):
 			ElementIndex: int = iPES * pes.NUM_PES + iPES
@@ -285,30 +253,14 @@ class AnalyticalAverager(Averager):
 		return result * AnalyticalAverager.AVERAGE_CONSTANT
 
 	def coordinates(self) -> npt.NDArray[np.double]:
-		"""
-		To calculate the average of phase space coordinates
-
-		Returns
-		-------
-		npt.NDArray[np.double]
-			Average positions and momenta
-		"""
 		result: npt.NDArray[np.double] = np.zeros(pes.PHASEDIM, np.double)
 		for iPES in range(pes.NUM_PES):
 			ElementIndex: int = iPES * pes.NUM_PES + iPES
 			pred: gp.SinglePredictor = self._predictors[ElementIndex]
-			result += pred.model.cov.lengthscale.prod().item() * (pred.get_weights().unsqueeze(-1) * pred.get_training_features()).sum(0).detach().numpy() / self._predictors.scale[ElementIndex]
+			result += pred.model.cov.lengthscale.prod().item() / self._predictors.scale[ElementIndex] * (pred.get_weights()[:, None] * pred.get_training_features()).sum(0).detach().numpy()
 		return result * AnalyticalAverager.AVERAGE_CONSTANT
 
 	def square_coordinates(self) -> npt.NDArray[np.double]:
-		"""
-		To calculate averages of product of phase space coordinates
-
-		Returns
-		-------
-		npt.NDArray[np.double]
-			A PHASEDIM-by-PHASEDIM matrix, whose ij term is <x_i*x_j>
-		"""
 		result: npt.NDArray[np.double] = np.zeros((pes.PHASEDIM, pes.PHASEDIM))
 		for iPES in range(pes.NUM_PES):
 			ElementIndex: int = iPES * pes.NUM_PES + iPES
@@ -318,26 +270,13 @@ class AnalyticalAverager(Averager):
 				+ pred.get_weights().sum() * torch.diagflat(pred.model.cov.lengthscale ** 2)).detach().numpy()
 		return result * AnalyticalAverager.AVERAGE_CONSTANT
 
-	def potential(self) -> float:
-		"""
-		To calculate the average potential energy
+	def covariance(self) -> npt.NDArray[np.double]:
+		return super().covariance()
 
-		Returns
-		-------
-		float
-			Average potential energy
-		"""
+	def potential(self) -> float:
 		return np.nan
 
 	def purity(self) -> npt.NDArray[np.double]:
-		"""
-		To calculate contribution to purity of each element
-
-		Returns
-		-------
-		npt.NDArray[np.double]
-			Purity of each element
-		"""
 		result: npt.NDArray[np.double] = np.empty((pes.NUM_PES, pes.NUM_PES), np.double)
 		for iPES in range(pes.NUM_PES):
 			for jPES in range(pes.NUM_PES):
@@ -345,4 +284,4 @@ class AnalyticalAverager(Averager):
 				model: gp.GP = copy.deepcopy(pred.model)
 				model.cov.lengthscale *= np.sqrt(2.0)
 				result[iPES, jPES] = (np.pi ** pes.DIM) * pred.model.cov.lengthscale.prod().item() * (pred.get_weights() @ model.cov(pred.get_training_features(), pred.get_training_features()) @ pred.get_weights()).item() / (self._predictors.scale[iPES * pes.NUM_PES + jPES] ** 2)
-		return pes.PURITY_FACTOR * (result + result.T - np.diag(np.diag(result)))
+		return PURITY_FACTOR * (result + result.T - np.diag(np.diag(result)))

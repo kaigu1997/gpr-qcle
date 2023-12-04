@@ -8,6 +8,7 @@ The main module.
 """
 
 import collections.abc
+import datetime
 import io
 import os
 import tarfile
@@ -30,6 +31,7 @@ import expectation
 import gp
 import pes
 import sample
+import utility
 
 FIGSIZE: tuple[float, float] = (6.4, 4.8)
 LIMIT: float = 1.0
@@ -38,7 +40,7 @@ LOCATOR: matplotlib.ticker.Locator = matplotlib.ticker.MaxNLocator(nbins=21)
 NORM: matplotlib.colors.Normalize = matplotlib.colors.CenteredNorm(0.0, LIMIT, True)
 NUM_PTS: typing.Literal[256] = 256
 NUM_XTR_RATIO: typing.Literal[50] = 50
-NUM_MC_PTS: typing.Literal[1_000_000] = 1_000_000
+NUM_MC_PTS: typing.Literal[10_000_000] = 10_000_000
 
 
 def read_input() -> tuple[npt.NDArray[np.double], npt.NDArray[np.double], npt.NDArray[np.double], float, float]:
@@ -158,57 +160,6 @@ def plot_region(arr: npt.NDArray[np.double]) -> npt.NDArray[np.double]:
 	return arr[::4, ::4]
 
 
-def format_array(arr_name: str, arr: npt.NDArray | float | int | complex) -> str:
-	"""
-	To print the flatten array as well as raw number
-
-	Parameters
-	----------
-	arr_name : str
-		The name of the array or variable
-	arr : npt.NDArray | float | int
-		The array or raw number
-
-	Returns
-	-------
-	str
-		_description_
-	"""
-	if isinstance(arr, np.ndarray):
-		return (arr_name + " =" + " {}" * arr.size).format(*arr.ravel())
-	elif isinstance(arr, complex):
-		return arr_name + " = {} + {}i".format(arr.real, arr.imag)
-	else:
-		return arr_name + " = " + str(arr)
-
-
-def dimension_name(DimIndex: int) -> str:
-	"""
-	Name corresponding to the dimension in phase space
-
-	Parameters
-	----------
-	DimIndex : int
-		Index of the dimension, range in [0, PHASEDIM)
-
-	Returns
-	-------
-	str
-		The name of the dimension
-	"""
-	assert 0 <= DimIndex < pes.PHASEDIM
-	if pes.DIM == 1:
-		if DimIndex == 0:
-			return "x"
-		else:
-			return "p"
-	else:
-		if DimIndex < pes.DIM:
-			return r"$x_{}$".format(DimIndex)
-		else:
-			return r"$p_{}$".format(DimIndex - pes.DIM)
-
-
 def main() -> None:
 	"""
 	The main routine
@@ -227,7 +178,14 @@ def main() -> None:
 	dt: float
 	mass, r0, sigma_r0, output_interval, dt = read_input()
 	output_steps: int = int(round(output_interval / dt))
-	print(format_array("Mass", mass), format_array("Initial center", r0), format_array("Initial deviation", sigma_r0), format_array("Time step", dt), format_array("Steps between output", output_steps), sep='\n')
+	print(
+		utility.format_array("Mass", mass),
+		utility.format_array("Initial center", r0),
+		utility.format_array("Initial deviation", sigma_r0),
+		utility.format_array("Time step", dt),
+		utility.format_array("Steps between output", output_steps),
+		sep='\n'
+	)
 	# read input
 	data: npt.NDArray[np.cdouble] = read_data()
 	total_ticks: int = data.shape[0]
@@ -277,6 +235,8 @@ def main() -> None:
 	PRM_FNAME: typing.Literal["parameters"] = "parameters"
 	LSS_FNAME: typing.Literal["loss"] = "loss"
 	AVE_FNAME: typing.Literal["ave"] = "ave"
+	DATA_EXTENSION: typing.Literal[".txt"] = ".txt"
+	FIGURE_EXTENSION: typing.Literal[".png"] = ".png"
 	pts_f: io.TextIOWrapper
 	den_f: io.TextIOWrapper
 	all_f: io.TextIOWrapper
@@ -284,15 +244,15 @@ def main() -> None:
 	scl_f: io.TextIOWrapper
 	prm_f: io.TextIOWrapper
 	lss_f: io.TextIOWrapper
-	with open("points.txt", 'w', encoding="UTF-8") as pts_f,\
-		open("belonging.txt", 'w', encoding="UTF-8") as bln_f,\
-		open("density.txt", 'w', encoding="UTF-8") as den_f,\
-		open("all_grids.txt", 'w', encoding="UTF-8") as all_f,\
-		open(ERR_FNAME + ".txt", 'w', encoding="UTF-8") as err_f,\
-		open(AVE_FNAME + ".txt", 'w', encoding="UTF-8") as ave_f,\
-		open(SCL_FNAME + ".txt", 'w', encoding="UTF-8") as scl_f,\
-		open(PRM_FNAME + ".txt", 'w', encoding="UTF-8") as prm_f,\
-		open(LSS_FNAME + ".txt", 'w', encoding="UTF-8") as lss_f:
+	with open("points" + DATA_EXTENSION, 'w', encoding="UTF-8") as pts_f,\
+		open("belonging" + DATA_EXTENSION, 'w', encoding="UTF-8") as bln_f,\
+		open("density" + DATA_EXTENSION, 'w', encoding="UTF-8") as den_f,\
+		open("all_grids" + DATA_EXTENSION, 'w', encoding="UTF-8") as all_f,\
+		open(ERR_FNAME + DATA_EXTENSION, 'w', encoding="UTF-8") as err_f,\
+		open(AVE_FNAME + DATA_EXTENSION, 'w', encoding="UTF-8") as ave_f,\
+		open(SCL_FNAME + DATA_EXTENSION, 'w', encoding="UTF-8") as scl_f,\
+		open(PRM_FNAME + DATA_EXTENSION, 'w', encoding="UTF-8") as prm_f,\
+		open(LSS_FNAME + DATA_EXTENSION, 'w', encoding="UTF-8") as lss_f:
 		def train_pred_draw(iTick: int) -> None:
 			"""
 			To train the parameter, doing prediction on all grids, and draw it
@@ -309,7 +269,7 @@ def main() -> None:
 			"""
 			# get scale
 			scale: npt.NDArray[np.double] = get_scale(gp_density)
-			print("Tick {}, scales = {}".format(iTick, scale))
+			print("Tick {}, {}, {}".format(iTick, utility.format_array("scales", scale), datetime.datetime.now()))
 			# interpolate the data
 			y_all: list[npt.NDArray[np.cdouble]] = [np.array([], dtype=np.cdouble) for _ in range(pes.NUM_TRIG)]
 			evolving_errors: npt.NDArray[np.double] = np.empty((pes.NUM_PES, pes.NUM_PES), np.double)
@@ -326,7 +286,6 @@ def main() -> None:
 						y_all[TrilIndex].imag = interpolator_im(gp_pts[TrilIndex])
 						evolving_errors[jPES, iPES] = np.sum((y_all[TrilIndex].real - gp_density[TrilIndex].real) ** 2) / num_points[TrilIndex]
 						evolving_errors[iPES, jPES] = np.sum((y_all[TrilIndex].imag - gp_density[TrilIndex].imag) ** 2) / num_points[TrilIndex]
-
 			evolving_errors = evolving_errors.reshape(-1)
 			# fit
 			predictors.update(gp_pts, gp_density, num_points, scale)
@@ -382,13 +341,13 @@ def main() -> None:
 							0.5,
 							"black"
 						)
-						ax.set_title("Rescaled {}\nRescale Factor = {:.6e}".format(title[0] + gp.get_RI_label(iElement), scale[iElement]))
+						ax.set_title("Rescaled {}\nRescale Factor = {:.6e}".format(title[0] + utility.get_RI_label(iElement), scale[iElement]))
 					elif iPlot == 1:
 						ax.set_title("Rescaled Error = {:.6e}\nRescaled Predict Error = {:.6e}".format(rescaled_errors[iElement], evolving_errors[iElement]))
 					elif iPlot == 3:
 						max_idx: np.intp = np.argmax(np.abs(diff[iElement]).reshape(-1))
 						ax.scatter(x_grids[max_idx // n_grids], p_grids[max_idx % n_grids], 15, "black")
-						ax.set_title("Rescaled {}\nRescaled Max Abs diff = {:.6e}".format(title[iPlot] + gp.get_RI_label(iElement), np.abs(diff[iElement])[max_idx // n_grids, max_idx % n_grids]))
+						ax.set_title("Rescaled {}\nRescaled Max Abs diff = {:.6e}".format(title[iPlot] + utility.get_RI_label(iElement), np.abs(diff[iElement])[max_idx // n_grids, max_idx % n_grids]))
 			fig.suptitle("Tick = {}\nTotal Rescaled Error = {}\nTotal Rescaled Predict Error = {}".format(iTick, np.sum(rescaled_errors), np.sum(evolving_errors)))
 			fig.savefig("Tick = {:03}.png".format(iTick))
 			# print to file
@@ -408,60 +367,40 @@ def main() -> None:
 				print(*aver.population(), *aver.coordinates(), *aver.covariance()[np.tril_indices(pes.PHASEDIM)], aver.potential(), aver.kinetic(mass), *aver.purity().reshape(-1), end=' ', file=ave_f)
 			print("", file=ave_f, flush=True)
 
-		def init() -> typing.Iterable[matplotlib.artist.Artist | typing.Iterable[matplotlib.artist.Artist]]:
+		def print_parameter_scale_loss(scale: npt.NDArray[np.double]) -> None:
 			"""
-			Initializer of the animation
+			To print parameters, rescale factor, and loss on sample points to file
 
-			Returns
-			-------
-			typing.Iterable[matplotlib.artist.Artist | typing.Iterable[matplotlib.artist.Artist]]
-				figure and axes
+			Parameters
+			----------
+			scale : npt.NDArray[np.double]
+				Rescale factor
 			"""
-			for iElement in range(pes.NUM_ELM):
-				for iPlot in range(NUM_PLOTS):
-					ax: matplotlib.axes.Axes = axs[iPlot, iElement]
-					ax.set_xlabel('x')
-					ax.set_ylabel('p')
-					ax.set_title("Rescaled " + title[iPlot] + gp.get_RI_label(iElement))
-			fig.colorbar(matplotlib.cm.ScalarMappable(cmap=CMAP, norm=NORM), ax=axs.ravel().tolist())
-			train_pred_draw(0)
 			predictors.print(prm_f)
 			print('\n', file=prm_f)
-			np.savetxt(scl_f, get_scale(gp_density))
+			np.savetxt(scl_f, scale)
 			print('\n', file=scl_f)
 			for i in range(pes.NUM_ELM):
 				print(predictors[i].error().item(), file=lss_f)
 			print('\n', file=lss_f)
-			return fig, axs
-
-		def draw(iTick: int) -> typing.Iterable[matplotlib.artist.Artist | typing.Iterable[matplotlib.artist.Artist]]:
-			"""
-			Implementation of each frame
-
-			Parameters
-			----------
-			iTick : int
-				Current time tick, to access grid data and for plotting
-
-			Returns
-			-------
-			typing.Iterable[matplotlib.artist.Artist | typing.Iterable[matplotlib.artist.Artist]]
-				figure and axes
-			"""
-			nonlocal gp_pts, gp_density, num_points
+			
+		for iElement in range(pes.NUM_ELM):
+			for iPlot in range(NUM_PLOTS):
+				ax: matplotlib.axes.Axes = axs[iPlot, iElement]
+				ax.set_xlabel('x')
+				ax.set_ylabel('p')
+				ax.set_title("Rescaled " + title[iPlot] + utility.get_RI_label(iElement))
+		fig.colorbar(matplotlib.cm.ScalarMappable(cmap=CMAP, norm=NORM), ax=axs.ravel().tolist())
+		train_pred_draw(0)
+		print_parameter_scale_loss(get_scale(gp_density))
+		for iTick in range(1, total_ticks):
 			# evolve
 			for _ in range(output_steps):
 				evolve.evolve(gp_pts, gp_density, mass, dt, predictors.predict)
 				evolve.sh_evolve(sh_pts, sh_density, sh_belonging_idx, mass, dt, predictors.predict)
 				scale: npt.NDArray[np.double] = get_scale(gp_density)
 				predictors.update(gp_pts, gp_density, num_points, scale)
-				predictors.print(prm_f)
-				print('\n', file=prm_f)
-				np.savetxt(scl_f, scale)
-				print('\n', file=scl_f)
-				for i in range(pes.NUM_ELM):
-					print(predictors[i].error().item(), file=lss_f)
-				print('\n', file=lss_f)
+				print_parameter_scale_loss(scale)
 			# update and predict
 			train_pred_draw(iTick)
 			# exchange with SH
@@ -474,42 +413,36 @@ def main() -> None:
 				for jPES in range(iPES + 1):
 					TrilIndex: int = pes.flatten_tril_index[iPES, jPES]
 					gp_density[TrilIndex][num_points[TrilIndex]:] = predictors.predict(gp_pts[TrilIndex][num_points[TrilIndex]:], iPES * pes.NUM_PES + jPES)
-			predictors.update(gp_pts, gp_density, num_points, get_scale(gp_density))
+			scale: npt.NDArray[np.double] = get_scale(gp_density)
+			predictors.update(gp_pts, gp_density, num_points, scale)
 			predictors.train()
-			predictors.print(prm_f)
-			print('\n', file=prm_f)
-			np.savetxt(scl_f, get_scale(gp_density))
-			print('\n', file=scl_f)
-			for i in range(pes.NUM_ELM):
-				print(predictors[i].error().item(), file=lss_f)
-			print('\n', file=lss_f)
-			return fig, axs
-
-		# draw animation
-		matplotlib.animation.FuncAnimation(fig, draw, range(1, total_ticks), init).save("gpr.gif", "imagemagick")
+			print_parameter_scale_loss(scale)
 
 	# then plots
 	plt.close(fig)
 	# error
 	error_average_ticks: npt.NDArray[np.double] = np.arange(total_ticks) * output_interval
 	fig, axs = plt.subplots(1, 3, figsize=(FIGSIZE[0] * 3, FIGSIZE[1]))
-	error: npt.NDArray[np.double] = np.loadtxt(ERR_FNAME + ".txt").reshape(-1, 3, pes.NUM_ELM)
+	error: npt.NDArray[np.double] = np.loadtxt(ERR_FNAME + DATA_EXTENSION).reshape(-1, 3, pes.NUM_ELM)
 	error_titles: list[str] = ["Original", "Rescaled", "Evolving"]
 	for iPlot in range(axs.size):
 		ax: matplotlib.axes.Axes = axs[iPlot]
 		for iElement in range(pes.NUM_ELM):
-			ax.semilogy(error_average_ticks, error[:, iPlot, iElement], label=gp.get_RI_label(iElement))
+			ax.semilogy(error_average_ticks, error[:, iPlot, iElement], label=utility.get_RI_label(iElement))
 		ax.set_xlabel("Time / a.u.")
 		ax.set_ylabel("Error")
 		ax.legend()
 		ax.set_title(error_titles[iPlot] + " Error")
-	fig.savefig(ERR_FNAME + ".png")
+	fig.savefig(ERR_FNAME + FIGURE_EXTENSION)
 	plt.close(fig)
 	# averages
 	ave_type_titles: list[str] = ["Monte Carlo", "Analytical"]
-	plot_titles = ["Population"] + [dimension_name(iDim) for iDim in range(pes.PHASEDIM)] + [("Cov(" + dimension_name(jDim) + ", " + dimension_name(iDim) + ")") if iDim != jDim else ("Var[" + dimension_name(iDim) + "]") for iDim in range(pes.PHASEDIM) for jDim in range(iDim + 1)] + ["Energy", "Purity"]
+	plot_titles: list[str] = ["Population"]\
+		+ [utility.dimension_name(iDim) for iDim in range(pes.PHASEDIM)]\
+		+ [("Cov(" + utility.dimension_name(jDim) + ", " + utility.dimension_name(iDim) + ")") if iDim != jDim else ("Var[" + utility.dimension_name(iDim) + "]") for iDim in range(pes.PHASEDIM) for jDim in range(iDim + 1)]\
+		+ ["Energy", "Purity"]
 	fig, axs = plt.subplots(len(ave_type_titles), len(plot_titles), figsize=(FIGSIZE[0] * len(plot_titles), FIGSIZE[1] * len(ave_type_titles))) # population, <x> and <p>, energy, purity
-	averages: npt.NDArray[np.double] = np.loadtxt(AVE_FNAME + ".txt")
+	averages: npt.NDArray[np.double] = np.loadtxt(AVE_FNAME + DATA_EXTENSION)
 	assert averages.shape[0] == total_ticks
 	averages = averages[:, 1:].reshape(total_ticks, 2, (averages.shape[1] - 1) // 2)
 	for iRow in range(axs.shape[0]):
@@ -535,44 +468,44 @@ def main() -> None:
 				y_label += " / a.u."
 			else: # purity
 				for iElement in range(pes.NUM_ELM):
-					ax.plot(error_average_ticks, averages[:, iRow, pes.NUM_PES + pes.PHASEDIM * (pes.PHASEDIM + 3) // 2 + 2 + iElement], label=gp.get_RI_label(iElement))
+					ax.plot(error_average_ticks, averages[:, iRow, pes.NUM_PES + pes.PHASEDIM * (pes.PHASEDIM + 3) // 2 + 2 + iElement], label=utility.get_RI_label(iElement))
 				ax.plot(error_average_ticks, np.sum(averages[:, iRow, pes.NUM_PES + pes.PHASEDIM * (pes.PHASEDIM + 3) // 2 + 2:], -1), label="Total")
 				ax.legend()
 			ax.set_xlabel("Time / a.u.")
 			ax.set_ylabel(y_label)
 			ax.set_title(ave_type_titles[iRow] + " Average of " + plot_titles[iCol])
-	fig.savefig(AVE_FNAME + ".png")
+	fig.savefig(AVE_FNAME + FIGURE_EXTENSION)
 	plt.close(fig)
 	# parameters
 	param_loss_scale_ticks: npt.NDArray[np.double] = np.concatenate([np.arange(i * output_steps, (i + 1) * output_steps + 1) for i in range(total_ticks - 1)]) * dt # This should be size of (total_ticks - 1) * (output_steps + 1)
 	fig, axs = plt.subplots(1, pes.PHASEDIM, figsize=(FIGSIZE[0] * pes.PHASEDIM, FIGSIZE[1]))
-	parameters: npt.NDArray[np.double] = np.loadtxt(PRM_FNAME + ".txt").reshape(-1, pes.NUM_ELM, pes.PHASEDIM)[:-1]
+	parameters: npt.NDArray[np.double] = np.loadtxt(PRM_FNAME + DATA_EXTENSION).reshape(-1, pes.NUM_ELM, pes.PHASEDIM)[:-1]
 	assert param_loss_scale_ticks.size == parameters.shape[0]
-	parameter_names: list[str] = [dimension_name(iDim) for iDim in range(pes.PHASEDIM)]
+	parameter_names: list[str] = [utility.dimension_name(iDim) for iDim in range(pes.PHASEDIM)]
 	for iDim in range(pes.PHASEDIM):
 		ax: matplotlib.axes.Axes = axs[iDim]
 		for iElement in range(pes.NUM_ELM):
-			ax.plot(param_loss_scale_ticks, np.sqrt(parameters[:, iElement, iDim]), label=gp.get_RI_label(iElement))
+			ax.plot(param_loss_scale_ticks, parameters[:, iElement, iDim], label=utility.get_RI_label(iElement))
 		ax.set_xlabel("Time / a.u.")
 		ax.set_ylabel("Characteristic Length / a.u.")
 		ax.set_title("Characteristic Length of " + parameter_names[iDim])
 		ax.legend()
-	fig.savefig(PRM_FNAME + ".png")
+	fig.savefig(PRM_FNAME + FIGURE_EXTENSION)
 	plt.close(fig)
 	# loss and rescale factor
-	loss_scale: npt.NDArray[np.double] = np.concatenate((np.loadtxt(LSS_FNAME + ".txt").reshape(-1, pes.NUM_ELM, 1), np.loadtxt(SCL_FNAME + ".txt").reshape(-1, pes.NUM_ELM, 1)), -1)[:-1]
+	loss_scale: npt.NDArray[np.double] = np.concatenate((np.loadtxt(LSS_FNAME + DATA_EXTENSION).reshape(-1, pes.NUM_ELM, 1), np.loadtxt(SCL_FNAME + DATA_EXTENSION).reshape(-1, pes.NUM_ELM, 1)), -1)[:-1]
 	assert param_loss_scale_ticks.size == loss_scale.shape[0]
 	loss_scale_titles: list[str] = ["Loss on Sample Points", "Rescale Factor"]
 	fig, axs = plt.subplots(1, 2, figsize=(FIGSIZE[0] * 2, FIGSIZE[1]))
 	for iPlot in range(axs.size):
 		ax: matplotlib.axes.Axes = axs[iPlot]
 		for iElement in range(pes.NUM_ELM):
-				ax.semilogy(param_loss_scale_ticks, loss_scale[:, iElement, iPlot], label=gp.get_RI_label(iElement))
+			ax.semilogy(param_loss_scale_ticks, loss_scale[:, iElement, iPlot], label=utility.get_RI_label(iElement))
 		ax.set_xlabel("Time / a.u.")
 		ax.set_ylabel("Characteristic Length / a.u." if iPlot < pes.PHASEDIM else "")
 		ax.set_title(loss_scale_titles[iPlot])
 		ax.legend()
-	fig.savefig(LSS_FNAME + "-" + SCL_FNAME + ".png")
+	fig.savefig(LSS_FNAME + "-" + SCL_FNAME + FIGURE_EXTENSION)
 	plt.close(fig)
 	# tar figures
 	with tarfile.open("ticks.tar.gz", "w:gz") as tf:

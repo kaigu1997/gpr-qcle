@@ -11,6 +11,7 @@ import sklearn.cluster
 import torch
 
 import pes
+import utility
 
 VARIANCE_RATIO: float = 5.0
 np_rng: np.random.Generator = np.random.Generator(np.random.MT19937(0))
@@ -60,7 +61,15 @@ def sample_central_points(num_points: int | npt.NDArray[np.int_], all_points: li
 			TrilIndex: int = pes.flatten_tril_index[iPES, jPES]
 			kmeans: sklearn.cluster.KMeans = sklearn.cluster.KMeans(num_points[TrilIndex], init="k-means++", n_init="auto", random_state=np.random.RandomState(np_rng.bit_generator), algorithm="lloyd").fit(all_points[TrilIndex])
 			all_points[TrilIndex][:num_points[TrilIndex]] = kmeans.cluster_centers_
-			print("rho({}, {}), <r> = {}, stddev = {}".format(iPES, jPES, np.average(all_points[TrilIndex][:num_points[TrilIndex]], 0), np.std(all_points[TrilIndex][:num_points[TrilIndex]], 0)), flush=True)
+			print(
+				"rho({}, {}), {}, {}".format(
+					iPES,
+					jPES,
+					utility.format_array("<r>", np.average(all_points[TrilIndex][:num_points[TrilIndex]], 0)),
+					utility.format_array("stddev", np.std(all_points[TrilIndex][:num_points[TrilIndex]], 0))
+				),
+				flush=True
+			)
 
 
 def sample_extra_points(num_points: int | npt.NDArray[np.int_], all_points: list[npt.NDArray[np.double]]) -> None:

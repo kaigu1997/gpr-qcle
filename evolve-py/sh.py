@@ -24,7 +24,6 @@ import main
 import pes
 import sample
 
-
 def main_func() -> None:
 	"""
 	The main routine
@@ -56,8 +55,8 @@ def main_func() -> None:
 	# possible destinations of fssh
 	dest_row_idx: npt.NDArray[np.int_] = np.concatenate(np.broadcast_arrays(pes.tril_row_indices[:, np.newaxis], np.arange(pes.NUM_PES)), -1) # i, k
 	dest_col_idx: npt.NDArray[np.int_] = np.concatenate(np.broadcast_arrays(np.arange(pes.NUM_PES), pes.tril_col_indices[:, np.newaxis]), -1) # k, j
-	coup_row_idx: npt.NDArray[np.int_] = dest_col_idx[:, np.concatenate((np.arange(pes.NUM_PES, 2 * pes.NUM_PES), np.arange(pes.NUM_PES)))] # j, k
-	coup_col_idx: npt.NDArray[np.int_] = dest_row_idx[:, np.concatenate((np.arange(pes.NUM_PES, 2 * pes.NUM_PES), np.arange(pes.NUM_PES)))] # k, i
+	coup_row_idx: npt.NDArray[np.int_] = np.repeat(np.tile(np.arange(pes.NUM_PES), 2)[np.newaxis], pes.NUM_TRIG, 0) # k, k
+	coup_col_idx: npt.NDArray[np.int_] = np.repeat(np.concatenate((pes.tril_col_indices[:, np.newaxis], pes.tril_row_indices[:, np.newaxis]), -1), pes.NUM_PES, -1) # j, i
 	filters: npt.NDArray[np.bool_] = np.logical_or(dest_row_idx != pes.tril_row_indices[:, np.newaxis], dest_col_idx != pes.tril_col_indices[:, np.newaxis]) # remove identical
 	dest_row_idx = dest_row_idx[filters].reshape(pes.tril_element_indices.size, 2 * pes.NUM_PES - 2)
 	dest_col_idx = dest_col_idx[filters].reshape(pes.tril_element_indices.size, 2 * pes.NUM_PES - 2)
@@ -74,42 +73,44 @@ def main_func() -> None:
 		for iTick in range(total_ticks):
 			for _ in range(output_steps):
 				# save current indices
+				x0: npt.NDArray[np.double] = pts[:, :pes.DIM] # N * D
+				p0: npt.NDArray[np.double] = pts[:, pes.DIM:] # N * D
+				x2: npt.NDArray[np.double] = np.empty_like(x0) # N * D
+				p1: npt.NDArray[np.double] = np.empty_like(p0) # N * D
+				x4: npt.NDArray[np.double] = np.empty_like(x0) # N * D
+				p2: npt.NDArray[np.double] = np.empty_like(p0) # N * D
 				current_indices: npt.NDArray[np.bool_] = belonging_idx == pes.tril_element_indices[:, np.newaxis]
-				for iTrig in range(pes.NUM_TRIG):
-					ElementIndex: int = pes.tril_element_indices[iTrig]
-					num_pts: int = np.count_nonzero(current_indices[iTrig])
-					if num_pts > 0: # only have elements
-						# evolve
-						pts[current_indices[iTrig], :pes.DIM], pts[current_indices[iTrig], pes.DIM:] = evolve.evolve_coordinates_adiabatically(
-							pts[current_indices[iTrig], :pes.DIM],
-							pts[current_indices[iTrig], pes.DIM:],
-							mass,
-							dt,
-							evolve.Direction.Forward,
-							ElementIndex // pes.NUM_PES,
-							ElementIndex % pes.NUM_PES
-						)
-						# hopping
-						# choose the one to jump to
-						idx_of_dest_idx: npt.NDArray[np.int_] = sample.np_rng.integers(2 * pes.NUM_PES - 2, size=num_pts) # n
-						velocity: npt.NDArray[np.double] = pts[current_indices[iTrig], pes.DIM:] / mass # n * D
-						coupling: npt.NDArray[np.double] = pes.adiabatic_coupling(pts[current_indices[iTrig], :pes.DIM])[np.arange(num_pts), :, coup_row_idx[iTrig, idx_of_dest_idx], coup_col_idx[iTrig, idx_of_dest_idx]] # n * D
-						transition_rate: npt.NDArray[np.double] = np.abs(np.sum(velocity * coupling, -1) * dt) # n
-						transition_prob: npt.NDArray[np.double] = transition_rate / (1.0 + transition_rate) # n
-						# energy conservation
-						potential: npt.NDArray[np.double] = pes.adiabatic_potential(pts[current_indices[iTrig], :pes.DIM]) # n * N
-						momentum_rescale_factor_sq: npt.NDArray[np.double] = 1.0\
-							+ np.where(
-								idx_of_dest_idx < pes.NUM_PES - 1,
-								potential[..., ElementIndex % pes.NUM_PES] - potential[np.arange(num_pts), dest_col_idx[iTrig, idx_of_dest_idx]], # diff on column, ij->ik
-								potential[..., ElementIndex // pes.NUM_PES] - potential[np.arange(num_pts), dest_row_idx[iTrig, idx_of_dest_idx]] # diff on row, ij->kj
-							)\
-							/ np.sum(pts[current_indices[iTrig], pes.DIM:] ** 2 / mass, -1) # n
-						# judgment
-						transition: npt.NDArray[np.bool_] = np.logical_and(sample.np_rng.random(num_pts) < transition_prob, momentum_rescale_factor_sq >= 0.0) # n
-						# chaneg index and momentum
-						belonging_idx[current_indices[iTrig]] = np.where(transition, dest_idx[iTrig, idx_of_dest_idx], ElementIndex)
-						pts[current_indices[iTrig], pes.DIM:] *= np.sqrt(np.where(transition, momentum_rescale_factor_sq, 1.0))[:, np.newaxis]
+				for iBelongPES in range(pes.NUM_PES):
+					for jBelongPES in range(iBelongPES + 1):
+						TrilIndex = pes.flatten_tril_index[iBelongPES, jBelongPES]
+						indices: npt.NDArray[np.int_] = np.flatnonzero(current_indices[TrilIndex]) # n
+						num_pts: int = indices.size
+						if num_pts > 0: # only have elements
+							# evolve
+							x2[indices], p1[indices] = evolve.evolve_coordinates_adiabatically(x0[indices], p0[indices], mass, dt / 2.0, evolve.Direction.Forward, iBelongPES, jBelongPES)
+							x4[indices], p2[indices] = evolve.evolve_coordinates_adiabatically(x2[indices], p1[indices], mass, dt / 2.0, evolve.Direction.Forward, iBelongPES, jBelongPES)
+							# hopping
+							# check energy availability
+							num_states_avail: int = (1 if iBelongPES == jBelongPES else 2) * (pes.NUM_PES - 1)
+							state_prob: npt.NDArray[np.double] = np.zeros((num_pts, num_states_avail + 1))
+							# weights
+							velocity: npt.NDArray[np.double] = p2[indices] / mass # npt * D
+							coupling: npt.NDArray[np.double] = pes.adiabatic_coupling(x4[indices])[:, :, coup_row_idx[TrilIndex, :num_states_avail], coup_col_idx[TrilIndex, :num_states_avail]] # npt * D * nst
+							state_prob[:, :-1] = np.abs(np.sum(velocity[..., np.newaxis] * coupling, -2) * dt) # npt * nst, |v*d*dt|
+							# energy conservation rule
+							potential: npt.NDArray[np.double] = pes.adiabatic_potential(x4[indices]) # npt * N
+							momentum_rescale_factor_sq: npt.NDArray[np.double] = 1.0\
+								+ (potential[:, coup_col_idx[TrilIndex, :num_states_avail]] - potential[:, coup_row_idx[TrilIndex, :num_states_avail]]) / np.sum(pts[indices, pes.DIM:] ** 2 / mass, -1, keepdims=True) # npt * nst
+							state_prob[:, :-1] *= np.where(momentum_rescale_factor_sq >= 0, 1, 0)
+							state_prob[:, -1] = 1.0 # stay at original state
+							state_prob /= np.sum(state_prob, -1, keepdims=True) # normalize
+							# choose the one to jump to
+							idx_of_dest_idx: npt.NDArray[np.int_] = np.array([sample.np_rng.choice(num_states_avail + 1, p=p) for p in state_prob])
+							# chaneg index and momentum
+							transition: npt.NDArray[np.bool_] = idx_of_dest_idx != num_states_avail
+							belonging_idx[indices[transition]] = dest_idx[TrilIndex, idx_of_dest_idx[transition]]
+							p2[indices[transition]] *= np.sqrt(momentum_rescale_factor_sq[transition, idx_of_dest_idx[transition]])[:, np.newaxis]
+							pts[indices, :pes.DIM], pts[indices, pes.DIM:] = x4[indices], p2[indices]
 			# print to file
 			np.savetxt(pts_f, pts.T, footer='\n', comments='')
 			np.savetxt(bln_f, belonging_idx[np.newaxis], footer='\n', comments='')
@@ -129,9 +130,8 @@ def main_func() -> None:
 	fig.colorbar(matplotlib.cm.ScalarMappable(cmap=main.CMAP, norm=main.NORM), ax=axs.ravel().tolist())
 	all_pts: npt.NDArray[np.double] = np.loadtxt("sh-points.txt").reshape(total_ticks, pes.PHASEDIM, main.NUM_PTS * pes.NUM_TRIG)
 	all_belonging: npt.NDArray[np.int_] = np.loadtxt("sh-belonging.txt").astype(np.int_)
-
-	def draw(iTick: int) -> typing.Iterable[matplotlib.artist.Artist | typing.Iterable[matplotlib.artist.Artist]]:
-		print("{}/{}".format(iTick, total_ticks), datetime.datetime.now())
+	for iTick in range(total_ticks):
+		print("{}/{}".format(iTick + 1, total_ticks), datetime.datetime.now())
 		ct_data: npt.NDArray[np.double] = main.real_part(data[iTick])
 		ct_data *= main.get_scale(ct_data)[:, np.newaxis, np.newaxis]
 		for iElement in range(pes.NUM_ELM):
@@ -156,11 +156,6 @@ def main_func() -> None:
 					)
 					ax.set_title("{} Points".format(np.count_nonzero(all_belonging[iTick] == max(iElement // pes.NUM_PES, iElement % pes.NUM_PES) * pes.NUM_PES + min(iElement // pes.NUM_PES, iElement % pes.NUM_PES))))
 		fig.savefig('Tick = {:03}.png'.format(iTick))
-		return fig, axs
-
-	# draw animation
-	matplotlib.animation.FuncAnimation(fig, draw, total_ticks).save('gpr.gif', 'imagemagick')
-
 	with tarfile.open('ticks.tar.gz', 'w:gz') as tf:
 		for iTick in range(total_ticks):
 			name: str = 'Tick = {:03}.png'.format(iTick)

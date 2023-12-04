@@ -289,41 +289,17 @@ def main() -> None:
 			np.savetxt(err_f, (original_errors[iTick], rescaled_errors[iTick]), footer='\n', comments='')
 			print(iTick, time.asctime(), flush=True)
 
-		def init() -> typing.Iterable[matplotlib.artist.Artist | typing.Iterable[matplotlib.artist.Artist]]:
-			"""
-			Initializer of the animation
-
-			Returns
-			-------
-			typing.Iterable[matplotlib.artist.Artist | typing.Iterable[matplotlib.artist.Artist]]
-				figure and axes
-			"""
-			for iPES in range(pes.NUM_PES):
-				for jPES in range(pes.NUM_PES):
-					ElementIndex: int = iPES * pes.NUM_PES + jPES
-					for iPlot in range(NUM_PLOTS):
-						ax: matplotlib.axes.Axes = axs[iPlot, ElementIndex]
-						ax.set_xlabel('x')
-						ax.set_ylabel('p')
-						ax.set_title('Rescaled ' + titles[iPlot] + get_RI_label(iPES, jPES))
-			fig.colorbar(matplotlib.cm.ScalarMappable(cmap=CMAP, norm=NORM), ax=axs.ravel().tolist())
-			pred_draw(0)
-			return fig, axs
-
-		def draw(iTick: int) -> typing.Iterable[matplotlib.artist.Artist | typing.Iterable[matplotlib.artist.Artist]]:
-			"""
-			Implementation of each frame
-
-			Parameters
-			----------
-			iTick : int
-				Current time tick, to access grid data and for plotting
-
-			Returns
-			-------
-			typing.Iterable[matplotlib.artist.Artist | typing.Iterable[matplotlib.artist.Artist]]
-				figure and axes
-			"""
+		for iPES in range(pes.NUM_PES):
+			for jPES in range(pes.NUM_PES):
+				ElementIndex: int = iPES * pes.NUM_PES + jPES
+				for iPlot in range(NUM_PLOTS):
+					ax: matplotlib.axes.Axes = axs[iPlot, ElementIndex]
+					ax.set_xlabel('x')
+					ax.set_ylabel('p')
+					ax.set_title('Rescaled ' + titles[iPlot] + get_RI_label(iPES, jPES))
+		fig.colorbar(matplotlib.cm.ScalarMappable(cmap=CMAP, norm=NORM), ax=axs.ravel().tolist())
+		pred_draw(0)
+		for iTick in range(1, total_ticks):
 			# evolve
 			for i in range(output_steps):
 				print(iTick, i, time.asctime(), flush=True)
@@ -353,10 +329,6 @@ def main() -> None:
 					interpolators[iElement][0].values = all_density[iElement].reshape(n_grids, n_grids).real
 					interpolators[iElement][1].values = all_density[iElement].reshape(n_grids, n_grids).imag
 			pred_draw(iTick)
-			return fig, axs
-
-		# draw animation
-		matplotlib.animation.FuncAnimation(fig, draw, range(1, total_ticks), init).save('diff.gif', 'imagemagick')
 
 
 if __name__ == "__main__":

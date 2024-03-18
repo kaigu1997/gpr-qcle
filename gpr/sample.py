@@ -4,11 +4,15 @@ sample
 
 This module provides methods for sampling.
 """
+import os
+import sys
 
 import numpy as np
 import numpy.typing as npt
 import sklearn.cluster
 import torch
+
+sys.path.append(os.path.dirname(__file__))
 
 import pes
 import utility

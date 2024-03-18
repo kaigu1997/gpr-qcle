@@ -4,10 +4,14 @@ utility
 The module for some utility functions, such as array parsing.
 """
 import collections.abc
+import os
+import sys
 import typing
 
 import numpy as np
 import torch
+
+sys.path.append(os.path.dirname(__file__))
 
 import pes
 
@@ -52,9 +56,9 @@ def format_array(arr_name : str | None, arr: typing.Any) -> str:
 	Returns
 	-------
 	str
-		By default, result is simply str(arr)
+		By default, result is simply `"arr_name = " + str(arr)`
 
-		Complex has the form of "{} + {}i".format(arr.real, arr.imag)
+		Complex has the form of `"{} + {}i".format(arr.real, arr.imag)`
 
 		Torch tensor and numpy array are flattened and output one by one
 		without any other stuff (parenthesis, "array", "Tensor", etc)

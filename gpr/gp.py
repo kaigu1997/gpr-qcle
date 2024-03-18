@@ -4,9 +4,10 @@ gp
 
 This module provides support for gaussian process (gp) regression.
 """
-
 import copy
 import io
+import os
+import sys
 import typing
 
 import gpytorch
@@ -15,6 +16,8 @@ import linear_operator
 import numpy as np
 import numpy.typing as npt
 import torch
+
+sys.path.append(os.path.dirname(__file__))
 
 import pes
 import utility
@@ -102,6 +105,10 @@ class SinglePredictor:
 		To get the error by comparing label with prediction
 	train()
 		To train the parameters
+	update(x_all, y_all, num_points)
+		To update features and labels
+	get_marginal(dimensions)
+		To get the marginal distribution over given dimensions
 	"""
 	MAX_ITER: typing.Literal[50000] = 50000
 	FTOL: float = 2.2204460492503131e-09
@@ -109,11 +116,12 @@ class SinglePredictor:
 	NOISE: float = 1e-4
 
 	def __init__(self, kernel: gpytorch.kernels.Kernel):
+		self.DIM: int = kernel.lengthscale.numel()
 		self.kernel: gpytorch.kernels.Kernel = copy.deepcopy(kernel)
 		likelihood: gpytorch.likelihoods.FixedNoiseGaussianLikelihood = gpytorch.likelihoods.FixedNoiseGaussianLikelihood(torch.full((2,), SinglePredictor.NOISE))
 		self.x_all: torch.Tensor = torch.Tensor()
 		self.y_all: torch.Tensor = torch.Tensor()
-		self.model: GP = GP(torch.zeros((2, pes.PHASEDIM)), torch.zeros((2,)), likelihood, self.kernel)
+		self.model: GP = GP(torch.zeros((2, self.DIM)), torch.zeros((2,)), likelihood, self.kernel)
 		self.model_param: dict[str, torch.Tensor] = copy.deepcopy(self.model.state_dict())
 		self.k_inv_y: torch.Tensor = torch.Tensor()
 		self.weights_updated: bool = False
@@ -316,6 +324,53 @@ class SinglePredictor:
 		print("", flush=True)
 		self.model_param = copy.deepcopy(self.model.state_dict())
 
+	def update(
+		self,
+		x_all: torch.Tensor,
+		y_all: torch.Tensor,
+		num_points: int
+	) -> None:
+		"""
+		To update the training features and labels of the model
+
+		Parameters
+		----------
+		x_all : torch.Tensor, of shape (num_points * (1 + NUM_XTR_RATIO), PHASEDIM)
+				All training inputs
+		y_all : torch.Tensor, of shape (num_points * (1 + NUM_XTR_RATIO))
+				All training targets
+		num_points : int
+				The number of points located at the front of all points that is used as the subset
+		"""
+		assert x_all.shape[-1] == self.DIM
+		self.x_all = copy.deepcopy(x_all)
+		self.y_all = copy.deepcopy(y_all)
+		self.model.set_train_data(self.x_all[:num_points].detach(), self.y_all[:num_points].detach(), False)
+		self.weights_updated = False
+
+	def get_marginal(self, dimensions: list[int]) -> "SinglePredictor":
+		"""
+		To get the marginal distribution of current gaussian process regression
+
+		Parameters
+		----------
+		dimensions : list[int]
+			The dimensions to be kept
+
+		Returns
+		-------
+		SinglePredictor
+			The GPR predictor of the reduced dimensions
+		"""
+		current_dim: int = self.get_training_features().shape[-1]
+		assert all(0 <= dim <= current_dim for dim in dimensions)
+		result: SinglePredictor = SinglePredictor(gpytorch.kernels.RBFKernel(len(dimensions)))
+		# set up its characteristic lengths, features, and reweighted labels
+		result.model.cov.lengthscale = self.model.cov.lengthscale.reshape(-1)[[i for i in range(current_dim) if i not in dimensions]]
+		rescale_factor: float = (2.0 * torch.pi) ** (len(dimensions) / 2.0) * self.model.cov.lengthscale.reshape(-1)[dimensions].prod().item()
+		result.update(self.x_all[..., dimensions], self.y_all * rescale_factor, self.get_training_features().shape[0])
+		return result
+
 
 def check_predictor(predictor: SinglePredictor) -> bool:
 	"""
@@ -336,26 +391,6 @@ def check_predictor(predictor: SinglePredictor) -> bool:
 	return isinstance(predictor.model.train_targets, torch.Tensor) and not torch.all(predictor.model.train_targets == 0)
 
 
-def get_scale(scale: np.double) -> np.double:
-	"""
-	Return 1 if the scale is 0, else the value itself
-
-	Parameters
-	----------
-	scale : np.double
-		A non-negative value
-
-	Returns
-	-------
-	np.double
-		1 if the scale is 0, else the value itself
-	"""
-	if scale == 0.0:
-		return np.double(1.0)
-	else:
-		return scale
-
-
 class GPRPredictors:
 	"""
 	Combination of single predictors
@@ -373,10 +408,21 @@ class GPRPredictors:
 		To train each predictor
 	predict(x_input, ElementIndex)
 		To predict test targets based on input and corresponding density matrix element
+	get_marginal(dimensions)
+		To get the marginal distribution over given dimensions
 	print(f)
-		To print hyperparameters to file
+		To print parameters to file
 	"""
-	def __init__(self, kernel: gpytorch.kernels.Kernel = gpytorch.kernels.RBFKernel(pes.PHASEDIM)):
+	def __init__(self, parameter_initial_values: npt.NDArray[np.double] | None = None):
+		kernel: gpytorch.kernels.Kernel
+		self.DIM: int
+		if parameter_initial_values is not None:
+			self.DIM = parameter_initial_values.size
+			kernel = gpytorch.kernels.RBFKernel(self.DIM)
+			kernel.lengthscale = torch.from_numpy(parameter_initial_values)
+		else:
+			self.DIM = pes.PHASEDIM # by default
+			kernel = gpytorch.kernels.RBFKernel(self.DIM)
 		self.predictors: list[SinglePredictor] = [SinglePredictor(kernel) for _ in range(pes.NUM_ELM)]
 		self.scale: npt.NDArray[np.double] = np.ones(pes.NUM_ELM, np.double)
 
@@ -425,14 +471,11 @@ class GPRPredictors:
 			RowIndex: int = iElement // pes.NUM_PES
 			ColIndex: int = iElement % pes.NUM_PES
 			TrilIndex: int = pes.flatten_tril_index[RowIndex, ColIndex]
-			pred.x_all = copy.deepcopy(torch.from_numpy(x_all[TrilIndex]).detach())
-			if RowIndex <= ColIndex:
-				pred.y_all = copy.deepcopy(torch.from_numpy(y_all[TrilIndex].real).detach())
-			else:
-				pred.y_all = copy.deepcopy(torch.from_numpy(y_all[TrilIndex].imag).detach())
-			pred.y_all *= self.scale[iElement]
-			pred.model.set_train_data(pred.x_all[:num_points[TrilIndex]].detach(), pred.y_all[:num_points[TrilIndex]].detach(), False)
-			pred.weights_updated = False
+			pred.update(
+				torch.from_numpy(x_all[TrilIndex]),
+				torch.from_numpy((y_all[TrilIndex].real if RowIndex <= ColIndex else y_all[TrilIndex].imag) * self.scale[iElement]),
+				num_points[TrilIndex],
+			)
 
 	def train(self) -> None:
 		"""
@@ -442,13 +485,6 @@ class GPRPredictors:
 			if check_predictor(self.predictors[iElement]):
 				print("Training " + utility.get_RI_label(iElement))
 				self.predictors[iElement].train()
-
-	def update_weights(self) -> None:
-		"""
-		To update weights of each predictor
-		"""
-		for pred in self.predictors:
-			pred.update_weights()
 
 	def predict(self, x_input: npt.NDArray[np.double], ElementIndex: int) -> npt.NDArray[np.cdouble]:
 		"""
@@ -466,7 +502,7 @@ class GPRPredictors:
 		npt.NDArray[np.cdouble], shape of (...)
 			Density of the element of all test inputs
 		"""
-		x_test: torch.Tensor = torch.from_numpy(x_input.reshape(-1, pes.PHASEDIM))
+		x_test: torch.Tensor = torch.from_numpy(x_input.reshape(-1, self.DIM))
 
 		def call_single_predictor(pred: SinglePredictor) -> npt.NDArray[np.double]:
 			"""
@@ -487,6 +523,25 @@ class GPRPredictors:
 			else:
 				return np.zeros(x_test.shape[0], np.double)
 
+		def get_scale(scale: np.double) -> np.double:
+			"""
+			Return 1 if the scale is 0, else the value itself
+
+			Parameters
+			----------
+			scale : np.double
+				A non-negative value
+
+			Returns
+			-------
+			np.double
+				1 if the scale is 0, else the value itself
+			"""
+			if scale == 0.0:
+				return np.double(1.0)
+			else:
+				return scale
+
 		RowIndex: int = ElementIndex // pes.NUM_PES
 		ColIndex: int = ElementIndex % pes.NUM_PES
 		result: npt.NDArray[np.cdouble] = np.empty(x_test.shape[0], np.cdouble)
@@ -501,23 +556,27 @@ class GPRPredictors:
 			result.imag = -call_single_predictor(self.predictors[ColIndex * pes.NUM_PES + RowIndex]) / get_scale(self.scale[ColIndex * pes.NUM_PES + RowIndex])
 		return result.reshape(x_input.shape[:-1])
 
-	def predict_full(self, x_input: npt.NDArray[np.double]) -> npt.NDArray[np.cdouble]:
+	def get_marginal(self, dimensions: int | typing.Iterable[int]) -> "GPRPredictors":
 		"""
-		To predict test targets based on input and corresponding density matrix element
+		To get the marginal distribution of current gaussian process regressions
 
 		Parameters
 		----------
-		x_input : npt.NDArray[np.double], shape of (..., PHASEDIM)
-			Test inputs
+		dimensions : int | typing.Iterable[int]
+			The dimensions to be kept
 
 		Returns
 		-------
-		npt.NDArray[np.cdouble], shape of (..., NUM_PES, NUM_PES)
-			Density matrix of all element of all test inputs
+		GPRPredictors
+			The GPR predictor of the reduced dimensions
 		"""
-		result: npt.NDArray[np.cdouble] = np.empty(x_input.shape[:-1] + (pes.NUM_PES, pes.NUM_PES), np.cdouble)
-		for iElement in range(pes.NUM_ELM):
-			result[..., iElement // pes.NUM_PES, iElement % pes.NUM_PES] = self.predict(x_input, iElement)
+		if isinstance(dimensions, int):
+			dimensions = [dimensions]
+		dimensions = list(set(dimensions)) # remove duplicate
+		result: GPRPredictors = GPRPredictors()
+		result.DIM = len(dimensions)
+		result.predictors = [pred.get_marginal(dimensions) for pred in self.predictors]
+		result.scale = self.scale.copy()
 		return result
 
 	def print(self, f: io.TextIOWrapper) -> None:

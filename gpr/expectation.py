@@ -4,14 +4,17 @@ expectation
 
 This module evaluates the expectation values (population, <x> and <p>, energy, etc)
 """
-
 import abc
 import copy
+import os
+import sys
 import typing
 
 import numpy as np
 import numpy.typing as npt
 import torch
+
+sys.path.append(os.path.dirname(__file__))
 
 import gp
 import pes

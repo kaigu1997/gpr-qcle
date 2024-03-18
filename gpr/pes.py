@@ -5,7 +5,6 @@ pes
 This module provides methods for the model, including adiabatic potential energy surfaces,
 corresponding Hellmann-Feynmann forces, and non-adiabatic coupling.
 """
-
 import enum
 import typing
 
@@ -79,54 +78,123 @@ def lower_triangular_to_full(tril_part: np.ndarray) -> np.ndarray:
 flatten_tril_index: npt.NDArray[np.int_] = lower_triangular_to_full(np.arange(NUM_TRIG, dtype=np.int_))
 
 
-def potential(x: torch.Tensor) -> torch.Tensor:
+class InitialDistribution:
 	"""
-	To get the potential at give positions
+	To generate the initial partial Wigner-transformed density matrix
 
 	Parameters
 	----------
-	x : torch.Tensor, shape of (..., DIM)
-		Positions of interest
+	r0 : npt.NDArray[np.double], shape of (PHASEDIM,)
+		Initial center of each dimension
+	sigma_r0 : npt.NDArray[np.double], shape of (PHASEDIM,)
+		Initial standard deviation of each dimension
+	initial_population : npt.NDArray[np.double], shape of (NUM_PES,)
+		The population on each surface, whose squared sum is normalized. Default to all on the ground state.
+	initial_phase_factor : npt.NDArray[np.double], shape of (NUM_PES,)
+		The phase factor for each surface, in unit of arc.
 
-	Returns
-	-------
-	torch.Tensor, shape of (..., NUM_PES, NUM_PES)
-		Potential at give positions
-
-	Raises
-	------
-	NotImplementedError
-		In case the model is unknown
+	Notes
+	-----
+	The density is a multidimensional gaussian distribution with given center and width.
+	The population on each surface and their phase factor difference is set in the function.
+	The off-diagonal elements guarantee the purity of the initial distribution to be 1, i.e., pure state.
 	"""
-	potential.SAC_A = 0.01
-	potential.SAC_B = 1.6
-	potential.SAC_C = 0.005
-	potential.SAC_D = 1.0
-	potential.DAC_A = 0.10
-	potential.DAC_B = 0.28
-	potential.DAC_C = 0.015
-	potential.DAC_D = 0.06
-	potential.DAC_E = 0.05
-	potential.ECR_A = 6e-4
-	potential.ECR_B = 0.10
-	potential.ECR_C = 0.90
-	assert x.shape[-1] == DIM
-	shape: tuple = x.shape[:-1] if x.ndim > 1 else ()
-	result: torch.Tensor
-	match MODEL:
-		case Model.SAC:
-			v00: torch.Tensor = torch.sign(x[..., 0]) * potential.SAC_A * (1.0 - torch.exp(-potential.SAC_B * torch.abs(x[..., 0])))
-			v01: torch.Tensor = potential.SAC_C * torch.exp(-potential.SAC_D * torch.square(x[..., 0]))
-			result = torch.stack([v00, v01, v01, -v00], -1)
-		case Model.DAC:
-			v01: torch.Tensor = potential.DAC_C * torch.exp(-potential.DAC_D * torch.square(x[..., 0]))
-			result = torch.stack([torch.zeros(shape), v01, v01, potential.DAC_E - potential.DAC_A * torch.exp(-potential.DAC_B * torch.square(x[..., 0]))], -1)
-		case Model.ECR:
-			v01: torch.Tensor = potential.ECR_B * (1.0 - torch.sign(x[..., 0]) * (torch.exp(-potential.ECR_C * torch.abs(x[..., 0])) - 1.0))
-			result = torch.Tensor([torch.full(shape, potential.ECR_A), v01, v01, torch.full(shape, -potential.ECR_A)], -1)
-		case _:
-			raise NotImplementedError('Model NOT Implemented!')
-	return torch.reshape(result, shape + (NUM_PES, NUM_PES))
+	def __init__(
+		self,
+		r0: npt.NDArray[np.double],
+		sigma_r0: npt.NDArray[np.double],
+		initial_population: npt.NDArray[np.double],
+		initial_phase_factor: npt.NDArray[np.double]
+	):
+		self.r0: npt.NDArray[np.double] = r0
+		self.sigma_r0: npt.NDArray[np.double] = sigma_r0
+		wavefunction_weight_phase: npt.NDArray[np.cdouble] = (initial_population * np.exp(1.0j * initial_phase_factor)).astype(np.cdouble)
+		weight_phase: npt.NDArray[np.cdouble] = (wavefunction_weight_phase.conj()[:, np.newaxis] * wavefunction_weight_phase / np.sum(initial_population ** 2)) # shape of (NUM_PES, NUM_PES)
+		self.weight_phase = (weight_phase + weight_phase.T.conj()) / 2.0 # remove numerical error, shape of (NUM_PES, NUM_PES)
+		self.factors: npt.NDArray[np.cdouble] = self.weight_phase.reshape(-1) / (2.0 * np.pi) ** DIM / self.sigma_r0.prod() # divide by normalization factor, shape of (NUM_ELM,)
+
+	def __call__(self, r: npt.NDArray[np.double], ElementIndex: int) -> npt.NDArray[np.cdouble]:
+		"""
+		To calculate the initial density of the given element at the given phase point
+
+		Parameters
+		----------
+		r : npt.NDArray[np.double], shape of (..., PHASEDIM)
+			Phase space coordinates of initerest
+		ElementIndex : int
+			Index of the element
+
+		Returns
+		-------
+		npt.NDArray[np.cdouble], shape of (...,)
+			Density of the given element
+		"""
+		assert 0 <= ElementIndex < NUM_ELM
+		return np.exp(-(((r - self.r0) / self.sigma_r0) ** 2).sum(-1) / 2.0) * self.factors[ElementIndex]
+
+
+class potential:
+	SAC_A: float = 0.01
+	SAC_B: float = 1.6
+	SAC_C: float = 0.005
+	SAC_D: float = 1.0
+	DAC_A: float = 0.10
+	DAC_B: float = 0.28
+	DAC_C: float = 0.015
+	DAC_D: float = 0.06
+	DAC_E: float = 0.05
+	ECR_A: float = 6e-4
+	ECR_B: float = 0.10
+	ECR_C: float = 0.90
+
+	def __new__(cls, x: torch.Tensor) -> torch.Tensor:
+		"""
+		To get the potential at give positions
+
+		Parameters
+		----------
+		x : torch.Tensor, shape of (..., DIM)
+			Positions of interest
+
+		Returns
+		-------
+		torch.Tensor, shape of (..., NUM_PES, NUM_PES)
+			Potential at give positions
+
+		Raises
+		------
+		NotImplementedError
+			In case the model is unknown
+		"""
+		assert x.shape[-1] == DIM
+		shape: tuple = x.shape[:-1] if x.ndim > 1 else ()
+		result: torch.Tensor
+		match MODEL:
+			case Model.SAC:
+				v00: torch.Tensor = torch.sign(x[..., 0]) * __class__.SAC_A * (1.0 - torch.exp(-__class__.SAC_B * torch.abs(x[..., 0])))
+				v01: torch.Tensor = __class__.SAC_C * torch.exp(-__class__.SAC_D * torch.square(x[..., 0]))
+				result = torch.stack([v00, v01, v01, -v00], -1)
+			case Model.DAC:
+				v01: torch.Tensor = __class__.DAC_C * torch.exp(-__class__.DAC_D * torch.square(x[..., 0]))
+				result = torch.stack([torch.zeros(shape), v01, v01, __class__.DAC_E - __class__.DAC_A * torch.exp(-__class__.DAC_B * torch.square(x[..., 0]))], -1)
+			case Model.ECR:
+				v01: torch.Tensor = __class__.ECR_B * (1.0 - torch.sign(x[..., 0]) * (torch.exp(-__class__.ECR_C * torch.abs(x[..., 0])) - 1.0))
+				result = torch.Tensor([torch.full(shape, __class__.ECR_A), v01, v01, torch.full(shape, -__class__.ECR_A)], -1)
+			case _:
+				raise NotImplementedError("Model NOT Implemented!")
+		return torch.reshape(result, shape + (NUM_PES, NUM_PES))
+
+
+V_MAX: float
+match MODEL:
+	case Model.SAC:
+		V_MAX = potential.SAC_A
+	case Model.DAC:
+		V_MAX = potential.DAC_E
+	case Model.ECR:
+		V_MAX = 2.0 * potential.ECR_B
+	case _:
+		raise NotImplementedError("Model NOT Implemented!")
 
 
 def force(x: torch.Tensor) -> torch.Tensor:
@@ -220,7 +288,7 @@ def adiabatic_potential(x: npt.NDArray[np.double]) -> npt.NDArray[np.double]:
 			val: npt.NDArray[np.double] = ((V00 + V11)[..., np.newaxis] + np.array([-1.0, 1.0], dtype=np.double) * discriminant[..., np.newaxis]) / 2.0 # ... * N
 			return val
 		case _:
-			raise NotImplementedError('Model NOT Implemented!')
+			raise NotImplementedError("Model NOT Implemented!")
 
 
 def diabatic_to_adiabatic_matrices(x: npt.NDArray[np.double]) -> npt.NDArray[np.double]:
@@ -255,7 +323,7 @@ def diabatic_to_adiabatic_matrices(x: npt.NDArray[np.double]) -> npt.NDArray[np.
 				vec[tuple(diag_indices.T)] = np.where((V00[tuple(diag_indices.T)] < V11[tuple(diag_indices.T)])[..., np.newaxis, np.newaxis], np.eye(2, dtype=np.double), 1.0 - np.eye(2, dtype=np.double))
 			return vec / np.linalg.norm(vec, axis=-2, keepdims=True)
 		case _:
-			raise NotImplementedError('Model NOT Implemented!')
+			raise NotImplementedError("Model NOT Implemented!")
 
 
 def adiabatic_force(x: npt.NDArray[np.double]) -> npt.NDArray[np.double]:
@@ -307,7 +375,12 @@ def adiabatic_coupling(x: npt.NDArray[np.double]) -> npt.NDArray[np.double]:
 	return result - result.swapaxes(-2, -1)
 
 
-def tensor_slice(tensor: npt.NDArray[np.double], dim: int | None, row_index: int, col_index: int) -> npt.NDArray[np.double]:
+def tensor_slice(
+	tensor: npt.NDArray[np.double],
+	dim: int | None,
+	row_index: int,
+	col_index: int
+) -> npt.NDArray[np.double]:
 	"""
 	To slice a tensor based on the given dimension
 
@@ -366,7 +439,7 @@ def force_basis_force(x: npt.NDArray[np.double], dim: int | None = None) -> npt.
 			val: npt.NDArray[np.double] = ((f00 + f11)[..., np.newaxis] + np.array([-1.0, 1.0], dtype=np.double) * discriminant[..., np.newaxis]) / 2.0 # ...( * D) * N
 			return val
 		case _:
-			raise NotImplementedError('Model NOT Implemented!')
+			raise NotImplementedError("Model NOT Implemented!")
 
 
 def diabatic_to_force_basis(x: npt.NDArray[np.double], dim: int | None = None) -> npt.NDArray[np.double]:
@@ -406,7 +479,7 @@ def diabatic_to_force_basis(x: npt.NDArray[np.double], dim: int | None = None) -
 			vec /= np.linalg.norm(vec, axis=-2, keepdims=True)
 			return vec
 		case _:
-			raise NotImplementedError('Model NOT Implemented!')
+			raise NotImplementedError("Model NOT Implemented!")
 
 
 def force_basis_potential(x: npt.NDArray[np.double], dim: int | None = None) -> npt.NDArray[np.double]:

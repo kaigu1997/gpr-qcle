@@ -6,9 +6,13 @@ This module generates input file.
 """
 import argparse
 import collections.abc
+import os
+import sys
 import typing
 
 import numpy as np
+
+sys.path.append(os.path.dirname(__file__))
 
 import pes
 import utility

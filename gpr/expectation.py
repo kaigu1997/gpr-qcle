@@ -177,9 +177,9 @@ class MonteCarloAverage(Averager):
 		Parameters
 		----------
 		ref_pts : npt.NDArray[np.double]
-			_description_
+			Current points, used to estimate average and variance
 		predictor : typing.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
-			_description_
+			Used to predict the density of the points
 		"""
 		for iPES in range(pes.NUM_PES):
 			for jPES in range(iPES + 1):
@@ -252,7 +252,7 @@ class AnalyticalAverager(Averager):
 		for iPES in range(pes.NUM_PES):
 			ElementIndex: int = iPES * pes.NUM_PES + iPES
 			pred: gp.SinglePredictor = self._predictors[ElementIndex]
-			result[iPES] = pred.model.cov.lengthscale.prod().item() * pred.get_weights().sum().item() / self._predictors.scale[ElementIndex]
+			result[iPES] = pred.model.cov.lengthscale.prod().item() * pred.get_weights().sum().item()
 		return result * AnalyticalAverager.AVERAGE_CONSTANT
 
 	def coordinates(self) -> npt.NDArray[np.double]:
@@ -260,7 +260,7 @@ class AnalyticalAverager(Averager):
 		for iPES in range(pes.NUM_PES):
 			ElementIndex: int = iPES * pes.NUM_PES + iPES
 			pred: gp.SinglePredictor = self._predictors[ElementIndex]
-			result += pred.model.cov.lengthscale.prod().item() / self._predictors.scale[ElementIndex] * (pred.get_weights()[:, None] * pred.get_training_features()).sum(0).detach().numpy()
+			result += pred.model.cov.lengthscale.prod().item() * (pred.get_weights()[:, None] * pred.get_training_features()).sum(0).detach().numpy()
 		return result * AnalyticalAverager.AVERAGE_CONSTANT
 
 	def square_coordinates(self) -> npt.NDArray[np.double]:
@@ -268,7 +268,7 @@ class AnalyticalAverager(Averager):
 		for iPES in range(pes.NUM_PES):
 			ElementIndex: int = iPES * pes.NUM_PES + iPES
 			pred: gp.SinglePredictor = self._predictors[ElementIndex]
-			result += pred.model.cov.lengthscale.prod().item() / self._predictors.scale[ElementIndex] * (
+			result += pred.model.cov.lengthscale.prod().item() * (
 				(pred.get_weights()[:, None, None] * pred.get_training_features()[:, :, None] * pred.get_training_features()[:, None, :]).sum(0)
 				+ pred.get_weights().sum() * torch.diagflat(pred.model.cov.lengthscale ** 2)).detach().numpy()
 		return result * AnalyticalAverager.AVERAGE_CONSTANT
@@ -283,8 +283,9 @@ class AnalyticalAverager(Averager):
 		result: npt.NDArray[np.double] = np.empty((pes.NUM_PES, pes.NUM_PES), np.double)
 		for iPES in range(pes.NUM_PES):
 			for jPES in range(pes.NUM_PES):
-				pred: gp.SinglePredictor = self._predictors[iPES * pes.NUM_PES + jPES]
+				ElementIndex: int = iPES * pes.NUM_PES + jPES
+				pred: gp.SinglePredictor = self._predictors[ElementIndex]
 				model: gp.GP = copy.deepcopy(pred.model)
 				model.cov.lengthscale *= np.sqrt(2.0)
-				result[iPES, jPES] = (np.pi ** pes.DIM) * pred.model.cov.lengthscale.prod().item() * (pred.get_weights() @ model.cov(pred.get_training_features(), pred.get_training_features()) @ pred.get_weights()).item() / (self._predictors.scale[iPES * pes.NUM_PES + jPES] ** 2)
+				result[iPES, jPES] = (np.pi ** pes.DIM) * pred.model.cov.lengthscale.prod().item() * (pred.get_weights() @ model.cov(pred.get_training_features(), pred.get_training_features()) @ pred.get_weights()).item()
 		return PURITY_FACTOR * (result + result.T - np.diag(np.diag(result)))

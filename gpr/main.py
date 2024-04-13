@@ -262,7 +262,6 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 			if to_train:
 				predictors.train()
 			# predict and marginal distribution
-			marginal_dist: list[gp.GPRPredictors] = [predictors.get_marginal(iDim) for iDim in range(pes.PHASEDIM)]
 			marginal: npt.NDArray[np.double] = np.empty((pes.PHASEDIM, pes.NUM_PES, pes.NUM_PES, n_grids), np.double)
 			for iPES in range(pes.NUM_PES):
 				for jPES in range(iPES + 1):
@@ -273,7 +272,7 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 							pred_element = predictors.predict(grid_coord, ElementIndex).reshape((n_grids,) * pes.PHASEDIM)
 						finally:
 							pass
-					marginal_pred_element: npt.NDArray[np.cdouble] = np.array([marginal_dist[iDim].predict(grids_each_dim[iDim].reshape(-1, 1), ElementIndex) for iDim in range(pes.PHASEDIM)]) # shape of (PHASEDIM, N_GRIDS)
+					marginal_pred_element: npt.NDArray[np.cdouble] = np.array([predictors.get_marginal(iDim, grids_each_dim[iDim].reshape(-1, 1), ElementIndex) for iDim in range(pes.PHASEDIM)]) # shape of (PHASEDIM, N_GRIDS)
 					if iPES == jPES:
 						if pred is not None and pred_element is not None:
 							pred[iPES, jPES] = pred_element.real

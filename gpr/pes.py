@@ -1,7 +1,6 @@
 """
 pes
 ===
-
 This module provides methods for the model, including adiabatic potential energy surfaces,
 corresponding Hellmann-Feynmann forces, and non-adiabatic coupling.
 """

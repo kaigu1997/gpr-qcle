@@ -1,7 +1,6 @@
 """
 sample
 ======
-
 This module provides methods for sampling.
 """
 import os

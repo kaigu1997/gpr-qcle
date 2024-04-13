@@ -1,7 +1,6 @@
 """
 evolve
 ======
-
 This module provides the adiabatic and non-adiabatic evolution scheme.
 """
 import enum
@@ -290,6 +289,7 @@ def evolve_density_non_adiabatically(
 				rho_part.imag[1] = rho_save[1].imag
 				rho_part.real[2] = (1.0 - cosphi) / 2.0 * rho_save[0].real + sinphi * rho_save[1].real + (1.0 + cosphi) / 2.0 * rho_save[2].real
 				rho_part.imag[2] = 0.0
+
 			# first step: (x0, p0) -> (x2, p1)
 			# second step, off-diagonal branching to p2, and broadcast to x3
 			# (backward) direction is included. So when evolve forward, the branch correspondence remains the same
@@ -396,7 +396,7 @@ def evolve_element_density(
 	non_adiabatic_indices: npt.NDArray[np.int_] = np.flatnonzero(IsCouplePerPoint) # non-adiabatic points
 	evolve_density_adiabatically(density.ravel()[adiabatic_indices], x0.reshape(-1, pes.DIM)[adiabatic_indices], x2.reshape(-1, pes.DIM)[adiabatic_indices], x4.reshape(-1, pes.DIM)[adiabatic_indices], evolve_element_density.drc, dt, RowIndex, ColIndex)
 	density[non_adiabatic_indices] = evolve_density_non_adiabatically(
-		density[non_adiabatic_indices],
+		density.ravel()[non_adiabatic_indices],
 		x4.reshape(-1, pes.DIM)[non_adiabatic_indices],
 		p2.reshape(-1, pes.DIM)[non_adiabatic_indices],
 		x2.reshape(-1, pes.DIM)[non_adiabatic_indices],

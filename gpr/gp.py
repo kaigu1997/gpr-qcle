@@ -1,7 +1,6 @@
 """
 gp
 ==
-
 This module provides support for gaussian process (gp) regression.
 """
 import copy
@@ -17,7 +16,7 @@ import numpy as np
 import numpy.typing as npt
 import torch
 
-sys.path.append(os.path.dirname(__file__))
+sys.path.append(os.path.dirname(__file__) + "/..")
 
 import pes
 import utility
@@ -100,7 +99,7 @@ class SinglePredictor:
 	get_weights()
 		To get the weights, :math:`K^{-1}y`
 	predict(x_test)
-		To predict the average
+		To predict the average estimation
 	error()
 		To get the error by comparing label with prediction
 	train()
@@ -116,12 +115,12 @@ class SinglePredictor:
 	NOISE: float = 1e-4
 
 	def __init__(self, kernel: gpytorch.kernels.Kernel):
-		self.DIM: int = kernel.lengthscale.numel()
 		self.kernel: gpytorch.kernels.Kernel = copy.deepcopy(kernel)
-		likelihood: gpytorch.likelihoods.FixedNoiseGaussianLikelihood = gpytorch.likelihoods.FixedNoiseGaussianLikelihood(torch.full((2,), SinglePredictor.NOISE))
+		likelihood: gpytorch.likelihoods.FixedNoiseGaussianLikelihood = gpytorch.likelihoods.FixedNoiseGaussianLikelihood(torch.full((2,), __class__.NOISE))
 		self.x_all: torch.Tensor = torch.Tensor()
 		self.y_all: torch.Tensor = torch.Tensor()
-		self.model: GP = GP(torch.zeros((2, self.DIM)), torch.zeros((2,)), likelihood, self.kernel)
+		self.scale: float = 1.0
+		self.model: GP = GP(torch.zeros((2, pes.PHASEDIM)), torch.zeros((2,)), likelihood, self.kernel)
 		self.model_param: dict[str, torch.Tensor] = copy.deepcopy(self.model.state_dict())
 		self.k_inv_y: torch.Tensor = torch.Tensor()
 		self.weights_updated: bool = False
@@ -160,7 +159,7 @@ class SinglePredictor:
 
 	def predict(self, x_test: torch.Tensor) -> torch.Tensor:
 		"""
-		Instance of prediction of subset of regressor (SR) / projected process (PP)
+		To predict the average estimation
 
 		Parameters
 		----------
@@ -171,6 +170,10 @@ class SinglePredictor:
 		-------
 		torch.Tensor, shape of (N,)
 			Corresponding validation/test targets based on noise-free SR/PP mean.
+
+		Notes
+		-----
+		Instance of prediction of subset of regressor (SR) / projected process (PP)
 		"""
 		if not self.weights_updated:
 			self.update_weights()
@@ -188,10 +191,10 @@ class SinglePredictor:
 			The sum of squared prediction error
 		"""
 		if use_weight:
-			return torch.sum((self.y_all - self.predict(self.x_all)) ** 2)
+			return torch.sum((self.y_all - self.predict(self.x_all)) ** 2) * (self.scale ** 2)
 		else:
 			kmn: torch.Tensor = self.model.cov(self.x_all, self.get_training_features()).to_dense()
-			return torch.sum((self.y_all - (kmn @ (linear_operator.utils.stable_pinverse(kmn) @ self.y_all)).to_dense()) ** 2)
+			return torch.sum((self.y_all - (kmn @ (linear_operator.utils.stable_pinverse(kmn) @ self.y_all)).to_dense()) ** 2) * (self.scale ** 2)
 
 	def train(self) -> None:
 		"""
@@ -260,7 +263,7 @@ class SinglePredictor:
 		self.weights_updated = False
 		assert isinstance(self.model.train_targets, torch.Tensor)
 		# train model
-		self.model.likelihood = gpytorch.likelihoods.FixedNoiseGaussianLikelihood(torch.full((self.get_training_features().shape[0],), SinglePredictor.NOISE))
+		self.model.likelihood = gpytorch.likelihoods.FixedNoiseGaussianLikelihood(torch.full((self.get_training_features().shape[0],), __class__.NOISE))
 		self.model.train()
 		self.model.likelihood.train()
 		self.model.load_state_dict(self.model_param)
@@ -272,7 +275,7 @@ class SinglePredictor:
 		loss.backward()
 		last_value: float = loss.item()
 		print_stuff(loss, optimizer, self.model, True, "Init")
-		for i in range(1, SinglePredictor.MAX_ITER + 1):
+		for i in range(1, __class__.MAX_ITER + 1):
 			# adjust lr
 			old_prm: dict[str, torch.Tensor] = copy.deepcopy(self.model.state_dict())
 			optimizer.step()
@@ -297,20 +300,24 @@ class SinglePredictor:
 						self.model.load_state_dict(old_prm)
 						loss = self.error(False)
 						break
-			if i % (SinglePredictor.MAX_ITER // 100) == 0:
+			if i % (__class__.MAX_ITER // 100) == 0:
 				print("Iter {} - Loss: {:.15e} - lr: {}".format(i, loss.item(), get_lr(optimizer)))
 				print_model(self.model, True)
 				print_model(self.model)
 			# stopping criteria
-			if (last_value - loss.item()) / max(abs(last_value), abs(loss.item()), 1.0) < SinglePredictor.FTOL:
+			if (last_value - loss.item()) / max(abs(last_value), abs(loss.item()), 1.0) < __class__.FTOL:
 				finish_early = True
 				print("Convergence: |f_i - f_{i+1}| <= FTOL")
 				print("Iter {} - Loss: {:.15e} - lr: {}".format(i, loss.item(), get_lr(optimizer)))
+				print_model(self.model, True)
+				print_model(self.model)
 				break
-			if np.sqrt(sum(torch.sum(param.grad ** 2).item() if param.grad is not None else 0.0 for param in self.model.parameters())) < SinglePredictor.GTOL:
+			if np.sqrt(sum(torch.sum(param.grad ** 2).item() if param.grad is not None else 0.0 for param in self.model.parameters())) < __class__.GTOL:
 				finish_early = True
 				print("Convergence: |Gradient| <= GTOL")
 				print("Iter {} - Loss: {:.15e} - lr: {}".format(i, loss.item(), get_lr(optimizer)))
+				print_model(self.model, True)
+				print_model(self.model)
 				break
 			optimizer = optimizer.__class__(self.model.parameters(), lr=get_lr(optimizer))
 			optimizer.zero_grad()
@@ -318,8 +325,10 @@ class SinglePredictor:
 			loss.backward()
 			# print_stuff(loss, optimizer, self.model, True, "\tlast = {}, ".format(last_value))
 		if not finish_early:
-			print("Iter {} - Loss: {:.15e} - lr: {}".format(SinglePredictor.MAX_ITER, last_value, [param["lr"] for param in optimizer.param_groups]))
 			print("Stop: Total No. iterations reached limit.")
+			print("Iter {} - Loss: {:.15e} - lr: {}".format(__class__.MAX_ITER, last_value, [param["lr"] for param in optimizer.param_groups]))
+			print_model(self.model, True)
+			print_model(self.model)
 		print_model(self.model)
 		print("", flush=True)
 		self.model_param = copy.deepcopy(self.model.state_dict())
@@ -328,6 +337,7 @@ class SinglePredictor:
 		self,
 		x_all: torch.Tensor,
 		y_all: torch.Tensor,
+		scale: float,
 		num_points: int
 	) -> None:
 		"""
@@ -336,59 +346,43 @@ class SinglePredictor:
 		Parameters
 		----------
 		x_all : torch.Tensor, of shape (num_points * (1 + NUM_XTR_RATIO), PHASEDIM)
-				All training inputs
+			All training inputs
 		y_all : torch.Tensor, of shape (num_points * (1 + NUM_XTR_RATIO))
-				All training targets
+			All training targets
+		scale : float
+			The scaling factor to increase
 		num_points : int
-				The number of points located at the front of all points that is used as the subset
+			The number of points located at the front of all points that is used as the subset
 		"""
-		assert x_all.shape[-1] == self.DIM
-		self.x_all = copy.deepcopy(x_all)
-		self.y_all = copy.deepcopy(y_all)
+		assert x_all.shape[-1] == pes.PHASEDIM and x_all.numel() == y_all.numel() * pes.PHASEDIM
+		self.x_all = copy.deepcopy(x_all.reshape(-1, pes.PHASEDIM))
+		self.y_all = copy.deepcopy(y_all.reshape(-1))
+		self.scale = scale
 		self.model.set_train_data(self.x_all[:num_points].detach(), self.y_all[:num_points].detach(), False)
 		self.weights_updated = False
 
-	def get_marginal(self, dimensions: list[int]) -> "SinglePredictor":
+	def get_marginal(self, dimensions: list[int], x_test: torch.Tensor) -> torch.Tensor:
 		"""
 		To get the marginal distribution of current gaussian process regression
 
 		Parameters
 		----------
 		dimensions : list[int]
-			The dimensions to be kept
+			The dimensions to be kept, must not have any repeat
+		x_test : torch.Tensor, shape of (N, len(dimensions))
+			Validation/Test inputs
 
 		Returns
 		-------
-		SinglePredictor
-			The GPR predictor of the reduced dimensions
+		torch.Tensor, shape of (N,)
+			Corresponding validation/test targets based on noise-free SR/PP mean.
 		"""
-		current_dim: int = self.get_training_features().shape[-1]
-		assert all(0 <= dim <= current_dim for dim in dimensions)
-		result: SinglePredictor = SinglePredictor(gpytorch.kernels.RBFKernel(len(dimensions)))
-		# set up its characteristic lengths, features, and reweighted labels
-		result.model.cov.lengthscale = self.model.cov.lengthscale.reshape(-1)[[i for i in range(current_dim) if i not in dimensions]]
-		rescale_factor: float = (2.0 * torch.pi) ** (len(dimensions) / 2.0) * self.model.cov.lengthscale.reshape(-1)[dimensions].prod().item()
-		result.update(self.x_all[..., dimensions], self.y_all * rescale_factor, self.get_training_features().shape[0])
-		return result
-
-
-def check_predictor(predictor: SinglePredictor) -> bool:
-	"""
-	To check if the predictor could be used for training / predicting
-
-	If no label is given, or all the labels are 0, training / predicting is not needed.
-
-	Parameters
-	----------
-	predictor : SinglePredictor
-		The predictor
-
-	Returns
-	-------
-	bool
-		Availability of training / predicting
-	"""
-	return isinstance(predictor.model.train_targets, torch.Tensor) and not torch.all(predictor.model.train_targets == 0)
+		if not self.weights_updated:
+			self.update_weights()
+		marginal_kernel: gpytorch.kernels.Kernel = gpytorch.kernels.RBFKernel(len(dimensions))
+		marginal_kernel.lengthscale = self.model.cov.lengthscale.reshape(1, pes.PHASEDIM)[:, dimensions]
+		prefactor: float = np.sqrt((2.0 * torch.pi) ** (pes.PHASEDIM - len(dimensions))) * self.model.cov.lengthscale[:, [i for i in range(pes.PHASEDIM) if i not in dimensions]].prod().item()
+		return prefactor * (marginal_kernel(x_test, self.get_training_features()[:, dimensions]) @ self.k_inv_y).to_dense()
 
 
 class GPRPredictors:
@@ -402,27 +396,46 @@ class GPRPredictors:
 
 	Methods
 	-------
+	check_predictor(predictor)
+		To check if the predictor could be used for training / predicting
 	update(x_all, y_all, num_pt, scale)
 		To update the training inputs and targets, as well as the rescale factor
 	train()
 		To train each predictor
 	predict(x_input, ElementIndex)
 		To predict test targets based on input and corresponding density matrix element
-	get_marginal(dimensions)
+	get_marginal(dimensions, x_input, ElementIndex)
 		To get the marginal distribution over given dimensions
 	print(f)
 		To print parameters to file
 	"""
+	@staticmethod
+	def check_predictor(predictor: SinglePredictor) -> bool:
+		"""
+		To check if the predictor could be used for training / predicting
+
+		If no label is given, or all the labels are 0, training / predicting is not needed.
+
+		Parameters
+		----------
+		predictor : SinglePredictor
+			The predictor
+
+		Returns
+		-------
+		bool
+			Availability of training / predicting
+		"""
+		return isinstance(predictor.model.train_targets, torch.Tensor) and not torch.all(predictor.model.train_targets == 0)
+
 	def __init__(self, parameter_initial_values: npt.NDArray[np.double] | None = None):
 		kernel: gpytorch.kernels.Kernel
-		self.DIM: int
 		if parameter_initial_values is not None:
-			self.DIM = parameter_initial_values.size
-			kernel = gpytorch.kernels.RBFKernel(self.DIM)
+			assert parameter_initial_values.size == pes.PHASEDIM
+			kernel = gpytorch.kernels.RBFKernel(pes.PHASEDIM)
 			kernel.lengthscale = torch.from_numpy(parameter_initial_values)
 		else:
-			self.DIM = pes.PHASEDIM # by default
-			kernel = gpytorch.kernels.RBFKernel(self.DIM)
+			kernel = gpytorch.kernels.RBFKernel(pes.PHASEDIM)
 		self.predictors: list[SinglePredictor] = [SinglePredictor(kernel) for _ in range(pes.NUM_ELM)]
 		self.scale: npt.NDArray[np.double] = np.ones(pes.NUM_ELM, np.double)
 
@@ -473,8 +486,9 @@ class GPRPredictors:
 			TrilIndex: int = pes.flatten_tril_index[RowIndex, ColIndex]
 			pred.update(
 				torch.from_numpy(x_all[TrilIndex]),
-				torch.from_numpy((y_all[TrilIndex].real if RowIndex <= ColIndex else y_all[TrilIndex].imag) * self.scale[iElement]),
-				num_points[TrilIndex],
+				torch.from_numpy(y_all[TrilIndex].real if RowIndex <= ColIndex else y_all[TrilIndex].imag),
+				self.scale[iElement],
+				num_points[TrilIndex]
 			)
 
 	def train(self) -> None:
@@ -482,7 +496,7 @@ class GPRPredictors:
 		To train each predictor
 		"""
 		for iElement in range(pes.NUM_ELM):
-			if check_predictor(self.predictors[iElement]):
+			if __class__.check_predictor(self.predictors[iElement]):
 				print("Training " + utility.get_RI_label(iElement))
 				self.predictors[iElement].train()
 
@@ -502,61 +516,49 @@ class GPRPredictors:
 		npt.NDArray[np.cdouble], shape of (...)
 			Density of the element of all test inputs
 		"""
-		x_test: torch.Tensor = torch.from_numpy(x_input.reshape(-1, self.DIM))
-
-		def call_single_predictor(pred: SinglePredictor) -> npt.NDArray[np.double]:
+		def call_single_predictor(pred: SinglePredictor, x_test: torch.Tensor) -> npt.NDArray[np.double]:
 			"""
 			To do prediction of a single predictor
 
 			Parameters
 			----------
-			pred : SinglePredictor, shape of (N, PHASEDIM)
+			pred : SinglePredictor
 				The predictor
+			x_test : torch.Tensor, shape of (N, PHASEDIM)
+				Test inputs
 
 			Returns
 			-------
 			npt.NDArray[np.double], shape of (N,)
 				Test targets by the predictor
 			"""
-			if check_predictor(pred):
+			if __class__.check_predictor(pred):
 				return pred.predict(x_test).detach().numpy()
 			else:
 				return np.zeros(x_test.shape[0], np.double)
 
-		def get_scale(scale: np.double) -> np.double:
-			"""
-			Return 1 if the scale is 0, else the value itself
-
-			Parameters
-			----------
-			scale : np.double
-				A non-negative value
-
-			Returns
-			-------
-			np.double
-				1 if the scale is 0, else the value itself
-			"""
-			if scale == 0.0:
-				return np.double(1.0)
-			else:
-				return scale
-
+		assert x_input.shape[-1] == pes.PHASEDIM and 0 <= ElementIndex < pes.NUM_ELM
+		x_test: torch.Tensor = torch.from_numpy(x_input.reshape(-1, pes.PHASEDIM))
 		RowIndex: int = ElementIndex // pes.NUM_PES
 		ColIndex: int = ElementIndex % pes.NUM_PES
 		result: npt.NDArray[np.cdouble] = np.empty(x_test.shape[0], np.cdouble)
 		if RowIndex == ColIndex:
-			result.real = call_single_predictor(self.predictors[ElementIndex]) / get_scale(self.scale[ElementIndex])
+			result.real = call_single_predictor(self.predictors[ElementIndex], x_test)
 			result.imag = 0
 		elif RowIndex > ColIndex:
-			result.real = call_single_predictor(self.predictors[ColIndex * pes.NUM_PES + RowIndex]) / get_scale(self.scale[ColIndex * pes.NUM_PES + RowIndex])
-			result.imag = call_single_predictor(self.predictors[ElementIndex]) / get_scale(self.scale[ElementIndex])
+			result.real = call_single_predictor(self.predictors[ColIndex * pes.NUM_PES + RowIndex], x_test)
+			result.imag = call_single_predictor(self.predictors[ElementIndex], x_test)
 		else: # RowIndex < ColIndex
-			result.real = call_single_predictor(self.predictors[ElementIndex]) / get_scale(self.scale[ElementIndex])
-			result.imag = -call_single_predictor(self.predictors[ColIndex * pes.NUM_PES + RowIndex]) / get_scale(self.scale[ColIndex * pes.NUM_PES + RowIndex])
+			result.real = call_single_predictor(self.predictors[ElementIndex], x_test)
+			result.imag = -call_single_predictor(self.predictors[ColIndex * pes.NUM_PES + RowIndex], x_test)
 		return result.reshape(x_input.shape[:-1])
 
-	def get_marginal(self, dimensions: int | typing.Iterable[int]) -> "GPRPredictors":
+	def get_marginal(
+		self,
+		dimensions: int | typing.Iterable[int],
+		x_input: npt.NDArray[np.double],
+		ElementIndex: int
+	) -> npt.NDArray[np.cdouble]:
 		"""
 		To get the marginal distribution of current gaussian process regressions
 
@@ -564,20 +566,59 @@ class GPRPredictors:
 		----------
 		dimensions : int | typing.Iterable[int]
 			The dimensions to be kept
+		x_input : npt.NDArray[np.double], shape of (..., len(dimensions))
+			Test inputs
+		ElementIndex : int
+			Index of the element
 
 		Returns
 		-------
-		GPRPredictors
-			The GPR predictor of the reduced dimensions
+		npt.NDArray[np.double], shape of (N,)
+			Marginal distribution on the inputs
 		"""
+		def call_single_predictor(pred: SinglePredictor, dims: list[int], x_test: torch.Tensor) -> npt.NDArray[np.double]:
+			"""
+			To do prediction of a single predictor
+
+			Parameters
+			----------
+			pred : SinglePredictor
+				The predictor
+			dims : list[int]
+				The dims to be kept
+			x_input : torch.Tensor, shape of (N, len(dimensions))
+				Test inputs
+
+			Returns
+			-------
+			npt.NDArray[np.double], shape of (N,)
+				Test targets by the predictor
+			"""
+			if __class__.check_predictor(pred):
+				return pred.get_marginal(dims, x_test).detach().numpy()
+			else:
+				return np.zeros(x_test.shape[0], np.double)
+
 		if isinstance(dimensions, int):
 			dimensions = [dimensions]
-		dimensions = list(set(dimensions)) # remove duplicate
-		result: GPRPredictors = GPRPredictors()
-		result.DIM = len(dimensions)
-		result.predictors = [pred.get_marginal(dimensions) for pred in self.predictors]
-		result.scale = self.scale.copy()
-		return result
+		else:
+			dimensions = list(set(dimensions)) # remove duplicate
+		assert all(0 <= dim <= pes.PHASEDIM for dim in dimensions)
+		assert x_input.shape[-1] == len(dimensions) and 0 <= ElementIndex < pes.NUM_ELM
+		x_test: torch.Tensor = torch.from_numpy(x_input.reshape(-1, len(dimensions)))
+		RowIndex: int = ElementIndex // pes.NUM_PES
+		ColIndex: int = ElementIndex % pes.NUM_PES
+		result: npt.NDArray[np.cdouble] = np.empty(x_test.shape[0], np.cdouble)
+		if RowIndex == ColIndex:
+			result.real = call_single_predictor(self.predictors[ElementIndex], dimensions, x_test)
+			result.imag = 0
+		elif RowIndex > ColIndex:
+			result.real = call_single_predictor(self.predictors[ColIndex * pes.NUM_PES + RowIndex], dimensions, x_test)
+			result.imag = call_single_predictor(self.predictors[ElementIndex], dimensions, x_test)
+		else: # RowIndex < ColIndex
+			result.real = call_single_predictor(self.predictors[ElementIndex], dimensions, x_test)
+			result.imag = -call_single_predictor(self.predictors[ColIndex * pes.NUM_PES + RowIndex], dimensions, x_test)
+		return result.reshape(x_input.shape[:-1])
 
 	def print(self, f: io.TextIOWrapper) -> None:
 		"""

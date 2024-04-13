@@ -1,7 +1,7 @@
 """
 plot
 ====
-To plot all results
+This module plots all results
 """
 import argparse
 import collections.abc
@@ -22,7 +22,7 @@ import matplotlib.figure
 import matplotlib.pyplot as plt
 import matplotlib.ticker
 import matplotlib.transforms
-# import matplotlib.typing
+import matplotlib.typing
 import numpy as np
 import numpy.typing as npt
 import PIL.Image
@@ -166,17 +166,19 @@ def plot_average() -> None:
 	"""
 	To plot all averages available
 	"""
+	NUM_MOMENTS: typing.Literal[5] = pes.PHASEDIM * (pes.PHASEDIM + 3) // 2
 	ave_type_titles: list[str] = ["Monte Carlo", "Analytical"]
+	NUM_AVE_TYPES: int = len(ave_type_titles)
 	plot_titles: list[str] = ["Population"]\
 		+ [utility.dimension_name(iDim) for iDim in range(pes.PHASEDIM)]\
 		+ [("Cov(" + utility.dimension_name(jDim) + ", " + utility.dimension_name(iDim) + ")") if iDim != jDim else ("Var[" + utility.dimension_name(iDim) + "]") for iDim in range(pes.PHASEDIM) for jDim in range(iDim + 1)]\
 		+ ["Energy", "Purity"] # moments of 0th, 1st and 2nd order, and other (energy and purity)
 	fig: matplotlib.figure.Figure
 	axs: np.ndarray[collections.abc.Sequence[collections.abc.Sequence[matplotlib.axes.Axes]], np.dtype[np.object_]]
-	fig, axs = plt.subplots(len(ave_type_titles), len(plot_titles), figsize=(FIGSIZE[0] * len(plot_titles), FIGSIZE[1] * len(ave_type_titles))) # population, <x> and <p>, energy, purity
+	fig, axs = plt.subplots(NUM_AVE_TYPES, len(plot_titles), figsize=(FIGSIZE[0] * len(plot_titles), FIGSIZE[1] * NUM_AVE_TYPES)) # population, <x> and <p>, energy, purity
 	averages: npt.NDArray[np.double] = np.loadtxt(AVERAGE_FILENAME + DATA_EXTENSION)
 	ticks: npt.NDArray[np.double] = averages[:, 0]
-	averages = averages[:, 1:].reshape(-1, 2, (averages.shape[1] - 1) // 2)
+	averages = averages[:, 1:].reshape(ticks.size, NUM_AVE_TYPES, (averages.shape[1] - 1) // NUM_AVE_TYPES)
 	for iRow in range(axs.shape[0]):
 		for iCol in range(axs.shape[1]):
 			ax: matplotlib.axes.Axes = axs[iRow, iCol]
@@ -186,22 +188,22 @@ def plot_average() -> None:
 					ax.plot(ticks, averages[:, iRow, iPES], label="State " + str(iPES))
 				ax.plot(ticks, np.sum(averages[:, iRow, :pes.NUM_PES], -1), label="Total")
 				ax.legend()
-			elif iCol <= pes.PHASEDIM * (pes.PHASEDIM + 3) // 2: # <x>, <p>, and covariances
+			elif iCol <= NUM_MOMENTS: # <x>, <p>, and covariances
 				ax.plot(ticks, averages[:, iRow, iCol - 1 + pes.NUM_PES])
 				y_label += " / a.u."
 				if iCol > pes.PHASEDIM:
 					y_label += r"$^2$"
-			elif iCol == pes.PHASEDIM * (pes.PHASEDIM + 3) // 2 + 1: # energies
-				ax.plot(ticks, averages[:, iRow, pes.NUM_PES + pes.PHASEDIM * (pes.PHASEDIM + 3) // 2 + 1], label="Kinetic Energy")
+			elif iCol == NUM_MOMENTS + 1: # energies
+				ax.plot(ticks, averages[:, iRow, pes.NUM_PES + NUM_MOMENTS + 1], label="Kinetic Energy")
 				if iRow == 0: # only mc has potential and thus total energy
-					ax.plot(ticks, averages[:, iRow, pes.NUM_PES + pes.PHASEDIM * (pes.PHASEDIM + 3) // 2], label="Potential Energy")
-					ax.plot(ticks, np.sum(averages[:, iRow, pes.NUM_PES + pes.PHASEDIM * (pes.PHASEDIM + 3) // 2:pes.NUM_PES + pes.PHASEDIM * (pes.PHASEDIM + 3) // 2 + 2], -1), label="Total Energy")
+					ax.plot(ticks, averages[:, iRow, pes.NUM_PES + NUM_MOMENTS], label="Potential Energy")
+					ax.plot(ticks, np.sum(averages[:, iRow, pes.NUM_PES + NUM_MOMENTS:pes.NUM_PES + NUM_MOMENTS + 2], -1), label="Total Energy")
 				ax.legend()
 				y_label += " / a.u."
 			else: # purity
 				for iElement in range(pes.NUM_ELM):
-					ax.plot(ticks, averages[:, iRow, pes.NUM_PES + pes.PHASEDIM * (pes.PHASEDIM + 3) // 2 + 2 + iElement], label=utility.get_RI_label(iElement))
-				ax.plot(ticks, np.sum(averages[:, iRow, pes.NUM_PES + pes.PHASEDIM * (pes.PHASEDIM + 3) // 2 + 2:], -1), label="Total")
+					ax.plot(ticks, averages[:, iRow, pes.NUM_PES + NUM_MOMENTS + 2 + iElement], label=utility.get_RI_label(iElement))
+				ax.plot(ticks, np.sum(averages[:, iRow, pes.NUM_PES + NUM_MOMENTS + 2:], -1), label="Total")
 				ax.legend()
 			ax.set_xlabel("Time / a.u.")
 			ax.set_ylabel(y_label)
@@ -565,19 +567,20 @@ class DensityMatrixDrawer:
 			ax.contourf(self.xv, self.pv, data[::self.col_divisor, ::self.row_divisor].T, levels=self.LEVEL, cmap=__class__.CMAP, norm=self.NORM)
 			if title is not None:
 				ax.set_title(title)
-			if central_points is not None:
-				ax.scatter(
-					np.clip(central_points[0], self.x_grids[0], self.x_grids[-1]),
-					np.clip(central_points[1], self.p_grids[0], self.p_grids[-1]),
-					0.5,
-					"black"
-				)
+			# scatter the central points on top
 			if extra_points is not None:
 				ax.scatter(
 					np.clip(extra_points[0], self.x_grids[0], self.x_grids[-1]),
 					np.clip(extra_points[1], self.p_grids[0], self.p_grids[-1]),
 					0.1,
 					"green"
+				)
+			if central_points is not None:
+				ax.scatter(
+					np.clip(central_points[0], self.x_grids[0], self.x_grids[-1]),
+					np.clip(central_points[1], self.p_grids[0], self.p_grids[-1]),
+					0.5,
+					"black"
 				)
 
 		pred_data: npt.NDArray[np.double]
@@ -691,7 +694,7 @@ class WavefunctionPlotter:
 	PICNAME : typing.Literal["wfn_{{:0{}}}.png"]
 		The template for pictures
 	"""
-	# WFN_COLORS: list[matplotlib.typing.ColorType]
+	WFN_COLORS: list[matplotlib.typing.ColorType]
 	if pes.NUM_PES < 10:
 		WFN_COLORS = matplotlib.color_sequences["Set1"][:pes.NUM_PES]
 	else:
@@ -733,7 +736,7 @@ class WavefunctionPlotter:
 		self.fig: matplotlib.figure.Figure
 		self.axs: np.ndarray[collections.abc.Sequence[matplotlib.axes.Axes], np.dtype[np.object_]]
 		self.fig, self.axs = plt.subplots(pes.DIM, 2, figsize=(FIGSIZE[0] * 2, FIGSIZE[1] * pes.DIM))
-		self.axs = self.axs.reshape(pes.DIM, 2)
+		self.axs = self.axs.reshape(pes.DIM, 2) # guaranteen it is matrix in case pes.DIM == 1
 		self.fig.suptitle(self.title)
 		labels: list[str] = [utility.dimension_name(iDim) for iDim in range(pes.PHASEDIM)]
 		titles: list[str] = ["Position", "Momentum"]
@@ -817,6 +820,7 @@ def main() -> None:
 	parser.add_argument("--animation", "--ani", "-a", default=0, type=int, help="Draw animation; if so, provide the interval between frames in ms. Draw frame by frame and compress into tarfile will always be done.")
 	parser.add_argument("--scattered", "-s", action="store_true", help="Scatter points on the distribution")
 	parser.add_argument("--rescaled", "-r", action="store_true", help="Rescale all elements to same (maximum = 1.0)")
+	parser.add_argument("--wavefunction-rescaled", "--wr", action="store_true", help="Rescale wavefunction as well (default to be the same as --rescaled)")
 	parser.add_argument("--density-matrix", "--dm", "-d", default=ALL_GRIDS_FILENAME + DATA_EXTENSION, type=str, help="File containing partial Wigner-transformed density matrix from Gaussian process regression")
 	parser.add_argument("--marginal", "-m", default=MARGINAL_FILENAME + DATA_EXTENSION, type=str, help="File containing marginal distribution from Gaussian process regression")
 	parser.add_argument("--grid-solution", "--grid", "-g", default="", type=str, help="File containing partial Wigner-transformed density matrix from grid solution")
@@ -866,7 +870,7 @@ def main() -> None:
 			output_interval,
 			r0=r0,
 			marginal_data=marginal_data.diagonal(axis1=2, axis2=3).swapaxes(-1, -2),
-			draw_rescaled=result["rescaled"]
+			draw_rescaled=result["wavefunction_rescaled"]
 		)
 		assert wfn_plotter.wfn_sqnm is not None
 		for iframe in range(wfn_plotter.wfn_sqnm.shape[0]):

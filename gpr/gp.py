@@ -116,6 +116,30 @@ class SinglePredictor:
 	GTOL: float = 1e-5 ** 2
 	NOISE: float = 1e-4
 
+	@staticmethod
+	def get_factor(prediction: torch.Tensor, variance: torch.Tensor) -> torch.Tensor:
+		"""
+		To get the correction factor for prediction.
+
+		When the variance on the prediction is too big, the prediction is meaningless and a 0 prediction is given.
+
+		This is fulfilled by quarter circle :math:`(x-1)^2+y^2=1`
+
+		Parameters
+		----------
+		prediction : torch.Tensor, shape of (N,)
+			Prediction by GPR
+		variance : torch.Tensor, shape of (N,)
+			Pointwise variance of GPR
+
+		Returns
+		-------
+		torch.Tensor
+			prefactor to be multiplied with prediction, all values are in range [0, 1]
+		"""
+		n: torch.Tensor = 1.0 + torch.maximum(torch.zeros_like(prediction), -torch.log10(prediction ** 2 / torch.abs(variance)))
+		return (torch.where(torch.isinf(n), torch.zeros_like(n), torch.sqrt(2.0 * n - 1.0) / n)) / 2.0 + 0.5 # when n is inf, result should be 0 but is nan
+
 	def __init__(self, kernel: gpytorch.kernels.Kernel):
 		self.kernel: gpytorch.kernels.Kernel = copy.deepcopy(kernel)
 		likelihood: gpytorch.likelihoods.FixedNoiseGaussianLikelihood = gpytorch.likelihoods.FixedNoiseGaussianLikelihood(torch.full((2,), __class__.NOISE))
@@ -178,30 +202,6 @@ class SinglePredictor:
 		-----
 		Instance of prediction of projected process (PP)
 		"""
-		def get_factor(prediction: torch.Tensor, variance: torch.Tensor) -> torch.Tensor:
-			"""
-			To get the correction factor for prediction.
-
-			When the variance on the prediction is too big, the prediction is meaningless and a 0 prediction is given.
-
-			This is fulfilled by error function (erf).
-
-			Parameters
-			----------
-			prediction : torch.Tensor, shape of (N,)
-				Prediction by GPR
-			variance : torch.Tensor, shape of (N,)
-				Pointwise variance of GPR
-
-			Returns
-			-------
-			torch.Tensor
-				prefactor to be multiplied with prediction, all values are in range [0, 1]
-			"""
-			get_factor.erf_factor = 10.0
-			n: torch.Tensor = 1.0 + torch.maximum(torch.zeros_like(prediction), -torch.log10(prediction ** 2 / torch.abs(variance)))
-			return torch.where(torch.isinf(n), torch.zeros_like(n), torch.sqrt(2.0 * n - 1.0) / n) # when n is inf, result should be 0 but is nan
-
 		if not self.weights_updated:
 			self.update_weights()
 		if not self.kernel_updated:
@@ -216,7 +216,22 @@ class SinglePredictor:
 		pred: torch.Tensor = (kxm @ self.k_inv_y).to_dense()
 		var: torch.Tensor = self.model.cov(x_test, diag=True).to_dense() - torch.einsum("ij,jk,ik->i", kxm, self.kmm_inv, kxm) # diagonal only
 		sigma_f2: float = (self.k_inv_y.reshape(1, -1) @ self.model.cov(self.get_training_features()) @ self.k_inv_y.reshape(-1, 1)).item() / self.k_inv_y.numel()
-		return pred * get_factor(pred, sigma_f2 * var)
+		result = pred * __class__.get_factor(pred, sigma_f2 * var)
+		nans: torch.Tensor = torch.isnan(result)
+		if nans.any().item():
+			print(
+				"{}".format("K^{-1}y CONTAINS nan\n" if torch.isnan(self.k_inv_y).any().item() else "") + "Sigma_f2 = {}".format(sigma_f2),
+				utility.format_array("Prediction", pred[nans]),
+				utility.format_array("Prediction ^ 2", pred[nans] ** 2),
+				utility.format_array("Variance", var[nans]),
+				utility.format_array("|Variance|", torch.abs(var[nans])),
+				utility.format_array("Prediction ^ 2 / |Variance|", pred[nans] ** 2 / torch.abs(var[nans])),
+				utility.format_array("-lg(Prediction ^ 2 / |Variance|)", -torch.log10(pred[nans] ** 2 / torch.abs(var[nans]))),
+				utility.format_array("Factor", __class__.get_factor(pred, sigma_f2 * var)[nans]),
+				sep="\n"
+			)
+			exit(0)
+		return result
 
 	def error(self, use_weight: bool = True) -> torch.Tensor:
 		"""
@@ -232,6 +247,16 @@ class SinglePredictor:
 		if use_weight:
 			return torch.sum((self.y_all - self.predict(self.x_all)) ** 2) * (self.scale ** 2)
 		else:
+			# x_training: torch.Tensor = self.get_training_features()
+			# num_feature: int = x_training.shape[0]
+			# kmm: torch.Tensor = self.model.cov(x_training).to_dense()
+			# kmm_inv: torch.Tensor = torch.cholesky_inverse(torch.linalg.cholesky(kmm + __class__.NOISE * torch.eye(num_feature)))
+			# kmn: torch.Tensor = self.model.cov(self.x_all, x_training).to_dense()
+			# k_inv_y: torch.Tensor = linear_operator.utils.stable_pinverse(kmn).to_dense() @ self.y_all
+			# pred: torch.Tensor = kmn @ k_inv_y
+			# var: torch.Tensor = self.model.cov(self.x_all).to_dense() - torch.einsum("ij,jk,ik->i", kmn, kmm_inv, kmn) # diagonal only
+			# sigma_f2: float = (k_inv_y.reshape(1, -1) @ kmm @ k_inv_y.reshape(-1, 1)).item() / self.y_all.numel()
+			# return torch.sum((self.y_all - pred * __class__.get_factor(pred, var * sigma_f2)) ** 2) * (self.scale ** 2)
 			kmn: torch.Tensor = self.model.cov(self.x_all, self.get_training_features()).to_dense()
 			return torch.sum((self.y_all - (kmn @ (linear_operator.utils.stable_pinverse(kmn) @ self.y_all)).to_dense()) ** 2) * (self.scale ** 2)
 

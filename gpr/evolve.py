@@ -63,9 +63,9 @@ class Direction(enum.IntEnum):
 	Backward = -1
 
 
-def is_coupling(x: npt.NDArray[np.double], p: npt.NDArray[np.double], mass: npt.NDArray[np.double], dt: float) -> npt.NDArray[np.bool_]:
+def adiabatic_component(x: npt.NDArray[np.double], p: npt.NDArray[np.double], mass: npt.NDArray[np.double]) -> npt.NDArray[np.double]:
 	"""
-	To judge if there is strong enough non-adiabatic coupling at given phase coordinates
+	To give the contribution of non-adiabaticity at given phase coordinates
 
 	Parameters
 	----------
@@ -75,19 +75,22 @@ def is_coupling(x: npt.NDArray[np.double], p: npt.NDArray[np.double], mass: npt.
 		Momenta of interest
 	mass : npt.NDArray[np.double], shape of (DIM,)
 		Mass of classical degree of freedom
-	dt : float
-		Time interval
 
 	Returns
 	-------
-	npt.NDArray[np.bool_], shape of (..., DIM)
-		Coupling of each point and each dimension
+	npt.NDArray[np.double], shape of (...)
+		Coupling contribution of each point, range in [0, 1]
 	"""
-	is_coupling.CouplingCriterion = 0.0
-	force: npt.NDArray[np.double] = pes.adiabatic_force(x) # ... * D * N * N
-	diag_f: npt.NDArray[np.double] = np.average(np.diagonal(force, 0, -2, -1), -1)[..., np.newaxis, np.newaxis] # ... * D * 1 * 1
+	adiabatic_component.FACTOR = 200 # dimensionless factor to magnify the weights
 	nac: npt.NDArray[np.double] = pes.adiabatic_coupling(x) # ... * D * N * N
-	return np.any(np.logical_or(np.abs(np.tril(force, -1)) > np.abs(is_coupling.CouplingCriterion * diag_f), dt * (p / mass)[:, np.newaxis, np.newaxis] * nac > is_coupling.CouplingCriterion), axis=(-2, -1))
+	E: npt.NDArray[np.double] = pes.adiabatic_potential(x) # ... * N
+	strict_tril_row: npt.NDArray[np.int_]
+	strict_tril_col: npt.NDArray[np.int_]
+	strict_tril_row, strict_tril_col = np.tril_indices(pes.NUM_PES, -1)
+	v_dot_d: npt.NDArray[np.double] = (p / mass)[..., np.newaxis] * nac[..., strict_tril_row, strict_tril_col] # ... * D * NUM_TRIG
+	weights: npt.NDArray[np.double] = np.abs(v_dot_d.sum(axis=-2) * pes.HBAR / (E[..., strict_tril_row] - E[..., strict_tril_col])) # ... * NUM_TRIG
+	# adiabatic: 1, non-adiabatic: exp(weights)-1; after normalization, adiabatic weights = exp(-weights)
+	return np.exp(-weights.max(axis=-1) * adiabatic_component.FACTOR) # ...
 
 
 def evolve_coordinates_adiabatically(
@@ -215,7 +218,6 @@ def evolve_density_non_adiabatically(
 	x2: npt.NDArray[np.double],
 	p1: npt.NDArray[np.double],
 	mass: npt.NDArray[np.double],
-	IsCouple: npt.NDArray[np.bool_],
 	dt: float,
 	predictor: typing.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]],
 	RowIndex: int,
@@ -238,8 +240,6 @@ def evolve_density_non_adiabatically(
 		The density matrix element of given index at give points, or not given. Notice all the elements passed to this function is in lower-triangular part.
 	mass : npt.NDArray[np.double], shape of (DIM,)
 		Mass of classical degree of freedom
-	IsCouple : npt.NDArray[np.bool_], shape of (..., DIM)
-		The coupling at each phase points of each dimension
 	dt : float
 		Time interval
 	predictor : typing.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
@@ -279,7 +279,7 @@ def evolve_density_non_adiabatically(
 				dt : float
 					Time interval
 				"""
-				phi: npt.NDArray[np.double] = np.sum(p_part / mass * pes.adiabatic_coupling(x_part)[..., 0, 1] * is_coupling(x_part, p_part, mass, dt_offdiag).astype(np.double), -1) # v.dot(NAC), ...
+				phi: npt.NDArray[np.double] = np.sum(p_part / mass * pes.adiabatic_coupling(x_part)[..., 0, 1], -1) # v.dot(NAC), ...
 				sinphi: npt.NDArray[np.double] = np.sin(2.0 * dt_offdiag * phi)
 				cosphi: npt.NDArray[np.double] = np.cos(2.0 * dt_offdiag * phi)
 				rho_save: npt.NDArray[np.cdouble] = np.copy(rho_part)
@@ -293,7 +293,7 @@ def evolve_density_non_adiabatically(
 			# first step: (x0, p0) -> (x2, p1)
 			# second step, off-diagonal branching to p2, and broadcast to x3
 			# (backward) direction is included. So when evolve forward, the branch correspondence remains the same
-			p2: npt.NDArray[np.double] = p1 + dt * evolve_density_non_adiabatically.offdiagonal_branches.reshape((-1,) + tuple(1 for i in range(IsCouple.ndim))) * (pes.adiabatic_force(x2)[..., 0, 1] * is_coupling(x2, p1, mass, dt).astype(np.double)) # 3 * ... * D
+			p2: npt.NDArray[np.double] = p1 + dt * evolve_density_non_adiabatically.offdiagonal_branches.reshape((-1,) + tuple(1 for _ in range(x0.ndim))) * pes.adiabatic_force(x2)[..., 0, 1] # 3 * ... * D
 			x3: npt.NDArray[np.double] = x2 + evolve_density_non_adiabatically.drc.value * dt / 4.0 * p2 / mass # 3 * ... * D
 			# then adiabatic branching to p3, and broadcast to x4
 			f_x3: npt.NDArray[np.double] = pes.adiabatic_force(x3) # 3 * ... * D * N * N
@@ -390,24 +390,31 @@ def evolve_element_density(
 	"""
 	evolve_element_density.drc = Direction.Forward
 	# judge coupling
-	IsCouple: npt.NDArray[np.bool_] = is_coupling(x4, p2, mass, dt) # M * D
-	IsCouplePerPoint: npt.NDArray[np.bool_] = np.any(IsCouple, -1) # M
-	adiabatic_indices: npt.NDArray[np.int_] = np.flatnonzero(np.logical_not(IsCouplePerPoint)) # adiabatic points
-	non_adiabatic_indices: npt.NDArray[np.int_] = np.flatnonzero(IsCouplePerPoint) # non-adiabatic points
-	evolve_density_adiabatically(density.ravel()[adiabatic_indices], x0.reshape(-1, pes.DIM)[adiabatic_indices], x2.reshape(-1, pes.DIM)[adiabatic_indices], x4.reshape(-1, pes.DIM)[adiabatic_indices], evolve_element_density.drc, dt, RowIndex, ColIndex)
-	density[non_adiabatic_indices] = evolve_density_non_adiabatically(
-		density.ravel()[non_adiabatic_indices],
-		x4.reshape(-1, pes.DIM)[non_adiabatic_indices],
-		p2.reshape(-1, pes.DIM)[non_adiabatic_indices],
-		x2.reshape(-1, pes.DIM)[non_adiabatic_indices],
-		p1.reshape(-1, pes.DIM)[non_adiabatic_indices],
+	adia_comp: npt.NDArray[np.double] = adiabatic_component(x4, p2, mass)
+	density_adia: npt.NDArray[np.cdouble] = density.copy()
+	evolve_density_adiabatically(
+		density_adia,
+		x0,
+		x2,
+		x4,
+		evolve_element_density.drc,
+		dt,
+		RowIndex,
+		ColIndex
+	)
+	density_nonadia: npt.NDArray[np.cdouble] = evolve_density_non_adiabatically(
+		density,
+		x4,
+		p2,
+		x2,
+		p1,
 		mass,
-		IsCouple.reshape(-1, pes.DIM)[non_adiabatic_indices],
 		dt,
 		predictor,
 		RowIndex,
 		ColIndex
 	)
+	density = density_adia * adia_comp + density_nonadia * (1.0 - adia_comp)
 
 
 def evolve(

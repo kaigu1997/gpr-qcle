@@ -457,6 +457,7 @@ def sh_evolve(
 	points: npt.NDArray[np.double],
 	densities: npt.NDArray[np.cdouble],
 	belonging_idx: npt.NDArray[np.int_],
+	purity: npt.NDArray[np.double],
 	mass: npt.NDArray[np.double],
 	dt: float,
 	predictor: typing.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
@@ -472,6 +473,8 @@ def sh_evolve(
 		Density matrix element of the points
 	belonging_idx : npt.NDArray[np.int_], shape of (NUM_TRIG * NUM_PTS,)
 		The index of density matrix element where the points belong to
+	purity : npt.NDArray[np.double], shape of (NUM_PES, NUM_PES)
+		The purity of each element, indicating the transition allowance to other elements
 	mass : npt.NDArray[np.double], shape of (DIM,)
 		Mass of classical degree of freedom
 	dt : float
@@ -490,7 +493,7 @@ def sh_evolve(
 	for iBelongPES in range(pes.NUM_PES):
 		for jBelongPES in range(iBelongPES + 1):
 			TrilIndex = pes.flatten_tril_index[iBelongPES, jBelongPES]
-			indices: npt.NDArray[np.int_] = np.flatnonzero(current_indices[TrilIndex]) # npt
+			indices: npt.NDArray[np.int_] = np.flatnonzero(current_indices[TrilIndex]) # NUM_PT
 			num_pts: int = indices.size
 			if num_pts > 0: # only have elements
 				# get x and p, and 2 semi adiabatic steps
@@ -498,16 +501,19 @@ def sh_evolve(
 				x4[indices], p2[indices] = evolve_coordinates_adiabatically(x2[indices], p1[indices], mass, dt / 2.0, Direction.Forward, iBelongPES, jBelongPES)
 				# surface hopping
 				num_states_avail: int = (1 if iBelongPES == jBelongPES else 2) * (pes.NUM_PES - 1)
-				state_prob: npt.NDArray[np.double] = np.zeros((num_pts, num_states_avail + 1))
+				state_prob: npt.NDArray[np.double] = np.zeros((num_pts, num_states_avail + 1)) # +1 for keep the same
+				current_purity: float = purity[iBelongPES, jBelongPES]
+				dest_purity: npt.NDArray[np.double] = purity[dest_row_idx[TrilIndex, :num_states_avail], dest_col_idx[TrilIndex, :num_states_avail]] # NUM_STATE
+				purity_ratio: npt.NDArray[np.double] = current_purity / (current_purity + dest_purity)
 				# weights
-				velocity: npt.NDArray[np.double] = p2[indices] / mass # npt * D
-				coupling: npt.NDArray[np.double] = pes.adiabatic_coupling(x4[indices])[..., coup_row_idx[TrilIndex, :num_states_avail], coup_col_idx[TrilIndex, :num_states_avail]] # npt * D * nst
-				state_prob[:, :-1] = np.abs(np.sum(velocity[..., np.newaxis] * coupling, -2) * dt) # npt * nst, |v*d*dt|
+				velocity: npt.NDArray[np.double] = p2[indices] / mass # NUM_PT * DIM
+				coupling: npt.NDArray[np.double] = pes.adiabatic_coupling(x4[indices])[..., coup_row_idx[TrilIndex, :num_states_avail], coup_col_idx[TrilIndex, :num_states_avail]] # NUM_PT * DIM * NUM_STATE
+				state_prob[:, :-1] = np.abs(np.sum(velocity[..., np.newaxis] * coupling, -2) * dt) # NUM_PT * NUM_STATE, |v*d*dt|
 				# energy conservation rule
-				potential: npt.NDArray[np.double] = pes.adiabatic_potential(x4[indices]) # npt * N
+				potential: npt.NDArray[np.double] = pes.adiabatic_potential(x4[indices]) # NUM_PT * NUM_PES
 				momentum_rescale_factor_sq: npt.NDArray[np.double] = 1.0\
-					+ (potential[:, coup_col_idx[TrilIndex, :num_states_avail]] - potential[:, coup_row_idx[TrilIndex, :num_states_avail]]) / np.sum(p2[indices] ** 2 / mass, -1, keepdims=True) # npt * nst
-				state_prob[:, :-1] *= np.where(momentum_rescale_factor_sq >= 0.0, 1.0, 0.0)
+					+ (potential[:, coup_col_idx[TrilIndex, :num_states_avail]] - potential[:, coup_row_idx[TrilIndex, :num_states_avail]]) / np.sum(p2[indices] ** 2 / mass, -1, keepdims=True) # NUM_PT * NUM_STATE
+				state_prob[:, :-1] *= np.where(momentum_rescale_factor_sq >= 0.0, purity_ratio, 0.0)
 				state_prob[:, -1] = 1.0 # stay at original state
 				state_prob /= np.sum(state_prob, -1, keepdims=True) # normalize
 				# choose the one to jump to

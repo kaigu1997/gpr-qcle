@@ -10,8 +10,10 @@ import argparse
 import datetime
 import io
 import os
+import subprocess
 import sys
 import tarfile
+import time
 import typing
 
 import numpy as np
@@ -31,6 +33,8 @@ import utility
 NUM_PTS: typing.Literal[256] = 256
 NUM_XTR_RATIO: typing.Literal[50] = 50
 NUM_MC_PTS: typing.Literal[10_000_000] = 10_000_000
+NUM_EVL_MC_PTS: typing.Literal[10_000] = 10_000
+TAR_EXTENSION: typing.Literal[".tgz"] = ".tgz"
 
 
 def parse_argument() -> tuple[bool, str]:
@@ -43,10 +47,10 @@ def parse_argument() -> tuple[bool, str]:
 		Whether to plot or not, and whether to read grid solution or not
 	"""
 	parser: argparse.ArgumentParser = argparse.ArgumentParser(description="To evolve the grid solution")
-	parser.add_argument("--plot", "-p", default="no", type=str, choices=["yes", "no"], help="Whether to plot each frame or not")
+	parser.add_argument("--plot", "-p", action="store_true", help="Whether to plot each frame or not")
 	parser.add_argument("--read", "-r", default="", type=str, help="Whether to read grid solution or not; if read, provide the file name")
 	result: dict[str, typing.Any] = vars(parser.parse_args())
-	return False if result["plot"] == "no" else True, result["read"]
+	return result["plot"], result["read"]
 
 
 def cutoff(x: float) -> float:
@@ -118,6 +122,7 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 		utility.format_array("Initial phase_factor", initial_phase_factor),
 		utility.format_array("Time step", dt),
 		utility.format_array("Steps between output", output_steps),
+		utility.format_array("Steps between optimization", reopt_steps),
 		sep="\n"
 	)
 	initial_phase_factor = initial_phase_factor / 180.0 * np.pi # deg to arc
@@ -166,6 +171,7 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 	# average evaluators
 	mca: expectation.MonteCarloAverage = expectation.MonteCarloAverage(NUM_MC_PTS)
 	aia: expectation.AnalyticalAverager = expectation.AnalyticalAverager(predictors)
+	epmca: expectation.EvolvingPointsMCAverage = expectation.EvolvingPointsMCAverage(NUM_EVL_MC_PTS, init_dist)
 	# drawer
 	dm_drawer: plot.DensityMatrixDrawer | None = None
 	wfn_plotter: plot.WavefunctionPlotter | None = None
@@ -185,6 +191,7 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 			output_interval,
 			total_ticks,
 			init_dist,
+			grids_each_dim,
 			draw_rescaled=False
 		)
 	# files for output
@@ -289,8 +296,9 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 			# calculate averages
 			print(iTick * output_interval, end=" ", file=ave_f)
 			mca.update_pts(gp_pts, predictors.predict)
+			epmca.update_density(predictors.predict)
 			aver: expectation.Averager
-			for aver in [mca, aia]:
+			for aver in [mca, aia, epmca]:
 				print(*aver.population(), *aver.coordinates(), *aver.covariance()[np.tril_indices(pes.PHASEDIM)], aver.potential(), aver.kinetic(mass), *aver.purity().reshape(-1), end=" ", file=ave_f)
 			print("", file=ave_f, flush=True)
 			# calculate error, and predict density
@@ -338,7 +346,7 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 					assert pred is not None and dm_drawer is not None
 					dm_drawer(iTick, pred.reshape((pes.NUM_ELM,) + pred.shape[2:]), gp_pts, gp_num_center, scale)
 				assert wfn_plotter is not None
-				wfn_plotter(iTick, marginal.diagonal(axis1=1, axis2=2))
+				wfn_plotter(iTick, marginal.diagonal(axis1=1, axis2=2).swapaxes(-1, -2)) # .diagonal will move axis to end
 
 		def print_parameter_scale_loss(scale: npt.NDArray[np.double]) -> None:
 			"""
@@ -357,29 +365,34 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 				print(predictors[i].error().item(), file=lss_f)
 			print("\n", file=lss_f)
 
+		start_time: int = int(time.time())
+		end_time = os.environ.get("SLURM_JOB_END_TIME")
+		if end_time is not None:
+			end_time = int(end_time) # int | None
 		train_pred_draw(0)
 		print_parameter_scale_loss(plot.get_rescale_factor(gp_density))
 		to_stop: bool = False
+		iTick: int
 		for iTick in range(1, total_ticks):
 			# evolve
 			for _ in range(output_steps):
 				evolve.evolve(gp_pts, gp_density, mass, dt, predictors.predict)
-				evolve.sh_evolve(sh_pts, sh_density, sh_belonging_idx, mass, dt, predictors.predict)
+				evolve.sh_evolve(sh_pts, sh_density, sh_belonging_idx, aia.purity(), mass, dt, predictors.predict)
+				epmca.evolve(mass, dt, predictors.predict)
 				scale: npt.NDArray[np.double] = plot.get_rescale_factor(gp_density)
 				predictors.update(gp_pts, gp_density, gp_num_center, scale)
 				print_parameter_scale_loss(scale)
 			# update and predict
 			train_pred_draw(iTick, iTick % reopt_steps == 0)
+			# check stopping criteria, when grid solution is not given
+			# use predictors (aia) with old points
+			if grid_data is None:
+				if np.any(mca.coordinates()[:pes.DIM] > np.abs(r0[:pes.DIM])) or np.any(aia.coordinates()[:pes.DIM] > np.abs(r0[:pes.DIM])) or np.any(epmca.coordinates()[:pes.DIM] > np.abs(r0[:pes.DIM])):
+					to_stop = True
 			# exchange with SH
 			gp_num_center = np.unique(sh_belonging_idx, return_counts=True)[1]
 			gp_pts = [np.tile(sh_pts[sh_belonging_idx == iTril], (1 + NUM_XTR_RATIO, 1)) for iTril in pes.tril_element_indices]
 			gp_density = [np.tile(sh_density[sh_belonging_idx == iTril], 1 + NUM_XTR_RATIO) for iTril in pes.tril_element_indices]
-			# check stopping criteria, when grid solution is not given
-			# use predictors (aia) with old points
-			if grid_data is None:
-				if np.any(mca.coordinates()[:pes.DIM] > np.abs(r0[:pes.DIM])) or np.any(aia.coordinates()[:pes.DIM] > np.abs(r0[:pes.DIM])):
-					total_ticks = iTick + 1
-					to_stop = True
 			# sample extra points and predict them
 			sample.sample_extra_points(gp_num_center, gp_pts)
 			for iPES in range(pes.NUM_PES):
@@ -391,7 +404,16 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 			if iTick % reopt_steps == 0:
 				predictors.train()
 			print_parameter_scale_loss(scale)
+			if end_time is not None:
+				current_time: int = int(time.time())
+				time_pass: int = current_time - start_time
+				time_left: int = end_time - current_time
+				if time_left < time_pass // iTick:
+					# time left is not enough for next output, kill and rerun the job
+					print("Time left is {} seconds, not enough for another iteration. Stop evolving after {} seconds, {} iterations".format(time_left, time_pass, iTick))
+					to_stop = True
 			if to_stop:
+				total_ticks = iTick + 1
 				break
 
 	# then plots
@@ -399,24 +421,26 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 	if grid_data is not None: # error
 		plot.plot_error(output_interval)
 	# parameters, loss and rescale factor
-	param_loss_scale_ticks: npt.NDArray[np.double] = np.concatenate([np.arange(i * output_steps, (i + 1) * output_steps + 1) for i in range(total_ticks - 1)]) * dt # This should be size of (total_ticks - 1) * (output_steps + 1)
+	param_loss_scale_ticks: npt.NDArray[np.double] = np.concatenate([np.arange(i * output_steps, (i + 1) * output_steps + 1) for i in range(iTick)]) * dt # This should be size of (total_ticks - 1) * (output_steps + 1)
 	plot.plot_parameters(param_loss_scale_ticks)
 	plot.plot_loss_and_rescale_factors(param_loss_scale_ticks)
 	# tar figures
 	if to_draw:
 		if pes.PHASEDIM == 2:
 			assert dm_drawer is not None
-			with tarfile.open("gp.tar.gz", "w:gz") as tf:
-				for iTick in range(total_ticks):
-					name: str = dm_drawer.picname.format(iTick)
-					tf.add(name)
-					os.remove(name)
+			if os.path.isdir(dm_drawer.FILENAME_PREFIX):
+				os.rename(dm_drawer.FILENAME_PREFIX, dm_drawer.FILENAME_PREFIX + "_" + str(datetime.datetime.now()).replace(" ", "_"))
+			subprocess.run(["mkdir", dm_drawer.FILENAME_PREFIX]) # make directory
+			subprocess.run(["mv"] + [dm_drawer.picname.format(iTick) for iTick in range(total_ticks)] + [dm_drawer.FILENAME_PREFIX])
+			with tarfile.open(dm_drawer.FILENAME_PREFIX + TAR_EXTENSION, "w:gz") as dm_tf:
+				dm_tf.add(dm_drawer.FILENAME_PREFIX)
 		assert wfn_plotter is not None
-		with tarfile.open("gp_marginal.tar.gz", "w:gz") as tf:
-			for iTick in range(total_ticks):
-				name: str = wfn_plotter.picname.format(iTick)
-				tf.add(name)
-				os.remove(name)
+		if os.path.isdir(wfn_plotter.FILENAME_PREFIX):
+			os.rename(wfn_plotter.FILENAME_PREFIX, wfn_plotter.FILENAME_PREFIX + "_" + str(datetime.datetime.now()).replace(" ", "_"))
+		subprocess.run(["mkdir", wfn_plotter.FILENAME_PREFIX]) # make directory
+		subprocess.run(["mv"] + [wfn_plotter.picname.format(iTick) for iTick in range(total_ticks)] + [wfn_plotter.FILENAME_PREFIX])
+		with tarfile.open(wfn_plotter.FILENAME_PREFIX + TAR_EXTENSION, "w:gz") as wfn_tf:
+			wfn_tf.add(wfn_plotter.FILENAME_PREFIX)
 
 
 if __name__ == "__main__":

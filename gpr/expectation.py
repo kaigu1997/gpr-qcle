@@ -1,7 +1,6 @@
 """
 expectation
 ===========
-
 This module evaluates the expectation values (population, <x> and <p>, energy, etc)
 """
 import abc
@@ -16,6 +15,7 @@ import torch
 
 sys.path.append(os.path.dirname(__file__))
 
+import evolve
 import gp
 import pes
 import sample
@@ -226,6 +226,78 @@ class MonteCarloAverage(Averager):
 
 	def purity(self) -> npt.NDArray[np.double]:
 		return PURITY_FACTOR * pes.lower_triangular_to_full(np.average((self.density.real ** 2 + self.density.imag ** 2) / self.weight, -1))
+
+
+class EvolvingPointsMCAverage(MonteCarloAverage):
+	"""
+	To calculate average by Monte Carlo estimate too,
+	but using points evolving forward with same weights
+
+	Parameters
+	----------
+	num_pts : int
+		The number of points for monte carlo
+	init_dist : pes.InitialDistribution
+		Initial distribution to generate points, density, and weights
+	evolve_coordinates_only : bool, optional
+		Whether to evolve phase space coordinates only or with its density as well, by default False
+
+	Functions
+	-------
+
+	"""
+	def __init__(self, num_pts: int, init_dist: pes.InitialDistribution, evolve_coordinates_only: bool = False):
+		super().__init__(num_pts)
+		self.evolve_coordinates_only: bool = evolve_coordinates_only
+		self.point_set[:] = sample.normal_sample(num_pts, init_dist.r0, init_dist.sigma_r0)
+		for i, ElementIndex in enumerate(pes.tril_element_indices):
+			self.density[i] = init_dist(self.point_set[i], ElementIndex)
+			self.weight[i] = np.abs(self.density[i]) / np.abs(init_dist.weight_phase[ElementIndex // pes.NUM_PES, ElementIndex % pes.NUM_PES])
+
+	def evolve(
+		self,
+		mass: npt.NDArray[np.double],
+		dt: float,
+		predictor: typing.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
+	) -> None:
+		"""
+		To evolve the coordinates, and density if applicable
+
+		Parameters
+		----------
+		mass : npt.NDArray[np.double], shape of (DIM,)
+			Mass of classical degree of freedom
+		dt : float
+			Time interval
+		predictor : typing.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
+			It predicts the density matrix element based on given coordinates and element index
+		"""
+		if self.evolve_coordinates_only:
+			for pts, row_idx, col_idx in zip(self.point_set, pes.tril_row_indices, pes.tril_col_indices):
+				pts[:, :pes.DIM], pts[:, pes.DIM:] = evolve.evolve_coordinates_adiabatically(
+					pts[:, :pes.DIM],
+					pts[:, pes.DIM:],
+					mass,
+					dt,
+					evolve.Direction.Forward,
+					row_idx,
+					col_idx
+				)
+		else:
+			evolve.evolve([ps for ps in self.point_set], [den for den in self.density], mass, dt, predictor)
+
+	def update_density(self, predictor: typing.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]) -> None:
+		"""
+		To update the density using the predictor if the density is not evolved
+
+		Parameters
+		----------
+		predictor : typing.Callable[[npt.NDArray[np.double], int, bool], npt.NDArray[np.cdouble]]
+			It predicts the density matrix element based on given coordinates and element index
+		"""
+		if self.evolve_coordinates_only:
+			for i, ElementIndex in enumerate(pes.tril_element_indices):
+				self.density[i] = predictor(self.point_set[i], ElementIndex)
 
 
 class AnalyticalAverager(Averager):

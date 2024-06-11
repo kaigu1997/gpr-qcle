@@ -167,47 +167,51 @@ def plot_average() -> None:
 	To plot all averages available
 	"""
 	NUM_MOMENTS: typing.Literal[5] = pes.PHASEDIM * (pes.PHASEDIM + 3) // 2
-	ave_type_titles: list[str] = ["Monte Carlo", "Analytical"]
+	ave_type_titles: list[str] = ["Monte Carlo", "Analytical", "Evolving Points Monte Carlo"]
 	NUM_AVE_TYPES: int = len(ave_type_titles)
 	plot_titles: list[str] = ["Population"]\
 		+ [utility.dimension_name(iDim) for iDim in range(pes.PHASEDIM)]\
 		+ [("Cov(" + utility.dimension_name(jDim) + ", " + utility.dimension_name(iDim) + ")") if iDim != jDim else ("Var[" + utility.dimension_name(iDim) + "]") for iDim in range(pes.PHASEDIM) for jDim in range(iDim + 1)]\
 		+ ["Energy", "Purity"] # moments of 0th, 1st and 2nd order, and other (energy and purity)
+	NUM_TITLE: int = len(plot_titles)
 	fig: matplotlib.figure.Figure
 	axs: np.ndarray[collections.abc.Sequence[collections.abc.Sequence[matplotlib.axes.Axes]], np.dtype[np.object_]]
-	fig, axs = plt.subplots(NUM_AVE_TYPES, len(plot_titles), figsize=(FIGSIZE[0] * len(plot_titles), FIGSIZE[1] * NUM_AVE_TYPES)) # population, <x> and <p>, energy, purity
+	fig, axs = plt.subplots(NUM_AVE_TYPES * 2, NUM_TITLE, figsize=(FIGSIZE[0] * NUM_TITLE, FIGSIZE[1] * NUM_AVE_TYPES * 2)) # population, <x> and <p>, energy, purity
 	averages: npt.NDArray[np.double] = np.loadtxt(AVERAGE_FILENAME + DATA_EXTENSION)
 	ticks: npt.NDArray[np.double] = averages[:, 0]
 	averages = averages[:, 1:].reshape(ticks.size, NUM_AVE_TYPES, (averages.shape[1] - 1) // NUM_AVE_TYPES)
-	for iRow in range(axs.shape[0]):
-		for iCol in range(axs.shape[1]):
+	for iRow in range(NUM_AVE_TYPES * 2):
+		AVE_TYPE_INDEX: int = iRow // 2
+		isOriginal: bool = iRow % 2 == 0
+		ppl_sum: float = 1.0 if isOriginal else np.sum(averages[:, AVE_TYPE_INDEX, :pes.NUM_PES], -1)
+		for iCol in range(NUM_TITLE):
 			ax: matplotlib.axes.Axes = axs[iRow, iCol]
 			y_label: str = plot_titles[iCol]
 			if iCol == 0: # population
 				for iPES in range(pes.NUM_PES):
-					ax.plot(ticks, averages[:, iRow, iPES], label="State " + str(iPES))
-				ax.plot(ticks, np.sum(averages[:, iRow, :pes.NUM_PES], -1), label="Total")
+					ax.plot(ticks, averages[:, AVE_TYPE_INDEX, iPES] / ppl_sum, label="State " + str(iPES))
+				ax.plot(ticks, np.sum(averages[:, AVE_TYPE_INDEX, :pes.NUM_PES], -1) / ppl_sum, label="Total")
 				ax.legend()
 			elif iCol <= NUM_MOMENTS: # <x>, <p>, and covariances
-				ax.plot(ticks, averages[:, iRow, iCol - 1 + pes.NUM_PES])
+				ax.plot(ticks, averages[:, AVE_TYPE_INDEX, iCol - 1 + pes.NUM_PES] / ppl_sum)
 				y_label += " / a.u."
 				if iCol > pes.PHASEDIM:
 					y_label += r"$^2$"
 			elif iCol == NUM_MOMENTS + 1: # energies
-				ax.plot(ticks, averages[:, iRow, pes.NUM_PES + NUM_MOMENTS + 1], label="Kinetic Energy")
-				if iRow == 0: # only mc has potential and thus total energy
-					ax.plot(ticks, averages[:, iRow, pes.NUM_PES + NUM_MOMENTS], label="Potential Energy")
-					ax.plot(ticks, np.sum(averages[:, iRow, pes.NUM_PES + NUM_MOMENTS:pes.NUM_PES + NUM_MOMENTS + 2], -1), label="Total Energy")
+				ax.plot(ticks, averages[:, AVE_TYPE_INDEX, pes.NUM_PES + NUM_MOMENTS + 1] / ppl_sum, label="Kinetic Energy")
+				if AVE_TYPE_INDEX == 0: # only mc has potential and thus total energy
+					ax.plot(ticks, averages[:, AVE_TYPE_INDEX, pes.NUM_PES + NUM_MOMENTS] / ppl_sum, label="Potential Energy")
+					ax.plot(ticks, np.sum(averages[:, AVE_TYPE_INDEX, pes.NUM_PES + NUM_MOMENTS:pes.NUM_PES + NUM_MOMENTS + 2], -1) / ppl_sum, label="Total Energy")
 				ax.legend()
 				y_label += " / a.u."
 			else: # purity
 				for iElement in range(pes.NUM_ELM):
-					ax.plot(ticks, averages[:, iRow, pes.NUM_PES + NUM_MOMENTS + 2 + iElement], label=utility.get_RI_label(iElement))
-				ax.plot(ticks, np.sum(averages[:, iRow, pes.NUM_PES + NUM_MOMENTS + 2:], -1), label="Total")
+					ax.plot(ticks, averages[:, AVE_TYPE_INDEX, pes.NUM_PES + NUM_MOMENTS + 2 + iElement] / ppl_sum, label=utility.get_RI_label(iElement))
+				ax.plot(ticks, np.sum(averages[:, AVE_TYPE_INDEX, pes.NUM_PES + NUM_MOMENTS + 2:], -1) / ppl_sum, label="Total")
 				ax.legend()
 			ax.set_xlabel("Time / a.u.")
 			ax.set_ylabel(y_label)
-			ax.set_title(ave_type_titles[iRow] + " Average of " + plot_titles[iCol])
+			ax.set_title(ave_type_titles[AVE_TYPE_INDEX] + ("" if isOriginal else " Rescaled") + " Average of " + plot_titles[iCol])
 	fig.savefig(AVERAGE_FILENAME + FIGURE_EXTENSION)
 	plt.close(fig)
 
@@ -354,7 +358,7 @@ class DensityMatrixDrawer:
 	NTICKS: int = matplotlib.colormaps[CMAP].N
 	COLORBAR_NTICKS: typing.Literal[21] = 21
 	FILENAME_PREFIX: typing.Literal["dm"] = "dm"
-	PICNAME: typing.Literal["dm_{{:0{}}}.png"] = FILENAME_PREFIX + "_{{:0{}}}.png"
+	PICNAME: typing.Literal["dm_{{:0{}}}.png"] = FILENAME_PREFIX + "_{{:0{}}}" + FIGURE_EXTENSION
 
 	@staticmethod
 	def get_factor(
@@ -468,9 +472,9 @@ class DensityMatrixDrawer:
 			if draw_scattered:
 				if self.dm_data is not None:
 					# read from file; otherwise pass from main
-					self.points = np.loadtxt(POINTS_FILENAME + DATA_EXTENSION).reshape(self.dm_data.shape[0], pes.PHASEDIM, -1) # N_TICKS * PHASEDIM * NUM_PTS
+					self.points = np.loadtxt(POINTS_FILENAME + DATA_EXTENSION)
+					self.points = self.points.reshape(self.points.shape[0] // pes.PHASEDIM, pes.PHASEDIM, self.points.shape[1]) # N_TICKS * PHASEDIM * NUM_PTS
 					self.belongings = np.loadtxt(BELONGING_FILENAME + DATA_EXTENSION).astype(np.int_) # N_TICKS * NUM_PTS
-					assert self.belongings.shape == (self.dm_data.shape[0], self.points.shape[-1])
 				self.title.insert(0, self.title[0] + "Scattered ") # scatter points first
 			nrows: int = len(self.title)
 			self.fig, self.axs = plt.subplots(nrows=nrows, ncols=pes.NUM_ELM, figsize=(FIGSIZE[0] * pes.NUM_ELM, FIGSIZE[1] * nrows))
@@ -606,12 +610,15 @@ class DensityMatrixDrawer:
 					else: # from file
 						assert self.points is not None and self.belongings is not None
 						TrilElementIndex: int = iElement if iElement // pes.NUM_PES >= iElement % pes.NUM_PES else iElement % pes.NUM_PES * pes.NUM_PES + iElement // pes.NUM_PES
-						draw_an_axs(
-							self.axs[row_index, iElement],
-							pred_data[iElement].T * rescale_factors[iElement],
-							central_points=self.points[frame_index][:, self.belongings[frame_index] == TrilElementIndex],
-							extra_points=self.points[frame_index][:, self.belongings[frame_index] == TrilElementIndex + pes.NUM_ELM],
-						) # mixing of basic and advanced slicing leads to error
+						if frame_index < self.points.shape[0] or frame_index < self.belongings.shape[0]:
+							draw_an_axs(
+								self.axs[row_index, iElement],
+								pred_data[iElement].T * rescale_factors[iElement],
+								central_points=self.points[frame_index][:, self.belongings[frame_index] == TrilElementIndex],
+								extra_points=self.points[frame_index][:, self.belongings[frame_index] == TrilElementIndex + pes.NUM_ELM],
+							) # mixing of basic and advanced slicing leads to error
+						else: # have points, but unavailable due to output
+							draw_an_axs(self.axs[row_index, iElement], pred_data[iElement].T * rescale_factors[iElement])
 				row_index += 1
 			for iElement in range(pes.NUM_ELM): # contourfs for predicted data
 				draw_an_axs(
@@ -869,7 +876,7 @@ def main() -> None:
 		wfn_plotter: WavefunctionPlotter = WavefunctionPlotter(
 			output_interval,
 			r0=r0,
-			marginal_data=marginal_data.diagonal(axis1=2, axis2=3).swapaxes(-1, -2),
+			marginal_data=marginal_data.diagonal(axis1=2, axis2=3).swapaxes(-1, -2), # .diagonal will move axis to end
 			draw_rescaled=result["wavefunction_rescaled"]
 		)
 		assert wfn_plotter.wfn_sqnm is not None

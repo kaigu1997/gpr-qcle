@@ -16,7 +16,6 @@ sys.path.append(os.path.dirname(__file__))
 import pes
 import utility
 
-VARIANCE_RATIO: float = 5.0
 np_rng: np.random.Generator = np.random.Generator(np.random.MT19937(0))
 torch.manual_seed(0)
 
@@ -57,6 +56,7 @@ def sample_central_points(num_points: int | npt.NDArray[np.int_], all_points: li
 	all_points : list[npt.NDArray[np.double]], len of NUM_TRIG, each of shape (num_point * (1 + NUM_XTR_RATIO), PHASEDIM)
 		All the points of all elements and dimensions
 	"""
+	print("Sample Central Points")
 	if isinstance(num_points, int):
 		num_points = np.full(pes.NUM_TRIG, num_points, np.int_)
 	for iPES in range(pes.NUM_PES):
@@ -65,14 +65,14 @@ def sample_central_points(num_points: int | npt.NDArray[np.int_], all_points: li
 			kmeans: sklearn.cluster.KMeans = sklearn.cluster.KMeans(num_points[TrilIndex], init="k-means++", n_init="auto", random_state=np.random.RandomState(np_rng.bit_generator), algorithm="lloyd").fit(all_points[TrilIndex])
 			all_points[TrilIndex][:num_points[TrilIndex]] = kmeans.cluster_centers_
 			print(
-				"rho({}, {}), {}, {}".format(
+				"\trho({}, {}), {}, {}".format(
 					iPES,
 					jPES,
 					utility.format_array("<r>", np.average(all_points[TrilIndex][:num_points[TrilIndex]], 0)),
 					utility.format_array("stddev", np.std(all_points[TrilIndex][:num_points[TrilIndex]], 0))
-				),
-				flush=True
+				)
 			)
+	print("", end="", flush=True)
 
 
 def sample_extra_points(num_points: int | npt.NDArray[np.int_], all_points: list[npt.NDArray[np.double]]) -> None:
@@ -88,6 +88,7 @@ def sample_extra_points(num_points: int | npt.NDArray[np.int_], all_points: list
 	all_points : list[npt.NDArray[np.double]], len of NUM_TRIG, each of shape (num_point * (1 + NUM_XTR_RATIO), PHASEDIM)
 		Points of all elements and dimensions
 	"""
+	print("Sample Extra Points")
 	if isinstance(num_points, int):
 		num_points = np.full(pes.NUM_TRIG, num_points, np.int_)
 	for iPES in range(pes.NUM_PES):
@@ -98,3 +99,12 @@ def sample_extra_points(num_points: int | npt.NDArray[np.int_], all_points: list
 			var: npt.NDArray[np.double] = np.var(all_points[TrilIndex][:num_points[TrilIndex]], 0)
 			var = np.diag(var)
 			all_points[TrilIndex][num_points[TrilIndex]:] = np.concatenate([np_rng.multivariate_normal(pt, var, extra_point_ratio, "raise", method="cholesky") for pt in all_points[TrilIndex][:num_points[TrilIndex]]])
+			print(
+				"\trho({}, {}), {}, {}".format(
+					iPES,
+					jPES,
+					utility.format_array("<r>", np.average(all_points[TrilIndex][num_points[TrilIndex]:], 0)),
+					utility.format_array("stddev", np.std(all_points[TrilIndex][num_points[TrilIndex]:], 0))
+				)
+			)
+	print("", end="", flush=True)

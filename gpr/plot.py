@@ -8,6 +8,7 @@ import collections.abc
 import datetime
 import functools
 import os
+import subprocess
 import sys
 import tarfile
 import typing
@@ -46,6 +47,7 @@ SCALE_FILENAME: typing.Literal["scale"] = "scale"
 LOSS_FILENAME: typing.Literal["loss"] = "loss"
 DATA_EXTENSION: typing.Literal[".txt"] = ".txt"
 FIGURE_EXTENSION: typing.Literal[".png"] = ".png"
+TAR_EXTENSION: typing.Literal[".tgz"] = ".tgz"
 
 
 def read_input() -> tuple[npt.NDArray[np.double], npt.NDArray[np.double], npt.NDArray[np.double], npt.NDArray[np.double], npt.NDArray[np.double], npt.NDArray[np.double], float, float, float]:
@@ -338,30 +340,31 @@ class DensityMatrixDrawer:
 
 	Attributes
 	----------
-	CMAP : typing.Literal["seismic"]
+	__CMAP : typing.Literal["seismic"]
 		The colormaps for contourf
-	NTICKS : int
+	__NTICKS : int
 		The number of ticks to draw
-	COLORBAR_NTICKS : typing.Literal[21]
+	__COLORBAR_NTICKS : typing.Literal[21]
 		The number of ticks displayed on colorbar
 	FILENAME_PREFIX : typing.Literal["dm"]
 		The start of the name of files to save (animation, frame pictures, and tarfile)
-	PICNAME : typing.Literal["dm_{{:0{}}}.png"]
+	__PICNAME_NO_DIGITS : typing.Literal["dm_{{:0{}}}.png"]
 		The template for pictures
 
 	Methods
 	-------
-	get_factor(fig, ax, array_shape)
+	__get_divisors(fig, ax, array_shape)
 		To get the omitting factors in plotting
 	"""
-	CMAP: typing.Literal["seismic"] = "seismic"
-	NTICKS: int = matplotlib.colormaps[CMAP].N
-	COLORBAR_NTICKS: typing.Literal[21] = 21
+	__CMAP: typing.Literal["seismic"] = "seismic"
+	__NTICKS: int = matplotlib.colormaps[__CMAP].N
+	__COLORBAR_NTICKS: typing.Literal[21] = 21
 	FILENAME_PREFIX: typing.Literal["dm"] = "dm"
-	PICNAME: typing.Literal["dm_{{:0{}}}.png"] = FILENAME_PREFIX + "_{{:0{}}}" + FIGURE_EXTENSION
+	__PICNAME_NO_DIGITS: typing.Literal["dm_{{:0{}}}.png"] = FILENAME_PREFIX + "_{{:0{}}}" + FIGURE_EXTENSION
+	__slots__: tuple = ("__output_interval", "dm_data", "__grid_data", "__draw_scattered", "__draw_rescaled", "__x_grids", "__p_grids", "picname", "__xv", "__pv", "__LEVEL", "__NORM", "__fig", "__axs", "__title", "__super_title", "__points", "__belongings", "__row_divisor", "__col_divisor")
 
 	@staticmethod
-	def get_factor(
+	def __get_divisors(
 		fig: matplotlib.figure.Figure,
 		ax: matplotlib.axes.Axes,
 		array_shape: tuple[int, ...]
@@ -383,7 +386,7 @@ class DensityMatrixDrawer:
 		tuple[int, int]
 			The divisor of row and column of the array
 		"""
-		def get_divisor(dpi: float, size: int) -> int:
+		def get_single_divisor(dpi: float, size: int) -> int:
 			"""
 			To get the divisor of row or column
 
@@ -406,7 +409,7 @@ class DensityMatrixDrawer:
 
 		figsize_in_dpi: npt.NDArray[np.double] = fig.get_size_inches() * fig.dpi
 		ax_bbox: matplotlib.transforms.Bbox = ax.get_position()
-		return get_divisor(figsize_in_dpi[0] * ax_bbox.width, array_shape[0]), get_divisor(figsize_in_dpi[1] * ax_bbox.height, array_shape[1])
+		return get_single_divisor(figsize_in_dpi[0] * ax_bbox.width, array_shape[0]), get_single_divisor(figsize_in_dpi[1] * ax_bbox.height, array_shape[1])
 
 	def __init__(
 		self,
@@ -422,90 +425,90 @@ class DensityMatrixDrawer:
 		draw_rescaled: bool = False
 	):
 		# directly save from parameters
-		self.output_interval: float = output_interval
+		self.__output_interval: float = output_interval
 		self.dm_data: npt.NDArray[np.double] | None = dm_data
-		self.grid_data: npt.NDArray[np.double] | None = grid_data # grid_data.shape[0] may not be dm_data.shape[0]
-		self.draw_scattered: bool = draw_scattered
-		self.draw_rescaled: bool = draw_rescaled
+		self.__grid_data: npt.NDArray[np.double] | None = grid_data # grid_data.shape[0] may not be dm_data.shape[0]
+		self.__draw_scattered: bool = draw_scattered
+		self.__draw_rescaled: bool = draw_rescaled
 		# data, grids, and filename
-		self.x_grids: npt.NDArray[np.double]
-		self.p_grids: npt.NDArray[np.double]
+		self.__x_grids: npt.NDArray[np.double]
+		self.__p_grids: npt.NDArray[np.double]
 		num_digits_of_ticks: int
 		if max_outputs is not None and init_dist is not None and x_grids is not None and p_grids is not None:
 			# parameter from main
-			if self.grid_data is not None:
-				num_digits_of_ticks = int(np.ceil(np.log10(self.grid_data.shape[0])))
+			if self.__grid_data is not None:
+				num_digits_of_ticks = int(np.ceil(np.log10(self.__grid_data.shape[0])))
 			else:
 				num_digits_of_ticks = int(np.ceil(np.log10(max_outputs + 1)))
-			self.x_grids = x_grids
-			self.p_grids = p_grids
+			self.__x_grids = x_grids
+			self.__p_grids = p_grids
 		else:
 			# read from files
 			assert r0 is not None and self.dm_data is not None and r0.shape == (2,)
 			num_digits_of_ticks = int(np.ceil(np.log10(self.dm_data.shape[0])))
-			self.x_grids, self.p_grids = get_grids(r0, self.dm_data.shape[-1])
-		self.picname: str = __class__.PICNAME.format(num_digits_of_ticks)
-		self.xv: npt.NDArray[np.double]
-		self.pv: npt.NDArray[np.double]
-		self.xv, self.pv = np.meshgrid(self.x_grids, self.p_grids)
+			self.__x_grids, self.__p_grids = get_grids(r0, self.dm_data.shape[-1])
+		self.picname: str = __class__.__PICNAME_NO_DIGITS.format(num_digits_of_ticks)
+		self.__xv: npt.NDArray[np.double]
+		self.__pv: npt.NDArray[np.double]
+		self.__xv, self.__pv = np.meshgrid(self.__x_grids, self.__p_grids)
 		# levels and norms
 		COLORBAR_LIMIT: float
-		if self.draw_rescaled:
+		if self.__draw_rescaled:
 			COLORBAR_LIMIT = 1.0
 		elif init_dist is not None:
 			COLORBAR_LIMIT = 1.5 * np.max(np.abs(init_dist.factors))
 		else:
 			assert self.dm_data is not None
 			COLORBAR_LIMIT = 1.1 * np.max(np.abs(self.dm_data))
-		self.LEVEL = matplotlib.ticker.MaxNLocator(nbins=__class__.NTICKS).tick_values(-COLORBAR_LIMIT, COLORBAR_LIMIT)
-		self.NORM: matplotlib.colors.CenteredNorm = matplotlib.colors.CenteredNorm(0.0, COLORBAR_LIMIT, True)
+		self.__LEVEL = matplotlib.ticker.MaxNLocator(nbins=__class__.__NTICKS).tick_values(-COLORBAR_LIMIT, COLORBAR_LIMIT)
+		self.__NORM: matplotlib.colors.CenteredNorm = matplotlib.colors.CenteredNorm(0.0, COLORBAR_LIMIT, True)
 		# figure and axes, titles, and sample points (if available)
-		self.fig: matplotlib.figure.Figure
-		self.axs: np.ndarray[collections.abc.Sequence[collections.abc.Sequence[matplotlib.axes.Axes]], np.dtype[np.object_]]
-		self.title: list[str] = ["Rescaled " if self.draw_rescaled else ""]
-		self.super_title: str = self.title[0] + "Partial Wigner-Transformed Density Matrix"
-		self.points: npt.NDArray[np.double] | None = None
-		self.belongings: npt. NDArray[np.int_] | None = None
-		if self.grid_data is not None or draw_scattered: # more rows to draw
-			if self.grid_data is not None:
-				self.title += [self.title[0] + "Exact ", self.title[0] + "Difference of"]
+		self.__fig: matplotlib.figure.Figure
+		self.__axs: np.ndarray[collections.abc.Sequence[collections.abc.Sequence[matplotlib.axes.Axes]], np.dtype[np.object_]]
+		self.__title: list[str] = ["Rescaled " if self.__draw_rescaled else ""]
+		self.__super_title: str = self.__title[0] + "Partial Wigner-Transformed Density Matrix"
+		self.__points: npt.NDArray[np.double] | None = None
+		self.__belongings: npt. NDArray[np.int_] | None = None
+		if self.__grid_data is not None or draw_scattered: # more rows to draw
+			if self.__grid_data is not None:
+				self.__title += [self.__title[0] + "Exact ", self.__title[0] + "Difference of"]
 			if draw_scattered:
 				if self.dm_data is not None:
 					# read from file; otherwise pass from main
-					self.points = np.loadtxt(POINTS_FILENAME + DATA_EXTENSION)
-					self.points = self.points.reshape(self.points.shape[0] // pes.PHASEDIM, pes.PHASEDIM, self.points.shape[1]) # N_TICKS * PHASEDIM * NUM_PTS
-					self.belongings = np.loadtxt(BELONGING_FILENAME + DATA_EXTENSION).astype(np.int_) # N_TICKS * NUM_PTS
-				self.title.insert(0, self.title[0] + "Scattered ") # scatter points first
-			nrows: int = len(self.title)
-			self.fig, self.axs = plt.subplots(nrows=nrows, ncols=pes.NUM_ELM, figsize=(FIGSIZE[0] * pes.NUM_ELM, FIGSIZE[1] * nrows))
+					self.__points = np.loadtxt(POINTS_FILENAME + DATA_EXTENSION)
+					self.__points = self.__points.reshape(self.__points.shape[0] // pes.PHASEDIM, pes.PHASEDIM, self.__points.shape[1]) # N_TICKS * PHASEDIM * NUM_PTS
+					self.__belongings = np.loadtxt(BELONGING_FILENAME + DATA_EXTENSION).astype(np.int_) # N_TICKS * NUM_PTS
+				self.__title.insert(0, self.__title[0] + "Scattered ") # scatter points first
+			nrows: int = len(self.__title)
+			self.__fig, self.__axs = plt.subplots(nrows=nrows, ncols=pes.NUM_ELM, figsize=(FIGSIZE[0] * pes.NUM_ELM, FIGSIZE[1] * nrows))
 			for iRow in range(nrows):
 				for iElement in range(pes.NUM_ELM):
-					ax: matplotlib.axes.Axes = self.axs[iRow, iElement]
+					ax: matplotlib.axes.Axes = self.__axs[iRow, iElement]
 					ax.set_xlabel("x")
 					ax.set_ylabel("p")
-					ax.set_title(self.title[iRow] + utility.get_RI_label(iElement))
-					ax.contourf(self.xv, self.pv, np.zeros_like(self.xv), levels=self.LEVEL, cmap=__class__.CMAP, norm=self.NORM)
+					ax.set_title(self.__title[iRow] + utility.get_RI_label(iElement))
+					ax.contourf(self.__xv, self.__pv, np.zeros_like(self.__xv), levels=self.__LEVEL, cmap=__class__.__CMAP, norm=self.__NORM)
 		else:
 			# simply draw the predicted density
-			self.fig, self.axs = plt.subplots(nrows=pes.NUM_PES, ncols=pes.NUM_PES, figsize=(FIGSIZE[0] * pes.NUM_PES, FIGSIZE[1] * pes.NUM_PES))
+			self.__fig, self.__axs = plt.subplots(nrows=pes.NUM_PES, ncols=pes.NUM_PES, figsize=(FIGSIZE[0] * pes.NUM_PES, FIGSIZE[1] * pes.NUM_PES))
 			for iPES in range(pes.NUM_PES):
 				for jPES in range(pes.NUM_PES):
-					ax: matplotlib.axes.Axes = self.axs[iPES, jPES]
+					ax: matplotlib.axes.Axes = self.__axs[iPES, jPES]
 					ax.set_xlabel("x")
 					ax.set_ylabel("p")
-					ax.set_title(self.title[0] + utility.get_RI_label(iPES * pes.NUM_PES + jPES))
-					ax.contourf(self.xv, self.pv, np.zeros_like(self.xv), levels=self.LEVEL, cmap=__class__.CMAP, norm=self.NORM)
-		self.fig.colorbar(
-			matplotlib.cm.ScalarMappable(cmap=__class__.CMAP, norm=self.NORM),
-			ax=self.axs.ravel().tolist(),
-			ticks=matplotlib.ticker.MaxNLocator(nbins=__class__.COLORBAR_NTICKS).tick_values(-COLORBAR_LIMIT, COLORBAR_LIMIT)
+					ax.set_title(self.__title[0] + utility.get_RI_label(iPES * pes.NUM_PES + jPES))
+					ax.contourf(self.__xv, self.__pv, np.zeros_like(self.__xv), levels=self.__LEVEL, cmap=__class__.__CMAP, norm=self.__NORM)
+		self.__fig.colorbar(
+			matplotlib.cm.ScalarMappable(cmap=__class__.__CMAP, norm=self.__NORM),
+			ax=self.__axs.ravel().tolist(),
+			ticks=matplotlib.ticker.MaxNLocator(nbins=__class__.__COLORBAR_NTICKS).tick_values(-COLORBAR_LIMIT, COLORBAR_LIMIT)
 		) # set up the colorbar once. This will influence size of axes
-		self.fig.suptitle(self.super_title)
-		self.row_divisor: int
-		self.col_divisor: int
-		self.row_divisor, self.col_divisor = __class__.get_factor(self.fig, self.axs[0, 0], (self.x_grids.size, self.p_grids.size))
-		self.xv = self.xv[::self.row_divisor, ::self.col_divisor]
-		self.pv = self.pv[::self.row_divisor, ::self.col_divisor]
+		self.__fig.suptitle(self.__super_title)
+		self.__row_divisor: int
+		self.__col_divisor: int
+		self.__row_divisor, self.__col_divisor = __class__.__get_divisors(self.__fig, self.__axs[0, 0], (self.__x_grids.size, self.__p_grids.size))
+		self.__xv = self.__xv[::self.__row_divisor, ::self.__col_divisor]
+		self.__pv = self.__pv[::self.__row_divisor, ::self.__col_divisor]
 
 	def __call__(
 		self,
@@ -522,21 +525,21 @@ class DensityMatrixDrawer:
 		----------
 		frame_index : int
 			The index of the frame.
-			Product with `self.output_interval` gives the duration since beginning
+			Product with `self.__output_interval` gives the duration since beginning
 		data : npt.NDArray[np.double], shape of (NUM_ELM, N_GRIDS, N_GRIDS) | None, optional
 			The data of the frame, by default None (and self.dm_data will be used)
 		points : list[npt.NDArray[np.double]] | None, len of NUM_TRIG, each of shape (NUM_PTS, PHASEDIM), optional
-			The points to scatter. Only used if `self.draw_scattered` is True.
-			By default None (`self.points` and `self.belongings` will be used instead.)
+			The points to scatter. Only used if `self.__draw_scattered` is True.
+			By default None (`self.__points` and `self.__belongings` will be used instead.)
 		num_points : int | npt.NDArray[np.int_], shape of (NUM_TRIG,) | None, optional
 			The number of points located at the front of all points that is used as the subset,
-			by default None (and `self.points` and `self.belongings` will be used instead.)
+			by default None (and `self.__points` and `self.__belongings` will be used instead.)
 		scale : npt.NDArray[np.double], shape of (NUM_ELM,)
 			The rescale factor, by default None (and `get_rescale_factor` will be used instead)
 		"""
 		# calculate rescale factors
 		rescale_factors: npt.NDArray[np.double]
-		if self.draw_rescaled:
+		if self.__draw_rescaled:
 			if scale is not None:
 				rescale_factors = scale
 			else:
@@ -568,21 +571,21 @@ class DensityMatrixDrawer:
 			extra_points : npt.NDArray[np.double], shape of (NUM_PES, NUM_PTS * EXTRA_RATIO) | None, optional
 				The extra points to scatter on the element, by default None
 			"""
-			ax.contourf(self.xv, self.pv, data[::self.col_divisor, ::self.row_divisor].T, levels=self.LEVEL, cmap=__class__.CMAP, norm=self.NORM)
+			ax.contourf(self.__xv, self.__pv, data[::self.__col_divisor, ::self.__row_divisor].T, levels=self.__LEVEL, cmap=__class__.__CMAP, norm=self.__NORM)
 			if title is not None:
 				ax.set_title(title)
 			# scatter the central points on top
 			if extra_points is not None:
 				ax.scatter(
-					np.clip(extra_points[0], self.x_grids[0], self.x_grids[-1]),
-					np.clip(extra_points[1], self.p_grids[0], self.p_grids[-1]),
+					np.clip(extra_points[0], self.__x_grids[0], self.__x_grids[-1]),
+					np.clip(extra_points[1], self.__p_grids[0], self.__p_grids[-1]),
 					0.1,
 					"green"
 				)
 			if central_points is not None:
 				ax.scatter(
-					np.clip(central_points[0], self.x_grids[0], self.x_grids[-1]),
-					np.clip(central_points[1], self.p_grids[0], self.p_grids[-1]),
+					np.clip(central_points[0], self.__x_grids[0], self.__x_grids[-1]),
+					np.clip(central_points[1], self.__p_grids[0], self.__p_grids[-1]),
 					0.5,
 					"black"
 				)
@@ -593,56 +596,56 @@ class DensityMatrixDrawer:
 		else:
 			assert self.dm_data is not None
 			pred_data = self.dm_data[frame_index]
-		if self.axs.shape[-1] == pes.NUM_ELM:
+		if self.__axs.shape[-1] == pes.NUM_ELM:
 			row_index: int = 0
-			if self.draw_scattered: # scatter points, no title change
+			if self.__draw_scattered: # scatter points, no title change
 				for iElement in range(pes.NUM_ELM):
 					if isinstance(num_points, int): # all elements have same number of points
 						num_points = np.full(pes.NUM_TRIG, num_points, np.int_)
 					if num_points is not None and points is not None: # from main
 						TrilIndex: int = pes.flatten_tril_index[iElement // pes.NUM_PES, iElement % pes.NUM_PES]
 						draw_an_axs(
-							self.axs[row_index, iElement],
+							self.__axs[row_index, iElement],
 							pred_data[iElement].T * rescale_factors[iElement],
 							central_points=points[TrilIndex][:num_points[TrilIndex]].T,
 							extra_points=points[TrilIndex][num_points[TrilIndex]:].T,
 						)
 					else: # from file
-						assert self.points is not None and self.belongings is not None
+						assert self.__points is not None and self.__belongings is not None
 						TrilElementIndex: int = iElement if iElement // pes.NUM_PES >= iElement % pes.NUM_PES else iElement % pes.NUM_PES * pes.NUM_PES + iElement // pes.NUM_PES
-						if frame_index < self.points.shape[0] or frame_index < self.belongings.shape[0]:
+						if frame_index < self.__points.shape[0] or frame_index < self.__belongings.shape[0]:
 							draw_an_axs(
-								self.axs[row_index, iElement],
+								self.__axs[row_index, iElement],
 								pred_data[iElement].T * rescale_factors[iElement],
-								central_points=self.points[frame_index][:, self.belongings[frame_index] == TrilElementIndex],
-								extra_points=self.points[frame_index][:, self.belongings[frame_index] == TrilElementIndex + pes.NUM_ELM],
+								central_points=self.__points[frame_index][:, self.__belongings[frame_index] == TrilElementIndex],
+								extra_points=self.__points[frame_index][:, self.__belongings[frame_index] == TrilElementIndex + pes.NUM_ELM],
 							) # mixing of basic and advanced slicing leads to error
 						else: # have points, but unavailable due to output
-							draw_an_axs(self.axs[row_index, iElement], pred_data[iElement].T * rescale_factors[iElement])
+							draw_an_axs(self.__axs[row_index, iElement], pred_data[iElement].T * rescale_factors[iElement])
 				row_index += 1
 			for iElement in range(pes.NUM_ELM): # contourfs for predicted data
 				draw_an_axs(
-					self.axs[row_index, iElement],
+					self.__axs[row_index, iElement],
 					pred_data[iElement].T * rescale_factors[iElement],
-					self.title[row_index] + utility.get_RI_label(iElement) + ("\nRescaled Factor = {:.6e}".format(rescale_factors[iElement]) if self.draw_rescaled else ""),
+					self.__title[row_index] + utility.get_RI_label(iElement) + ("\nRescaled Factor = {:.6e}".format(rescale_factors[iElement]) if self.__draw_rescaled else ""),
 				)
 			row_index += 1
-			if self.grid_data is not None:
-				if frame_index < self.grid_data.shape[0]:
+			if self.__grid_data is not None:
+				if frame_index < self.__grid_data.shape[0]:
 					for iElement in range(pes.NUM_ELM): # contourfs for grid data, no title change
-						draw_an_axs(self.axs[row_index, iElement], self.grid_data[frame_index, iElement].T * rescale_factors[iElement])
+						draw_an_axs(self.__axs[row_index, iElement], self.__grid_data[frame_index, iElement].T * rescale_factors[iElement])
 					row_index += 1
 					for iElement in range(pes.NUM_ELM): # pred - grid
-						ax: matplotlib.axes.Axes = self.axs[row_index, iElement]
-						diff: npt.NDArray[np.double] = pred_data[iElement] - self.grid_data[frame_index, iElement]
+						ax: matplotlib.axes.Axes = self.__axs[row_index, iElement]
+						diff: npt.NDArray[np.double] = pred_data[iElement] - self.__grid_data[frame_index, iElement]
 						max_idx: int = int(np.argmax(np.abs(diff).reshape(-1)))
-						ax.scatter(self.x_grids[max_idx // self.x_grids.size], self.p_grids[max_idx % self.x_grids.size], 15, "black")
+						ax.scatter(self.__x_grids[max_idx // self.__x_grids.size], self.__p_grids[max_idx % self.__x_grids.size], 15, "black")
 						draw_an_axs(
 							ax,
 							diff.T * rescale_factors[iElement],
 							"{}\n{}Max Abs diff = {:.6e}".format(
-								self.title[row_index] + utility.get_RI_label(iElement),
-								"Rescaled " if self.draw_rescaled else "",
+								self.__title[row_index] + utility.get_RI_label(iElement),
+								"Rescaled " if self.__draw_rescaled else "",
 								np.max(np.abs(diff))
 							)
 						)
@@ -650,21 +653,21 @@ class DensityMatrixDrawer:
 				else:
 					# unable to compare, set invisible
 					for iElement in range(pes.NUM_ELM):
-						self.axs[row_index, iElement].set_visible(False)
+						self.__axs[row_index, iElement].set_visible(False)
 					row_index += 1
 					for iElement in range(pes.NUM_ELM):
-						self.axs[row_index, iElement].set_visible(False)
+						self.__axs[row_index, iElement].set_visible(False)
 					row_index += 1
 		else:
 			# only density
 			for iElement in range(pes.NUM_ELM):
 				draw_an_axs(
-					self.axs[iElement // pes.NUM_PES, iElement % pes.NUM_PES],
+					self.__axs[iElement // pes.NUM_PES, iElement % pes.NUM_PES],
 					pred_data[iElement].T * rescale_factors[iElement],
-					utility.get_RI_label(iElement) + (("\n" + RESCALE_TEMPLATE.format(rescale_factors[iElement])) if self.draw_rescaled else "")
+					utility.get_RI_label(iElement) + (("\n" + RESCALE_TEMPLATE.format(rescale_factors[iElement])) if self.__draw_rescaled else "")
 				)
-		self.fig.suptitle(self.super_title + "\n" + TIME_TEMPLATE.format(frame_index * self.output_interval))
-		self.fig.savefig(self.picname.format(frame_index))
+		self.__fig.suptitle(self.__super_title + "\n" + TIME_TEMPLATE.format(frame_index * self.__output_interval))
+		self.__fig.savefig(self.picname.format(frame_index))
 
 
 class WavefunctionPlotter:
@@ -692,24 +695,25 @@ class WavefunctionPlotter:
 
 	Attributes
 	----------
-	WFN_COLORS : list[matplotlib.typing.ColorType]
+	__WFN_COLORS : list[matplotlib.typing.ColorType]
 		Colors of wavefunction plots of each potential energy surface
-	LABEL_TEMPLATE : typing.Literal["Surface {}"]
+	__LABEL_TEMPLATE : typing.Literal["Surface {}"]
 		Template for labels of each line
 	FILENAME_PREFIX : typing.Literal["wfn"]
 		The start of the name of files to save (animation, frame pictures, and tarfile)
-	PICNAME : typing.Literal["wfn_{{:0{}}}.png"]
+	__PICNAME_NO_DIGITS : typing.Literal["wfn_{{:0{}}}.png"]
 		The template for pictures
 	"""
-	WFN_COLORS: list[matplotlib.typing.ColorType]
+	__WFN_COLORS: list[matplotlib.typing.ColorType]
 	if pes.NUM_PES < 10:
-		WFN_COLORS = matplotlib.color_sequences["Set1"][:pes.NUM_PES]
+		__WFN_COLORS = matplotlib.color_sequences["Set1"][:pes.NUM_PES]
 	else:
 		cmap: npt.NDArray[np.double] = matplotlib.colormaps["gist_rainbow"](np.linspace(0.0, 1.0, pes.NUM_PES, True))
-		WFN_COLORS = list(zip(cmap[:, 0], cmap[:, 1], cmap[:, 2]))
-	LABEL_TEMPLATE: typing.Literal["Surface {}"] = "Surface {}"
+		__WFN_COLORS = list(zip(cmap[:, 0], cmap[:, 1], cmap[:, 2]))
+	__LABEL_TEMPLATE: typing.Literal["Surface {}"] = "Surface {}"
 	FILENAME_PREFIX: typing.Literal["wfn"] = "wfn"
-	PICNAME: typing.Literal["wfn_{{:0{}}}.png"] = FILENAME_PREFIX + "_{{:0{}}}.png"
+	__PICNAME_NO_DIGITS: typing.Literal["wfn_{{:0{}}}.png"] = FILENAME_PREFIX + "_{{:0{}}}.png"
+	__slots__: tuple = ("__output_interval", "wfn_sqnm", "__draw_rescaled", "__title", "__grids", "picname", "__fig", "__axs")
 
 	def __init__(
 		self,
@@ -722,38 +726,38 @@ class WavefunctionPlotter:
 		draw_rescaled: bool = False
 	):
 		# directly save from parameters
-		self.output_interval: float = output_interval
+		self.__output_interval: float = output_interval
 		self.wfn_sqnm: npt.NDArray[np.double] | None = marginal_data
-		self.draw_rescaled: bool = draw_rescaled
-		self.title: str = ("Rescaled " if self.draw_rescaled else "") + "Marginal on each surfaces"
+		self.__draw_rescaled: bool = draw_rescaled
+		self.__title: str = ("Rescaled " if self.__draw_rescaled else "") + "Marginal on each surfaces"
 		# data, grids, and filename
 		num_digits_of_ticks: int
-		self.grids: list[npt.NDArray[np.double]]
+		self.__grids: list[npt.NDArray[np.double]]
 		if max_outputs is not None and grids_each_dim is not None:
 			# parameter from main
 			num_digits_of_ticks: int = int(np.ceil(np.log10(max_outputs + 1)))
-			self.grids = grids_each_dim
+			self.__grids = grids_each_dim
 		else:
 			# read from files
 			assert r0 is not None and self.wfn_sqnm is not None
 			num_digits_of_ticks: int = int(np.ceil(np.log10(self.wfn_sqnm.shape[0])))
-			self.grids = get_grids(r0, self.wfn_sqnm.shape[-1])
-		self.picname: str = __class__.PICNAME.format(num_digits_of_ticks)
+			self.__grids = get_grids(r0, self.wfn_sqnm.shape[-1])
+		self.picname: str = __class__.__PICNAME_NO_DIGITS.format(num_digits_of_ticks)
 		# figure and axes
-		self.fig: matplotlib.figure.Figure
-		self.axs: np.ndarray[collections.abc.Sequence[matplotlib.axes.Axes], np.dtype[np.object_]]
-		self.fig, self.axs = plt.subplots(pes.DIM, 2, figsize=(FIGSIZE[0] * 2, FIGSIZE[1] * pes.DIM))
-		self.axs = self.axs.reshape(pes.DIM, 2) # guaranteen it is matrix in case pes.DIM == 1
-		self.fig.suptitle(self.title)
+		self.__fig: matplotlib.figure.Figure
+		self.__axs: np.ndarray[collections.abc.Sequence[matplotlib.axes.Axes], np.dtype[np.object_]]
+		self.__fig, self.__axs = plt.subplots(pes.DIM, 2, figsize=(FIGSIZE[0] * 2, FIGSIZE[1] * pes.DIM))
+		self.__axs = self.__axs.reshape(pes.DIM, 2) # guaranteen it is matrix in case pes.DIM == 1
+		self.__fig.suptitle(self.__title)
 		labels: list[str] = [utility.dimension_name(iDim) for iDim in range(pes.PHASEDIM)]
 		titles: list[str] = ["Position", "Momentum"]
 		for iDim in range(pes.PHASEDIM):
-			ax: matplotlib.axes.Axes = self.axs[iDim % pes.DIM, iDim // pes.DIM]
+			ax: matplotlib.axes.Axes = self.__axs[iDim % pes.DIM, iDim // pes.DIM]
 			ax.set_xlabel("{} / a.u.".format(labels[iDim]))
 			ax.set_ylabel("Population")
-			ax.set_xbound(self.grids[iDim][0], self.grids[iDim][-1])
+			ax.set_xbound(self.__grids[iDim][0], self.__grids[iDim][-1])
 			max_y: float
-			if self.draw_rescaled:
+			if self.__draw_rescaled:
 				max_y = 1.0
 			elif init_dist is not None:
 				max_y = 1.5 * np.max(np.abs(init_dist.weight_phase.diagonal() / np.sqrt(2.0 * np.pi) / init_dist.sigma_r0[iDim]))
@@ -779,7 +783,7 @@ class WavefunctionPlotter:
 		----------
 		frame_index : int
 			The index of the frame.
-			Product with `self.output_interval` gives the duration since beginning
+			Product with `self.__output_interval` gives the duration since beginning
 		marginal : npt.NDArray[np.double], shape of (PHASEDIM, NUM_PES, N_GRIDS) | None, optional
 			The squared norm of wavefunction, by default None (and self.wfn_sqnm will be used)
 
@@ -795,7 +799,7 @@ class WavefunctionPlotter:
 			assert self.wfn_sqnm is not None
 			data_to_plot = self.wfn_sqnm[frame_index]
 		for iDim in range(pes.PHASEDIM):
-			ax: matplotlib.axes.Axes = self.axs[iDim % pes.DIM, iDim // pes.DIM]
+			ax: matplotlib.axes.Axes = self.__axs[iDim % pes.DIM, iDim // pes.DIM]
 			if ax.legend_:
 				ax.legend_.remove()
 			for line in ax.lines:
@@ -803,22 +807,22 @@ class WavefunctionPlotter:
 			# draw newdata
 			for iPES in range(pes.NUM_PES):
 				rescale_factor: float
-				label: str = __class__.LABEL_TEMPLATE.format(iPES + 1)
-				if self.draw_rescaled:
+				label: str = __class__.__LABEL_TEMPLATE.format(iPES + 1)
+				if self.__draw_rescaled:
 					rescale_factor = 1.0 / np.max(np.abs(data_to_plot[iDim, iPES]))
 					label += "\n" + RESCALE_TEMPLATE.format(rescale_factor)
 				else:
 					rescale_factor = 1.0
 				ax.plot(
-					self.grids[iDim],
+					self.__grids[iDim],
 					data_to_plot[iDim, iPES] * rescale_factor,
-					color=__class__.WFN_COLORS[iPES],
+					color=__class__.__WFN_COLORS[iPES],
 					lw=2,
 					label=label
 				)
 			ax.legend()
-		self.fig.suptitle(self.title + "\n" + TIME_TEMPLATE.format(frame_index * self.output_interval))
-		self.fig.savefig(self.picname.format(frame_index))
+		self.__fig.suptitle(self.__title + "\n" + TIME_TEMPLATE.format(frame_index * self.__output_interval))
+		self.__fig.savefig(self.picname.format(frame_index))
 
 
 def main() -> None:
@@ -845,23 +849,25 @@ def main() -> None:
 			draw_rescaled=result["rescaled"]
 		)
 		assert dm_drawer.dm_data is not None
-		for iframe in range(dm_drawer.dm_data.shape[0]):
+		dm_total_ticks: int = dm_drawer.dm_data.shape[0]
+		for iframe in range(dm_total_ticks):
 			dm_drawer(iframe)
 		if result["animation"] != 0: # draw an animation
 			with PIL.Image.open(dm_drawer.picname.format(0)) as first_img:
 				first_img.save(
 					DensityMatrixDrawer.FILENAME_PREFIX + ".gif",
 					save_all=True,
-					append_images=[PIL.Image.open(dm_drawer.picname.format(iframe)) for iframe in range(1, dm_drawer.dm_data.shape[0])],
+					append_images=[PIL.Image.open(dm_drawer.picname.format(iframe)) for iframe in range(1, dm_total_ticks)],
 					loop=0,
 					duration=result["animation"]
 				)
 		# draw frame by frame and combine into a tarfile
-		with tarfile.open(DensityMatrixDrawer.FILENAME_PREFIX + ".tar.gz", "w:gz") as tf:
-			for iframe in range(dm_drawer.dm_data.shape[0]):
-				name: str = dm_drawer.picname.format(iframe)
-				tf.add(name)
-				os.remove(name)
+		if os.path.isdir(dm_drawer.FILENAME_PREFIX):
+			os.rename(dm_drawer.FILENAME_PREFIX, dm_drawer.FILENAME_PREFIX + "_" + str(datetime.datetime.now()).replace(" ", "_"))
+		subprocess.run(["mkdir", dm_drawer.FILENAME_PREFIX]) # make directory
+		subprocess.run(["mv"] + [dm_drawer.picname.format(iTick) for iTick in range(dm_total_ticks)] + [dm_drawer.FILENAME_PREFIX])
+		with tarfile.open(dm_drawer.FILENAME_PREFIX + TAR_EXTENSION, "w:gz") as dm_tf:
+			dm_tf.add(dm_drawer.FILENAME_PREFIX)
 	finally:
 		print("Finish dm.", datetime.datetime.now(), flush=True)
 	try:
@@ -880,23 +886,25 @@ def main() -> None:
 			draw_rescaled=result["wavefunction_rescaled"]
 		)
 		assert wfn_plotter.wfn_sqnm is not None
-		for iframe in range(wfn_plotter.wfn_sqnm.shape[0]):
+		wfn_total_ticks: int = wfn_plotter.wfn_sqnm.shape[0]
+		for iframe in range(wfn_total_ticks):
 			wfn_plotter(iframe)
 		if result["animation"] != 0: # draw an animation
 			with PIL.Image.open(wfn_plotter.picname.format(0)) as first_img:
 				first_img.save(
 					WavefunctionPlotter.FILENAME_PREFIX + ".gif",
 					save_all=True,
-					append_images=[PIL.Image.open(wfn_plotter.picname.format(iframe)) for iframe in range(1, wfn_plotter.wfn_sqnm.shape[0])],
+					append_images=[PIL.Image.open(wfn_plotter.picname.format(iframe)) for iframe in range(1, wfn_total_ticks)],
 					loop=0,
 					duration=result["animation"]
 				)
 		# draw frame by frame and combine into a tarfile
-		with tarfile.open(WavefunctionPlotter.FILENAME_PREFIX + ".tar.gz", "w:gz") as tf:
-			for iframe in range(wfn_plotter.wfn_sqnm.shape[0]):
-				name: str = wfn_plotter.picname.format(iframe)
-				tf.add(name)
-				os.remove(name)
+		if os.path.isdir(wfn_plotter.FILENAME_PREFIX):
+			os.rename(wfn_plotter.FILENAME_PREFIX, wfn_plotter.FILENAME_PREFIX + "_" + str(datetime.datetime.now()).replace(" ", "_"))
+		subprocess.run(["mkdir", wfn_plotter.FILENAME_PREFIX]) # make directory
+		subprocess.run(["mv"] + [wfn_plotter.picname.format(iTick) for iTick in range(wfn_total_ticks)] + [wfn_plotter.FILENAME_PREFIX])
+		with tarfile.open(wfn_plotter.FILENAME_PREFIX + TAR_EXTENSION, "w:gz") as wfn_tf:
+			wfn_tf.add(wfn_plotter.FILENAME_PREFIX)
 	finally:
 		print("Finish wfn.", datetime.datetime.now(), flush=True)
 

@@ -34,7 +34,6 @@ NUM_PTS: typing.Literal[256] = 256
 NUM_XTR_RATIO: typing.Literal[50] = 50
 NUM_MC_PTS: typing.Literal[10_000_000] = 10_000_000
 NUM_EVL_MC_PTS: typing.Literal[10_000] = 10_000
-TAR_EXTENSION: typing.Literal[".tgz"] = ".tgz"
 
 
 def parse_argument() -> tuple[bool, str]:
@@ -432,14 +431,14 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 				os.rename(dm_drawer.FILENAME_PREFIX, dm_drawer.FILENAME_PREFIX + "_" + str(datetime.datetime.now()).replace(" ", "_"))
 			subprocess.run(["mkdir", dm_drawer.FILENAME_PREFIX]) # make directory
 			subprocess.run(["mv"] + [dm_drawer.picname.format(iTick) for iTick in range(total_ticks)] + [dm_drawer.FILENAME_PREFIX])
-			with tarfile.open(dm_drawer.FILENAME_PREFIX + TAR_EXTENSION, "w:gz") as dm_tf:
+			with tarfile.open(dm_drawer.FILENAME_PREFIX + plot.TAR_EXTENSION, "w:gz") as dm_tf:
 				dm_tf.add(dm_drawer.FILENAME_PREFIX)
 		assert wfn_plotter is not None
 		if os.path.isdir(wfn_plotter.FILENAME_PREFIX):
 			os.rename(wfn_plotter.FILENAME_PREFIX, wfn_plotter.FILENAME_PREFIX + "_" + str(datetime.datetime.now()).replace(" ", "_"))
 		subprocess.run(["mkdir", wfn_plotter.FILENAME_PREFIX]) # make directory
 		subprocess.run(["mv"] + [wfn_plotter.picname.format(iTick) for iTick in range(total_ticks)] + [wfn_plotter.FILENAME_PREFIX])
-		with tarfile.open(wfn_plotter.FILENAME_PREFIX + TAR_EXTENSION, "w:gz") as wfn_tf:
+		with tarfile.open(wfn_plotter.FILENAME_PREFIX + plot.TAR_EXTENSION, "w:gz") as wfn_tf:
 			wfn_tf.add(wfn_plotter.FILENAME_PREFIX)
 
 

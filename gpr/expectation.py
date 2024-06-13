@@ -159,9 +159,10 @@ class MonteCarloAverage(Averager):
 	update_pts(ref_pts, predictor): To predict density at next time step
 	"""
 	DIAGONAL_TRIL_INDEX: npt.NDArray[np.int_] = pes.flatten_tril_index[np.arange(pes.NUM_PES), np.arange(pes.NUM_PES)]
+	__slots__: tuple = ("__num_pts", "point_set", "weight", "density")
 
 	def __init__(self, num_pts: int):
-		self.num_pts: int = num_pts
+		self.__num_pts: int = num_pts
 		self.point_set: npt.NDArray[np.double] = np.empty((pes.NUM_TRIG, num_pts, pes.PHASEDIM))
 		self.weight: npt.NDArray[np.double] = np.empty((pes.NUM_TRIG, num_pts))
 		self.density: npt.NDArray[np.cdouble] = np.empty((pes.NUM_TRIG, num_pts), np.cdouble)
@@ -186,7 +187,7 @@ class MonteCarloAverage(Averager):
 				TrilIndex: int = pes.flatten_tril_index[iPES, jPES]
 				center: npt.NDArray[np.double] = np.mean(ref_pts[TrilIndex], 0)
 				stddev: npt.NDArray[np.double] = 1.5 * np.std(ref_pts[TrilIndex], 0)
-				self.point_set[TrilIndex] = sample.normal_sample(self.num_pts, center, stddev)
+				self.point_set[TrilIndex] = sample.normal_sample(self.__num_pts, center, stddev)
 				self.weight[TrilIndex] = np.exp(-np.sum(((self.point_set[TrilIndex] - center) / stddev) ** 2, -1) / 2.0) / ((2.0 * np.pi) ** pes.DIM * stddev.prod()) # N
 				self.density[TrilIndex] = predictor(self.point_set[TrilIndex], iPES * pes.NUM_PES + jPES)
 
@@ -242,13 +243,18 @@ class EvolvingPointsMCAverage(MonteCarloAverage):
 	evolve_coordinates_only : bool, optional
 		Whether to evolve phase space coordinates only or with its density as well, by default False
 
-	Functions
+	Methods
 	-------
-
+	evolve(mass, dt, predictor)
+		To evolve the coordinates, and density if applicable
+	update_density(predictor)
+		To update the density using the predictor if the density is not evolved
 	"""
+	__slots__: tuple = ("__evolve_coordinates_only",)
+
 	def __init__(self, num_pts: int, init_dist: pes.InitialDistribution, evolve_coordinates_only: bool = False):
 		super().__init__(num_pts)
-		self.evolve_coordinates_only: bool = evolve_coordinates_only
+		self.__evolve_coordinates_only: bool = evolve_coordinates_only
 		self.point_set[:] = sample.normal_sample(num_pts, init_dist.r0, init_dist.sigma_r0)
 		for i, ElementIndex in enumerate(pes.tril_element_indices):
 			self.density[i] = init_dist(self.point_set[i], ElementIndex)
@@ -272,7 +278,7 @@ class EvolvingPointsMCAverage(MonteCarloAverage):
 		predictor : typing.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
 			It predicts the density matrix element based on given coordinates and element index
 		"""
-		if self.evolve_coordinates_only:
+		if self.__evolve_coordinates_only:
 			for pts, row_idx, col_idx in zip(self.point_set, pes.tril_row_indices, pes.tril_col_indices):
 				pts[:, :pes.DIM], pts[:, pes.DIM:] = evolve.evolve_coordinates_adiabatically(
 					pts[:, :pes.DIM],
@@ -295,7 +301,7 @@ class EvolvingPointsMCAverage(MonteCarloAverage):
 		predictor : typing.Callable[[npt.NDArray[np.double], int, bool], npt.NDArray[np.cdouble]]
 			It predicts the density matrix element based on given coordinates and element index
 		"""
-		if self.evolve_coordinates_only:
+		if self.__evolve_coordinates_only:
 			for i, ElementIndex in enumerate(pes.tril_element_indices):
 				self.density[i] = predictor(self.point_set[i], ElementIndex)
 
@@ -314,36 +320,37 @@ class AnalyticalAverager(Averager):
 	pred : gp.GPRPredictors
 		GPR predictors
 	"""
-	AVERAGE_CONSTANT: float = (2.0 * np.pi) ** pes.DIM
+	__AVERAGE_CONSTANT: float = (2.0 * np.pi) ** pes.DIM
+	__slots__: tuple = ("__predictors",)
 
 	def __init__(self, pred: gp.GPRPredictors):
-		self._predictors: gp.GPRPredictors = pred
+		self.__predictors: gp.GPRPredictors = pred
 
 	def population(self) -> npt.NDArray[np.double]:
 		result: npt.NDArray[np.double] = np.empty(pes.NUM_PES, np.double)
 		for iPES in range(pes.NUM_PES):
 			ElementIndex: int = iPES * pes.NUM_PES + iPES
-			pred: gp.SinglePredictor = self._predictors[ElementIndex]
+			pred: gp.SinglePredictor = self.__predictors[ElementIndex]
 			result[iPES] = pred.model.cov.lengthscale.prod().item() * pred.get_weights().sum().item()
-		return result * AnalyticalAverager.AVERAGE_CONSTANT
+		return result * __class__.__AVERAGE_CONSTANT
 
 	def coordinates(self) -> npt.NDArray[np.double]:
 		result: npt.NDArray[np.double] = np.zeros(pes.PHASEDIM, np.double)
 		for iPES in range(pes.NUM_PES):
 			ElementIndex: int = iPES * pes.NUM_PES + iPES
-			pred: gp.SinglePredictor = self._predictors[ElementIndex]
+			pred: gp.SinglePredictor = self.__predictors[ElementIndex]
 			result += pred.model.cov.lengthscale.prod().item() * (pred.get_weights()[:, None] * pred.get_training_features()).sum(0).detach().numpy()
-		return result * AnalyticalAverager.AVERAGE_CONSTANT
+		return result * __class__.__AVERAGE_CONSTANT
 
 	def square_coordinates(self) -> npt.NDArray[np.double]:
 		result: npt.NDArray[np.double] = np.zeros((pes.PHASEDIM, pes.PHASEDIM))
 		for iPES in range(pes.NUM_PES):
 			ElementIndex: int = iPES * pes.NUM_PES + iPES
-			pred: gp.SinglePredictor = self._predictors[ElementIndex]
+			pred: gp.SinglePredictor = self.__predictors[ElementIndex]
 			result += pred.model.cov.lengthscale.prod().item() * (
 				(pred.get_weights()[:, None, None] * pred.get_training_features()[:, :, None] * pred.get_training_features()[:, None, :]).sum(0)
 				+ pred.get_weights().sum() * torch.diagflat(pred.model.cov.lengthscale ** 2)).detach().numpy()
-		return result * AnalyticalAverager.AVERAGE_CONSTANT
+		return result * __class__.__AVERAGE_CONSTANT
 
 	def covariance(self) -> npt.NDArray[np.double]:
 		return super().covariance()
@@ -356,7 +363,7 @@ class AnalyticalAverager(Averager):
 		for iPES in range(pes.NUM_PES):
 			for jPES in range(pes.NUM_PES):
 				ElementIndex: int = iPES * pes.NUM_PES + jPES
-				pred: gp.SinglePredictor = self._predictors[ElementIndex]
+				pred: gp.SinglePredictor = self.__predictors[ElementIndex]
 				model: gp.GP = copy.deepcopy(pred.model)
 				model.cov.lengthscale *= np.sqrt(2.0)
 				result[iPES, jPES] = (np.pi ** pes.DIM) * pred.model.cov.lengthscale.prod().item() * (pred.get_weights() @ model.cov(pred.get_training_features(), pred.get_training_features()) @ pred.get_weights()).item()

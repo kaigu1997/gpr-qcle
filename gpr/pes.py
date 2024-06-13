@@ -98,6 +98,8 @@ class InitialDistribution:
 	The population on each surface and their phase factor difference is set in the function.
 	The off-diagonal elements guarantee the purity of the initial distribution to be 1, i.e., pure state.
 	"""
+	__slots__: tuple = ("r0", "sigma_r0", "weight_phase", "factors")
+
 	def __init__(
 		self,
 		r0: npt.NDArray[np.double],

@@ -22,12 +22,11 @@ import scipy.interpolate
 
 sys.path.append(os.path.dirname(__file__))
 
-import evolve
 import expectation
 import gp
 import pes
 import plot
-import sample
+import points
 import utility
 
 NUM_PTS: typing.Literal[256] = 256
@@ -154,17 +153,8 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 		finally:
 			pass
 	# sampling. Initial sample from gaussian directly
-	gp_pts: list[npt.NDArray[np.double]] = [arr for arr in np.tile(sample.normal_sample(NUM_PTS, r0, sigma_r0)[np.newaxis], (pes.NUM_TRIG, 1 + NUM_XTR_RATIO, 1))] # len of NUM_TRIG, each of shape (NUM_PTS * (1 + XTR_RATIO), PHASEDIM)
-	gp_num_center: npt.NDArray[np.int_] = np.full(pes.NUM_TRIG, NUM_PTS)
-	sample.sample_extra_points(gp_num_center, gp_pts)
-	sample.sample_central_points(gp_num_center, gp_pts)
-	sample.sample_extra_points(gp_num_center, gp_pts)
 	init_dist: pes.InitialDistribution = pes.InitialDistribution(r0, sigma_r0, initial_population, initial_phase_factor)
-	gp_density: list[npt.NDArray[np.cdouble]] = [init_dist(pts, idx) for pts, idx in zip(gp_pts, pes.tril_element_indices)]
-	# prepare for surface-hopping part
-	sh_pts: npt.NDArray[np.double] = np.concatenate([arr[:NUM_PTS] for arr in gp_pts], 0)
-	sh_belonging_idx: npt.NDArray[np.int_] = np.repeat(pes.tril_element_indices, NUM_PTS, 0)
-	sh_density: npt.NDArray[np.cdouble] = np.concatenate([den[:NUM_PTS] for den in gp_density], 0)
+	all_pts: points.AllPoints = points.AllPoints(NUM_PTS, NUM_XTR_RATIO, init_dist)
 	# the regressor
 	predictors: gp.GPRPredictors = gp.GPRPredictors(sigma_r0)
 	# average evaluators
@@ -195,7 +185,6 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 		)
 	# files for output
 	pts_f: io.TextIOWrapper
-	bln_f: io.TextIOWrapper
 	all_f: io.TextIOWrapper
 	mgn_f: io.TextIOWrapper
 	ave_f: io.TextIOWrapper
@@ -205,7 +194,6 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 	scl_f: io.TextIOWrapper
 	lss_f: io.TextIOWrapper
 	with open(plot.POINTS_FILENAME + plot.DATA_EXTENSION, "w", encoding="UTF-8") as pts_f,\
-		open(plot.BELONGING_FILENAME + plot.DATA_EXTENSION, "w", encoding="UTF-8") as bln_f,\
 		open(plot.ALL_GRIDS_FILENAME + plot.DATA_EXTENSION, "w", encoding="UTF-8") as all_f,\
 		open(plot.MARGINAL_FILENAME + plot.DATA_EXTENSION, "w", encoding="UTF-8") as mgn_f,\
 		open(plot.AVERAGE_FILENAME + plot.DATA_EXTENSION, "w", encoding="UTF-8") as ave_f,\
@@ -230,41 +218,27 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 			NotImplementedError
 				In case an unimplemented branch is reached
 			"""
+			def print_density(density: npt.NDArray[np.cdouble]) -> None:
+				"""
+				To print density by `np.savetxt`
+
+				Parameters
+				----------
+				density : npt.NDArray[np.cdouble], shape of (NUM_TRIG, NUM_PTS)
+					Density predicted by some method (grid, GPR, evolution, ...)
+				"""
+				np.savetxt(den_f, np.swapaxes(density[..., np.newaxis].view(np.double), -1, 1).reshape(pes.NUM_TRIG * 2, -1))
+
 			# get scale
-			scale: npt.NDArray[np.double] = plot.get_rescale_factor(gp_density)
+			scale: npt.NDArray[np.double] = all_pts.get_rescale_factor()
 			print("Tick {}, {}, {}".format(iTick, utility.format_array("scales", scale), datetime.datetime.now()))
 			# save points
 			# index of central points corresponds to the element
 			# index of extra points is the element index + num_elements
 			# the first N points are central points, and then N*ratio points are the extra points
-			np.savetxt(pts_f, np.concatenate(gp_pts).T, footer="\n", comments="") # save as PHASEDIM * ALL_PTS
-			np.savetxt(
-				bln_f,
-				np.concatenate(
-					[
-						np.concatenate(
-							[
-								np.full(
-									gp_num_center[i],
-									pes.tril_element_indices[i],
-									np.int_
-								),
-								np.full(
-									gp_num_center[i] * NUM_XTR_RATIO,
-									pes.tril_element_indices[i] + pes.NUM_ELM,
-									np.int_
-								)
-							]
-						)
-						for i in range(pes.NUM_TRIG)
-					]
-				)[np.newaxis],
-				fmt="%d",
-				footer="\n",
-				comments=""
-			)
+			np.savetxt(pts_f, np.swapaxes(all_pts.all_points, -2, -1).reshape(pes.NUM_TRIG * pes.PHASEDIM, -1), footer="\n", comments="") # save as (NUM_TRIG * PHASEDIM) * ALL_PTS
 			# fit
-			predictors.update(gp_pts, gp_density, gp_num_center, scale)
+			predictors.update(all_pts.central_points, all_pts.central_density, all_pts.all_points, all_pts.all_density, scale)
 			if to_train:
 				predictors.train()
 			# predict and marginal distribution
@@ -294,7 +268,7 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 			np.savetxt(mgn_f, marginal.reshape(pes.PHASEDIM * pes.NUM_ELM, n_grids), footer="\n", comments="")
 			# calculate averages
 			print(iTick * output_interval, end=" ", file=ave_f)
-			mca.update_pts(gp_pts, predictors.predict)
+			mca.update_pts(all_pts.central_points, predictors.predict)
 			epmca.update_density(predictors.predict)
 			aver: expectation.Averager
 			for aver in [mca, aia, epmca]:
@@ -302,7 +276,7 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 			print("", file=ave_f, flush=True)
 			# calculate error, and predict density
 			if grid_data is not None: # interpolate the data
-				y_all: list[npt.NDArray[np.cdouble]] = [np.array([], dtype=np.cdouble) for _ in range(pes.NUM_TRIG)]
+				y_all: npt.NDArray[np.cdouble] = np.zeros((pes.NUM_TRIG, NUM_PTS), np.cdouble)
 				evolving_errors: npt.NDArray[np.double] = np.empty((pes.NUM_PES, pes.NUM_PES), np.double)
 				for iPES in range(pes.NUM_PES):
 					for jPES in range(iPES + 1):
@@ -314,9 +288,9 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 							False,
 							0.0
 						)
-						y_all[TrilIndex] = interpolator_re(gp_pts[TrilIndex]).astype(np.cdouble)
+						y_all[TrilIndex] = interpolator_re(all_pts.central_points[TrilIndex]).astype(np.cdouble)
 						if iPES == jPES:
-							evolving_errors[iPES, jPES] = np.sum((y_all[TrilIndex].real - gp_density[TrilIndex].real) ** 2) / gp_num_center[TrilIndex]
+							evolving_errors[iPES, jPES] = np.sum((y_all[TrilIndex].real - all_pts.central_density[TrilIndex].real) ** 2) / NUM_PTS
 						else:
 							interpolator_im: scipy.interpolate.RegularGridInterpolator = scipy.interpolate.RegularGridInterpolator(
 								tuple(grids_each_dim),
@@ -325,25 +299,25 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 								False,
 								0.0
 							)
-							y_all[TrilIndex].imag = interpolator_im(gp_pts[TrilIndex])
-							evolving_errors[jPES, iPES] = np.sum((y_all[TrilIndex].real - gp_density[TrilIndex].real) ** 2) / gp_num_center[TrilIndex]
-							evolving_errors[iPES, jPES] = np.sum((y_all[TrilIndex].imag - gp_density[TrilIndex].imag) ** 2) / gp_num_center[TrilIndex]
+							y_all[TrilIndex].imag = interpolator_im(all_pts.central_points[TrilIndex])
+							evolving_errors[jPES, iPES] = np.sum((y_all[TrilIndex].real - all_pts.central_density[TrilIndex].real) ** 2) / NUM_PTS
+							evolving_errors[iPES, jPES] = np.sum((y_all[TrilIndex].imag - all_pts.central_density[TrilIndex].imag) ** 2) / NUM_PTS
 				evolving_errors = evolving_errors.reshape(-1)
 				assert pred is not None # grid data will only be read when already enough space for prediction
 				diff: npt.NDArray[np.double] = pred.reshape((pes.NUM_ELM,) + pred.shape[2:]) - grid_data
 				original_errors: npt.NDArray[np.double] = np.sum(diff ** 2, (-2, -1))
 				rescaled_errors: npt.NDArray[np.double] = original_errors * scale ** 2
 				np.savetxt(err_f, (original_errors, rescaled_errors, evolving_errors), footer="\n", comments="")
-				np.savetxt(den_f, np.concatenate(y_all).view(np.double).reshape(-1, 2).T) # 2 stands for real and imag
+				print_density(y_all)
 			else:
-				np.savetxt(den_f, np.concatenate(gp_density).view(np.double).reshape(-1, 2).T)
-			np.savetxt(den_f, np.concatenate(gp_density).view(np.double).reshape(-1, 2).T)
-			np.savetxt(den_f, np.concatenate([predictors.predict(gp_pts[i], pes.tril_element_indices[i]) for i in range(pes.NUM_TRIG)]).view(np.double).reshape(-1, 2).T, footer="\n", comments="")
+				print_density(all_pts.central_density)
+			print_density(all_pts.central_density)
+			print_density(np.stack([predictors.predict(pts, idx) for pts, idx in zip(all_pts.central_points, pes.tril_element_indices)]))
 			print("\n", end="\n", file=den_f)
 			if to_draw: # plots used whether grid solution is given or not
 				if pes.PHASEDIM == 2:
 					assert pred is not None and dm_drawer is not None
-					dm_drawer(iTick, pred.reshape((pes.NUM_ELM,) + pred.shape[2:]), gp_pts, gp_num_center, scale)
+					dm_drawer(iTick, pred.reshape((pes.NUM_ELM,) + pred.shape[2:]), all_pts.all_points, NUM_PTS, scale)
 				assert wfn_plotter is not None
 				wfn_plotter(iTick, marginal.diagonal(axis1=1, axis2=2).swapaxes(-1, -2)) # .diagonal will move axis to end
 
@@ -368,18 +342,18 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 		end_time = os.environ.get("SLURM_JOB_END_TIME")
 		if end_time is not None:
 			end_time = int(end_time) # int | None
+		print(NUM_PTS, file=pts_f) # save the number of central points in the first line
 		train_pred_draw(0)
-		print_parameter_scale_loss(plot.get_rescale_factor(gp_density))
+		print_parameter_scale_loss(all_pts.get_rescale_factor())
 		to_stop: bool = False
 		iTick: int
 		for iTick in range(1, total_ticks):
 			# evolve
 			for _ in range(output_steps):
-				evolve.evolve(gp_pts, gp_density, mass, dt, predictors.predict)
-				evolve.sh_evolve(sh_pts, sh_density, sh_belonging_idx, aia.purity(), mass, dt, predictors.predict)
+				all_pts.evolve(mass, dt, predictors.predict)
 				epmca.evolve(mass, dt, predictors.predict)
-				scale: npt.NDArray[np.double] = plot.get_rescale_factor(gp_density)
-				predictors.update(gp_pts, gp_density, gp_num_center, scale)
+				scale: npt.NDArray[np.double] = all_pts.get_rescale_factor()
+				predictors.update(all_pts.central_points, all_pts.central_density, all_pts.all_points, all_pts.all_density, scale)
 				print_parameter_scale_loss(scale)
 			# update and predict
 			train_pred_draw(iTick, iTick % reopt_steps == 0)
@@ -388,18 +362,10 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 			if grid_data is None:
 				if np.any(mca.coordinates()[:pes.DIM] > np.abs(r0[:pes.DIM])) or np.any(aia.coordinates()[:pes.DIM] > np.abs(r0[:pes.DIM])) or np.any(epmca.coordinates()[:pes.DIM] > np.abs(r0[:pes.DIM])):
 					to_stop = True
-			# exchange with SH
-			gp_num_center = np.unique(sh_belonging_idx, return_counts=True)[1]
-			gp_pts = [np.tile(sh_pts[sh_belonging_idx == iTril], (1 + NUM_XTR_RATIO, 1)) for iTril in pes.tril_element_indices]
-			gp_density = [np.tile(sh_density[sh_belonging_idx == iTril], 1 + NUM_XTR_RATIO) for iTril in pes.tril_element_indices]
 			# sample extra points and predict them
-			sample.sample_extra_points(gp_num_center, gp_pts)
-			for iPES in range(pes.NUM_PES):
-				for jPES in range(iPES + 1):
-					TrilIndex: int = pes.flatten_tril_index[iPES, jPES]
-					gp_density[TrilIndex][gp_num_center[TrilIndex]:] = predictors.predict(gp_pts[TrilIndex][gp_num_center[TrilIndex]:], iPES * pes.NUM_PES + jPES)
-			scale: npt.NDArray[np.double] = plot.get_rescale_factor(gp_density)
-			predictors.update(gp_pts, gp_density, gp_num_center, scale)
+			all_pts.resample_extra(predictors.predict)
+			scale: npt.NDArray[np.double] = all_pts.get_rescale_factor()
+			predictors.update(all_pts.central_points, all_pts.central_density, all_pts.all_points, all_pts.all_density, scale)
 			if iTick % reopt_steps == 0:
 				predictors.train()
 			print_parameter_scale_loss(scale)

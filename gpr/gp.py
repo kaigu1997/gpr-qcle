@@ -416,30 +416,34 @@ class SinglePredictor:
 
 	def update(
 		self,
+		x_center: torch.Tensor,
+		y_center: torch.Tensor,
 		x_all: torch.Tensor,
 		y_all: torch.Tensor,
-		scale: float,
-		num_points: int
+		scale: float
 	) -> None:
 		"""
 		To update the training features and labels of the model
 
 		Parameters
 		----------
-		x_all : torch.Tensor, of shape (num_points * (1 + NUM_XTR_RATIO), PHASEDIM)
+		x_center : torch.Tensor, shape of (num_points, PHASEDIM)
+			Subset training inputs
+		y_center : torch.Tensor, shape of (num_points,)
+			Subset training targets
+		x_all : torch.Tensor, shape of (num_points * (1 + NUM_XTR_RATIO), PHASEDIM)
 			All training inputs
-		y_all : torch.Tensor, of shape (num_points * (1 + NUM_XTR_RATIO))
+		y_all : torch.Tensor, shape of (num_points * (1 + NUM_XTR_RATIO))
 			All training targets
 		scale : float
 			The scaling factor to increase
-		num_points : int
-			The number of points located at the front of all points that is used as the subset
 		"""
+		assert x_center.shape[-1] == pes.PHASEDIM and x_center.numel() == y_center.numel() * pes.PHASEDIM
 		assert x_all.shape[-1] == pes.PHASEDIM and x_all.numel() == y_all.numel() * pes.PHASEDIM
 		self.__x_all = copy.deepcopy(x_all.reshape(-1, pes.PHASEDIM))
 		self.__y_all = copy.deepcopy(y_all.reshape(-1))
 		self.__scale = scale
-		self.model.set_train_data(self.__x_all[:num_points].detach(), self.__y_all[:num_points].detach(), False)
+		self.model.set_train_data(x_center.reshape(-1, pes.PHASEDIM).detach(), y_center.reshape(-1).detach(), False)
 		self.__weights_updated = False
 
 	def get_marginal(self, dimensions: list[int], x_test: torch.Tensor) -> torch.Tensor:
@@ -541,9 +545,10 @@ class GPRPredictors:
 
 	def update(
 		self,
-		x_all: list[npt.NDArray[np.double]],
-		y_all: list[npt.NDArray[np.cdouble]],
-		num_points: int | npt.NDArray[np.int_],
+		x_center: npt.NDArray[np.double],
+		y_center: npt.NDArray[np.cdouble],
+		x_all: npt.NDArray[np.double],
+		y_all: npt.NDArray[np.cdouble],
 		scale: npt.NDArray[np.double]
 	) -> None:
 		"""
@@ -551,27 +556,28 @@ class GPRPredictors:
 
 		Parameters
 		----------
-		x_all : list[npt.NDArray[np.double]], len of NUM_TRIG, each of shape (num_points * (1 + NUM_XTR_RATIO), PHASEDIM)
+		x_center : npt.NDArray[np.double], shape of (NUM_TRIG, num_points, PHASEDIM)
+			Subset training inputs
+		y_center : npt.NDArray[np.cdouble], shape of (NUM_TRIG, num_points)
+			Subset training targets
+		x_all : npt.NDArray[np.double], shape of (NUM_TRIG, num_points * (1 + NUM_XTR_RATIO), PHASEDIM)
 			All training inputs
-		y_all : list[npt.NDArray[np.cdouble]], len of NUM_TRIG, each of shape (num_points * (1 + NUM_XTR_RATIO))
+		y_all : npt.NDArray[np.cdouble], shape of (NUM_TRIG, num_points * (1 + NUM_XTR_RATIO))
 			All training targets
-		num_points : int | npt.NDArray[np.int_], shape of (NUM_TRIG,)
-			The number of points located at the front of all points that is used as the subset
 		scale : npt.NDArray[np.double], shape of (NUM_ELM,)
 			The rescale factor
 		"""
-		if isinstance(num_points, int):
-			num_points = np.full(pes.NUM_TRIG, num_points, np.int_)
 		self.__scale[...] = scale
 		for iElement, pred in enumerate(self.__predictors):
 			RowIndex: int = iElement // pes.NUM_PES
 			ColIndex: int = iElement % pes.NUM_PES
 			TrilIndex: int = pes.flatten_tril_index[RowIndex, ColIndex]
 			pred.update(
+				torch.from_numpy(x_center[TrilIndex]),
+				torch.from_numpy(y_center[TrilIndex].real if RowIndex <= ColIndex else y_center[TrilIndex].imag),
 				torch.from_numpy(x_all[TrilIndex]),
 				torch.from_numpy(y_all[TrilIndex].real if RowIndex <= ColIndex else y_all[TrilIndex].imag),
-				self.__scale[iElement],
-				num_points[TrilIndex]
+				self.__scale[iElement]
 			)
 
 	def train(self) -> None:

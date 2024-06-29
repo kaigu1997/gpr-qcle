@@ -388,21 +388,7 @@ def evolve_element_density(
 	ColIndex : int
 		Index of column of the element in density matrix
 	"""
-	evolve_element_density.drc = Direction.Forward
-	# judge coupling
-	adia_comp: npt.NDArray[np.double] = adiabatic_component(x4, p2, mass)
-	density_adia: npt.NDArray[np.cdouble] = density.copy()
-	evolve_density_adiabatically(
-		density_adia,
-		x0,
-		x2,
-		x4,
-		evolve_element_density.drc,
-		dt,
-		RowIndex,
-		ColIndex
-	)
-	density_nonadia: npt.NDArray[np.cdouble] = evolve_density_non_adiabatically(
+	density[...] = evolve_density_non_adiabatically(
 		density,
 		x4,
 		p2,
@@ -414,12 +400,11 @@ def evolve_element_density(
 		RowIndex,
 		ColIndex
 	)
-	density = density_adia * adia_comp + density_nonadia * (1.0 - adia_comp)
 
 
 def evolve(
-	points: list[npt.NDArray[np.double]],
-	densities: list[npt.NDArray[np.cdouble]],
+	points: npt.NDArray[np.double],
+	densities: npt.NDArray[np.cdouble],
 	mass: npt.NDArray[np.double],
 	dt: float,
 	predictor: typing.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
@@ -429,9 +414,9 @@ def evolve(
 
 	Parameters
 	----------
-	points : list[npt.NDArray[np.double]], len of NUM_TRIG, each of shape (NUM_PTS, PHASEDIM)
+	points : npt.NDArray[np.double], shape of (NUM_TRIG, NUM_PTS, PHASEDIM)
 		Phase space coordinates of selected points for each density matrix element
-	densities : list[npt.NDArray[np.cdouble]], len of NUM_TRIG, each of shape (NUM_PTS,)
+	densities : npt.NDArray[np.cdouble], shape of (NUM_TRIG, NUM_PTS)
 		Density matrix element of the points
 	mass : npt.NDArray[np.double], shape of (DIM,)
 		Mass of classical degree of freedom
@@ -464,7 +449,6 @@ def sh_evolve(
 	points: npt.NDArray[np.double],
 	densities: npt.NDArray[np.cdouble],
 	belonging_idx: npt.NDArray[np.int_],
-	purity: npt.NDArray[np.double],
 	mass: npt.NDArray[np.double],
 	dt: float,
 	predictor: typing.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
@@ -474,14 +458,12 @@ def sh_evolve(
 
 	Parameters
 	----------
-	points : npt.NDArray[np.double], shape of (NUM_TRIG * NUM_PTS, PHASEDIM)
+	points : npt.NDArray[np.double], shape of (NUM_TRIG, NUM_PTS, PHASEDIM)
 		Phase space coordinates of selected points for each density matrix element
-	densities : npt.NDArray[np.cdouble], shape of (NUM_TRIG * NUM_PTS,)
+	densities : npt.NDArray[np.cdouble], shape of (NUM_TRIG, NUM_PTS)
 		Density matrix element of the points
-	belonging_idx : npt.NDArray[np.int_], shape of (NUM_TRIG * NUM_PTS,)
+	belonging_idx : npt.NDArray[np.int_], shape of (NUM_PTS,)
 		The index of density matrix element where the points belong to
-	purity : npt.NDArray[np.double], shape of (NUM_PES, NUM_PES)
-		The purity of each element, indicating the transition allowance to other elements
 	mass : npt.NDArray[np.double], shape of (DIM,)
 		Mass of classical degree of freedom
 	dt : float
@@ -490,37 +472,35 @@ def sh_evolve(
 		It predicts the density matrix element based on given coordinates and element index
 	"""
 	# evolve coordinates and hopping
-	x0: npt.NDArray[np.double] = points[:, :pes.DIM] # N * D
-	p0: npt.NDArray[np.double] = points[:, pes.DIM:] # N * D
-	x2: npt.NDArray[np.double] = np.empty_like(x0) # N * D
-	p1: npt.NDArray[np.double] = np.empty_like(p0) # N * D
-	x4: npt.NDArray[np.double] = np.empty_like(x0) # N * D
-	p2: npt.NDArray[np.double] = np.empty_like(p0) # N * D
+	x0: npt.NDArray[np.double] = points[:, :, :pes.DIM] # TRIG * N * D
+	p0: npt.NDArray[np.double] = points[:, :, pes.DIM:] # TRIG * N * D
+	x2: npt.NDArray[np.double] = np.empty_like(x0) # TRIG * N * D
+	p1: npt.NDArray[np.double] = np.empty_like(p0) # TRIG * N * D
+	x4: npt.NDArray[np.double] = np.empty_like(x0) # TRIG * N * D
+	p2: npt.NDArray[np.double] = np.empty_like(p0) # TRIG * N * D
 	current_indices: npt.NDArray[np.bool_] = belonging_idx == pes.tril_element_indices[:, np.newaxis]
-	for iBelongPES in range(pes.NUM_PES):
-		for jBelongPES in range(iBelongPES + 1):
-			TrilIndex = pes.flatten_tril_index[iBelongPES, jBelongPES]
+	all_transitions: npt.NDArray[np.bool_] = np.zeros(points.shape[1], np.bool_)
+	for iPES in range(pes.NUM_PES):
+		for jPES in range(iPES + 1):
+			TrilIndex = pes.flatten_tril_index[iPES, jPES]
 			indices: npt.NDArray[np.int_] = np.flatnonzero(current_indices[TrilIndex]) # NUM_PT
 			num_pts: int = indices.size
 			if num_pts > 0: # only have elements
 				# get x and p, and 2 semi adiabatic steps
-				x2[indices], p1[indices] = evolve_coordinates_adiabatically(x0[indices], p0[indices], mass, dt / 2.0, Direction.Forward, iBelongPES, jBelongPES)
-				x4[indices], p2[indices] = evolve_coordinates_adiabatically(x2[indices], p1[indices], mass, dt / 2.0, Direction.Forward, iBelongPES, jBelongPES)
+				x2[:, indices], p1[:, indices] = evolve_coordinates_adiabatically(x0[:, indices], p0[:, indices], mass, dt / 2.0, Direction.Forward, iPES, jPES)
+				x4[:, indices], p2[:, indices] = evolve_coordinates_adiabatically(x2[:, indices], p1[:, indices], mass, dt / 2.0, Direction.Forward, iPES, jPES)
 				# surface hopping
-				num_states_avail: int = (1 if iBelongPES == jBelongPES else 2) * (pes.NUM_PES - 1)
+				num_states_avail: int = (1 if iPES == jPES else 2) * (pes.NUM_PES - 1)
 				state_prob: npt.NDArray[np.double] = np.zeros((num_pts, num_states_avail + 1)) # +1 for keep the same
-				current_purity: float = purity[iBelongPES, jBelongPES]
-				dest_purity: npt.NDArray[np.double] = purity[dest_row_idx[TrilIndex, :num_states_avail], dest_col_idx[TrilIndex, :num_states_avail]] # NUM_STATE
-				purity_ratio: npt.NDArray[np.double] = current_purity / (current_purity + dest_purity)
 				# weights
-				velocity: npt.NDArray[np.double] = p2[indices] / mass # NUM_PT * DIM
-				coupling: npt.NDArray[np.double] = pes.adiabatic_coupling(x4[indices])[..., coup_row_idx[TrilIndex, :num_states_avail], coup_col_idx[TrilIndex, :num_states_avail]] # NUM_PT * DIM * NUM_STATE
+				velocity: npt.NDArray[np.double] = p2[TrilIndex, indices] / mass # NUM_PT * DIM
+				coupling: npt.NDArray[np.double] = pes.adiabatic_coupling(x4[TrilIndex, indices])[..., coup_row_idx[TrilIndex, :num_states_avail], coup_col_idx[TrilIndex, :num_states_avail]] # NUM_PT * DIM * NUM_STATE
 				state_prob[:, :-1] = np.abs(np.sum(velocity[..., np.newaxis] * coupling, -2) * dt) # NUM_PT * NUM_STATE, |v*d*dt|
 				# energy conservation rule
-				potential: npt.NDArray[np.double] = pes.adiabatic_potential(x4[indices]) # NUM_PT * NUM_PES
+				potential: npt.NDArray[np.double] = pes.adiabatic_potential(x4[TrilIndex, indices]) # NUM_PT * NUM_PES
 				momentum_rescale_factor_sq: npt.NDArray[np.double] = 1.0\
-					+ (potential[:, coup_col_idx[TrilIndex, :num_states_avail]] - potential[:, coup_row_idx[TrilIndex, :num_states_avail]]) / np.sum(p2[indices] ** 2 / mass, -1, keepdims=True) # NUM_PT * NUM_STATE
-				state_prob[:, :-1] *= np.where(momentum_rescale_factor_sq >= 0.0, purity_ratio, 0.0)
+					+ (potential[:, coup_col_idx[TrilIndex, :num_states_avail]] - potential[:, coup_row_idx[TrilIndex, :num_states_avail]]) / np.sum(p2[TrilIndex, indices] ** 2 / mass, -1, keepdims=True) # NUM_PT * NUM_STATE
+				state_prob[:, :-1] *= np.where(momentum_rescale_factor_sq >= 0.0, 1.0, 0.0)
 				state_prob[:, -1] = 1.0 # stay at original state
 				state_prob /= np.sum(state_prob, -1, keepdims=True) # normalize
 				# choose the one to jump to
@@ -528,39 +508,24 @@ def sh_evolve(
 				# change index, momentum, and the back propagation
 				transition: npt.NDArray[np.bool_] = idx_of_dest_idx != num_states_avail
 				if np.any(transition):
-					belonging_idx[indices[transition]] = dest_idx[TrilIndex, idx_of_dest_idx[transition]] # indices[transition] equivalent to [current_indices[TrilIndex]][transition]
-					p2[indices[transition]] *= np.sqrt(momentum_rescale_factor_sq[transition, idx_of_dest_idx[transition]])[:, np.newaxis]
-					# change density
-					for iPredictPES in range(pes.NUM_PES):
-						for jPredictPES in range(iPredictPES + 1):
-							if iBelongPES == iPredictPES and jBelongPES == jPredictPES:
-								pass
-							PredictElementIndex: int = iPredictPES * pes.NUM_PES + jPredictPES
-							need_predict: npt.NDArray[np.bool_] = dest_idx[TrilIndex, idx_of_dest_idx[transition]] == PredictElementIndex # in case the transition happens to this element
-							if np.any(need_predict):
-								x2[indices[transition][need_predict]], p1[indices[transition][need_predict]] = evolve_coordinates_adiabatically(x4[indices[transition][need_predict]], p2[indices[transition][need_predict]], mass, dt / 2.0, Direction.Backward, iPredictPES, jPredictPES)
-								x0[indices[transition][need_predict]], p0[indices[transition][need_predict]] = evolve_coordinates_adiabatically(x2[indices[transition][need_predict]], p1[indices[transition][need_predict]], mass, dt / 2.0, Direction.Backward, iPredictPES, jPredictPES)
-								densities[indices[transition][need_predict]] = predictor(points[indices[transition][need_predict]], PredictElementIndex)
-	# evolve density
+					# indices[transition] equivalent to [current_indices[TrilIndex]][transition]
+					# change belonging
+					belonging_idx[indices[transition]] = dest_idx[TrilIndex, idx_of_dest_idx[transition]]
+					# momentum jump
+					p2[:, indices[transition]] *= np.sqrt(momentum_rescale_factor_sq[transition, idx_of_dest_idx[transition]])[:, np.newaxis]
+					all_transitions[indices[transition]] = True
 	for iPES in range(pes.NUM_PES):
 		for jPES in range(iPES + 1):
-			filters: npt.NDArray[np.bool_] = belonging_idx == iPES * pes.NUM_PES + jPES
-			density_copy: npt.NDArray[np.cdouble] = np.copy(densities[filters])
-			evolve_element_density(
-				x0[filters],
-				p0[filters],
-				x2[filters],
-				p1[filters],
-				x4[filters],
-				p2[filters],
-				density_copy,
-				mass,
-				dt,
-				predictor,
-				iPES,
-				jPES
-			)
-			densities[filters] = density_copy
-			# finally set up the point coordinates
-			points[filters, :pes.DIM] = x4[filters]
-			points[filters, pes.DIM:] = p2[filters]
+			TrilIndex: int = pes.flatten_tril_index[iPES, jPES]
+			ElementIndex: int = iPES * pes.NUM_PES + jPES
+			# change source coordinates / density due to momentum jump / not belonging
+			need_predict: npt.NDArray[np.bool_] = np.logical_or(all_transitions, belonging_idx != ElementIndex) # in case the transition happens to this element
+			if np.any(need_predict):
+				x2[TrilIndex, need_predict], p1[TrilIndex, need_predict] = evolve_coordinates_adiabatically(x4[TrilIndex, need_predict], p2[TrilIndex, need_predict], mass, dt / 2.0, Direction.Backward, iPES, jPES)
+				x0[TrilIndex, need_predict], p0[TrilIndex, need_predict] = evolve_coordinates_adiabatically(x2[TrilIndex, need_predict], p1[TrilIndex, need_predict], mass, dt / 2.0, Direction.Backward, iPES, jPES)
+				densities[TrilIndex, need_predict] = predictor(points[TrilIndex, need_predict], ElementIndex)
+			# evolve density
+			evolve_element_density(x0[TrilIndex], p0[TrilIndex], x2[TrilIndex], p1[TrilIndex], x4[TrilIndex], p2[TrilIndex], densities[TrilIndex], mass, dt, predictor, iPES, jPES)
+	# finally set up the point coordinates
+	x0[...] = x4
+	p0[...] = p2

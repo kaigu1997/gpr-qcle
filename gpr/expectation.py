@@ -169,7 +169,7 @@ class MonteCarloAverage(Averager):
 
 	def update_pts(
 		self,
-		ref_pts: list[npt.NDArray[np.double]],
+		ref_pts: npt.NDArray[np.double],
 		predictor: typing.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
 	):
 		"""
@@ -177,7 +177,7 @@ class MonteCarloAverage(Averager):
 
 		Parameters
 		----------
-		ref_pts : npt.NDArray[np.double]
+		ref_pts : npt.NDArray[np.double], shape of (NUM_TRIG, NUM_PTS, PHASEDIM)
 			Current points, used to estimate average and variance
 		predictor : typing.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
 			Used to predict the density of the points
@@ -290,7 +290,7 @@ class EvolvingPointsMCAverage(MonteCarloAverage):
 					col_idx
 				)
 		else:
-			evolve.evolve([ps for ps in self.point_set], [den for den in self.density], mass, dt, predictor)
+			evolve.evolve(self.point_set, self.density, mass, dt, predictor)
 
 	def update_density(self, predictor: typing.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]) -> None:
 		"""

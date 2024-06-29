@@ -23,7 +23,7 @@ import matplotlib.figure
 import matplotlib.pyplot as plt
 import matplotlib.ticker
 import matplotlib.transforms
-import matplotlib.typing
+# import matplotlib.typing
 import numpy as np
 import numpy.typing as npt
 import PIL.Image
@@ -37,7 +37,6 @@ FIGSIZE: tuple[float, ...] = tuple(matplotlib.rcParams["figure.figsize"])
 TIME_TEMPLATE: typing.Literal["Time = {} a.u."] = "Time = {} a.u."
 RESCALE_TEMPLATE: typing.Literal["Rescale Factor = {:.6e}"] = "Rescale Factor = {:.6e}"
 POINTS_FILENAME: typing.Literal["points"] = "points"
-BELONGING_FILENAME: typing.Literal["belonging"] = "belonging"
 ALL_GRIDS_FILENAME: typing.Literal["all_grids"] = "all_grids"
 MARGINAL_FILENAME: typing.Literal["marginal"] = "marginal"
 AVERAGE_FILENAME: typing.Literal["ave"] = "ave"
@@ -361,7 +360,7 @@ class DensityMatrixDrawer:
 	__COLORBAR_NTICKS: typing.Literal[21] = 21
 	FILENAME_PREFIX: typing.Literal["dm"] = "dm"
 	__PICNAME_NO_DIGITS: typing.Literal["dm_{{:0{}}}.png"] = FILENAME_PREFIX + "_{{:0{}}}" + FIGURE_EXTENSION
-	__slots__: tuple = ("__output_interval", "dm_data", "__grid_data", "__draw_scattered", "__draw_rescaled", "__x_grids", "__p_grids", "picname", "__xv", "__pv", "__LEVEL", "__NORM", "__fig", "__axs", "__title", "__super_title", "__points", "__belongings", "__row_divisor", "__col_divisor")
+	__slots__: tuple = ("__output_interval", "dm_data", "__grid_data", "__draw_scattered", "__draw_rescaled", "__x_grids", "__p_grids", "picname", "__xv", "__pv", "__LEVEL", "__NORM", "__fig", "__axs", "__title", "__super_title", "__points", "__num_central", "__row_divisor", "__col_divisor")
 
 	@staticmethod
 	def __get_divisors(
@@ -468,16 +467,17 @@ class DensityMatrixDrawer:
 		self.__title: list[str] = ["Rescaled " if self.__draw_rescaled else ""]
 		self.__super_title: str = self.__title[0] + "Partial Wigner-Transformed Density Matrix"
 		self.__points: npt.NDArray[np.double] | None = None
-		self.__belongings: npt. NDArray[np.int_] | None = None
+		self.__num_central: int = -1
 		if self.__grid_data is not None or draw_scattered: # more rows to draw
 			if self.__grid_data is not None:
 				self.__title += [self.__title[0] + "Exact ", self.__title[0] + "Difference of"]
 			if draw_scattered:
 				if self.dm_data is not None:
 					# read from file; otherwise pass from main
-					self.__points = np.loadtxt(POINTS_FILENAME + DATA_EXTENSION)
-					self.__points = self.__points.reshape(self.__points.shape[0] // pes.PHASEDIM, pes.PHASEDIM, self.__points.shape[1]) # N_TICKS * PHASEDIM * NUM_PTS
-					self.__belongings = np.loadtxt(BELONGING_FILENAME + DATA_EXTENSION).astype(np.int_) # N_TICKS * NUM_PTS
+					with open(POINTS_FILENAME + DATA_EXTENSION) as pts_f:
+						self.__num_central = int(pts_f.readline()) # first line has the number of central points
+						self.__points = np.loadtxt(pts_f)
+						self.__points = self.__points.reshape(self.__points.shape[0] // (pes.PHASEDIM * pes.NUM_TRIG), pes.NUM_TRIG, pes.PHASEDIM, self.__points.shape[1]) # N_TICKS * NUM_TRIG * PHASEDIM * NUM_PTS
 				self.__title.insert(0, self.__title[0] + "Scattered ") # scatter points first
 			nrows: int = len(self.__title)
 			self.__fig, self.__axs = plt.subplots(nrows=nrows, ncols=pes.NUM_ELM, figsize=(FIGSIZE[0] * pes.NUM_ELM, FIGSIZE[1] * nrows))
@@ -514,8 +514,8 @@ class DensityMatrixDrawer:
 		self,
 		frame_index: int,
 		data: npt.NDArray[np.double] | None = None,
-		points: list[npt.NDArray[np.double]] | None = None,
-		num_points: int | npt.NDArray[np.int_] | None = None,
+		points: npt.NDArray[np.double] | None = None,
+		num_points: int | None = None,
 		scale: npt.NDArray[np.double] | None = None
 	) -> None:
 		"""
@@ -528,12 +528,12 @@ class DensityMatrixDrawer:
 			Product with `self.__output_interval` gives the duration since beginning
 		data : npt.NDArray[np.double], shape of (NUM_ELM, N_GRIDS, N_GRIDS) | None, optional
 			The data of the frame, by default None (and self.dm_data will be used)
-		points : list[npt.NDArray[np.double]] | None, len of NUM_TRIG, each of shape (NUM_PTS, PHASEDIM), optional
+		points : npt.NDArray[np.double] | None, shape of (NUM_TRIG, NUM_PTS, PHASEDIM), optional
 			The points to scatter. Only used if `self.__draw_scattered` is True.
-			By default None (`self.__points` and `self.__belongings` will be used instead.)
-		num_points : int | npt.NDArray[np.int_], shape of (NUM_TRIG,) | None, optional
+			By default None (`self.__points` will be used instead.)
+		num_points : int | None, optional
 			The number of points located at the front of all points that is used as the subset,
-			by default None (and `self.__points` and `self.__belongings` will be used instead.)
+			by default None (and `self.__points` will be used instead.)
 		scale : npt.NDArray[np.double], shape of (NUM_ELM,)
 			The rescale factor, by default None (and `get_rescale_factor` will be used instead)
 		"""
@@ -566,9 +566,9 @@ class DensityMatrixDrawer:
 				The data for the contourf
 			title : str | None, optional
 				The title of the Axe, by default None
-			central_points : npt.NDArray[np.double], shape of (NUM_PES, NUM_PTS) | None, optional
+			central_points : npt.NDArray[np.double], shape of (PHASEDIM, NUM_PTS) | None, optional
 				The central points to scatter on the element, by default None
-			extra_points : npt.NDArray[np.double], shape of (NUM_PES, NUM_PTS * EXTRA_RATIO) | None, optional
+			extra_points : npt.NDArray[np.double], shape of (PHASEDIM, NUM_PTS * EXTRA_RATIO) | None, optional
 				The extra points to scatter on the element, by default None
 			"""
 			ax.contourf(self.__xv, self.__pv, data[::self.__col_divisor, ::self.__row_divisor].T, levels=self.__LEVEL, cmap=__class__.__CMAP, norm=self.__NORM)
@@ -600,25 +600,22 @@ class DensityMatrixDrawer:
 			row_index: int = 0
 			if self.__draw_scattered: # scatter points, no title change
 				for iElement in range(pes.NUM_ELM):
-					if isinstance(num_points, int): # all elements have same number of points
-						num_points = np.full(pes.NUM_TRIG, num_points, np.int_)
+					TrilIndex: int = pes.flatten_tril_index[iElement // pes.NUM_PES, iElement % pes.NUM_PES]
 					if num_points is not None and points is not None: # from main
-						TrilIndex: int = pes.flatten_tril_index[iElement // pes.NUM_PES, iElement % pes.NUM_PES]
 						draw_an_axs(
 							self.__axs[row_index, iElement],
 							pred_data[iElement].T * rescale_factors[iElement],
-							central_points=points[TrilIndex][:num_points[TrilIndex]].T,
-							extra_points=points[TrilIndex][num_points[TrilIndex]:].T,
+							central_points=points[TrilIndex, :num_points].T,
+							extra_points=points[TrilIndex, num_points:].T,
 						)
 					else: # from file
-						assert self.__points is not None and self.__belongings is not None
-						TrilElementIndex: int = iElement if iElement // pes.NUM_PES >= iElement % pes.NUM_PES else iElement % pes.NUM_PES * pes.NUM_PES + iElement // pes.NUM_PES
-						if frame_index < self.__points.shape[0] or frame_index < self.__belongings.shape[0]:
+						assert self.__points is not None
+						if frame_index < self.__points.shape[0]:
 							draw_an_axs(
 								self.__axs[row_index, iElement],
 								pred_data[iElement].T * rescale_factors[iElement],
-								central_points=self.__points[frame_index][:, self.__belongings[frame_index] == TrilElementIndex],
-								extra_points=self.__points[frame_index][:, self.__belongings[frame_index] == TrilElementIndex + pes.NUM_ELM],
+								central_points=self.__points[frame_index, TrilIndex, :, :self.__num_central],
+								extra_points=self.__points[frame_index, TrilIndex, :, self.__num_central:],
 							) # mixing of basic and advanced slicing leads to error
 						else: # have points, but unavailable due to output
 							draw_an_axs(self.__axs[row_index, iElement], pred_data[iElement].T * rescale_factors[iElement])
@@ -704,7 +701,7 @@ class WavefunctionPlotter:
 	__PICNAME_NO_DIGITS : typing.Literal["wfn_{{:0{}}}.png"]
 		The template for pictures
 	"""
-	__WFN_COLORS: list[matplotlib.typing.ColorType]
+	# __WFN_COLORS: list[matplotlib.typing.ColorType]
 	if pes.NUM_PES < 10:
 		__WFN_COLORS = matplotlib.color_sequences["Set1"][:pes.NUM_PES]
 	else:

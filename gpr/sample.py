@@ -8,7 +8,6 @@ import sys
 
 import numpy as np
 import numpy.typing as npt
-import sklearn.cluster
 import torch
 
 sys.path.append(os.path.dirname(__file__))
@@ -45,66 +44,33 @@ def normal_sample(
 	return torch.randn((num_points, pes.PHASEDIM), dtype=torch.float).detach().numpy() * stddev + mean
 
 
-def sample_central_points(num_points: int | npt.NDArray[np.int_], all_points: list[npt.NDArray[np.double]]) -> None:
-	"""
-	To resample the central points
-
-	Parameters
-	----------
-	num_points : int | npt.NDArray[np.int_]
-		The number of central points. They will be placed at first
-	all_points : list[npt.NDArray[np.double]], len of NUM_TRIG, each of shape (num_point * (1 + NUM_XTR_RATIO), PHASEDIM)
-		All the points of all elements and dimensions
-	"""
-	print("Sample Central Points")
-	if isinstance(num_points, int):
-		num_points = np.full(pes.NUM_TRIG, num_points, np.int_)
-	for iPES in range(pes.NUM_PES):
-		for jPES in range(iPES + 1):
-			TrilIndex: int = pes.flatten_tril_index[iPES, jPES]
-			kmeans: sklearn.cluster.KMeans = sklearn.cluster.KMeans(num_points[TrilIndex], init="k-means++", n_init="auto", random_state=np.random.RandomState(np_rng.bit_generator), algorithm="lloyd").fit(all_points[TrilIndex])
-			all_points[TrilIndex][:num_points[TrilIndex]] = kmeans.cluster_centers_
-			print(
-				"\trho({}, {}), {}, {}".format(
-					iPES,
-					jPES,
-					utility.format_array("<r>", np.average(all_points[TrilIndex][:num_points[TrilIndex]], 0)),
-					utility.format_array("stddev", np.std(all_points[TrilIndex][:num_points[TrilIndex]], 0))
-				)
-			)
-	print("", end="", flush=True)
-
-
-def sample_extra_points(num_points: int | npt.NDArray[np.int_], all_points: list[npt.NDArray[np.double]]) -> None:
+def sample_extra_points(
+	central_points: npt.NDArray[np.double],
+	extra_point_ratio: int
+) -> npt.NDArray[np.double]:
 	"""
 	To create the extra point set
 
-	First num_points points remain the same, and the rest of the points are resampled based on the mean of the first num_points points and variance from predictors
-
 	Parameters
 	----------
-	num_points : int | npt.NDArray[np.int_]
-		The number of central points. The rest of the points are resampled
-	all_points : list[npt.NDArray[np.double]], len of NUM_TRIG, each of shape (num_point * (1 + NUM_XTR_RATIO), PHASEDIM)
-		Points of all elements and dimensions
+	central_points : npt.NDArray[np.double], shape of (NUM_PTS, PHASEDIM)
+		The central points. They are the centers for the extra points
+	extra_point_ratio : int
+		The number of extra points around each central point
+
+	Returns
+	-------
+	npt.NDArray[np.double], shape of (NUM_PTS * NUM_XTR_RATIO, PHASEDIM)
+		The extra points. Same for all elements.
+		If different points for each elements are needed, `np.tile` could be used
 	"""
-	print("Sample Extra Points")
-	if isinstance(num_points, int):
-		num_points = np.full(pes.NUM_TRIG, num_points, np.int_)
-	for iPES in range(pes.NUM_PES):
-		for jPES in range(iPES + 1):
-			TrilIndex: int = pes.flatten_tril_index[iPES, jPES]
-			assert all_points[TrilIndex].shape[-2] % num_points[TrilIndex] == 0
-			extra_point_ratio: int = all_points[TrilIndex].shape[-2] // num_points[TrilIndex] - 1
-			var: npt.NDArray[np.double] = np.var(all_points[TrilIndex][:num_points[TrilIndex]], 0)
-			var = np.diag(var)
-			all_points[TrilIndex][num_points[TrilIndex]:] = np.concatenate([np_rng.multivariate_normal(pt, var, extra_point_ratio, "raise", method="cholesky") for pt in all_points[TrilIndex][:num_points[TrilIndex]]])
-			print(
-				"\trho({}, {}), {}, {}".format(
-					iPES,
-					jPES,
-					utility.format_array("<r>", np.average(all_points[TrilIndex][num_points[TrilIndex]:], 0)),
-					utility.format_array("stddev", np.std(all_points[TrilIndex][num_points[TrilIndex]:], 0))
-				)
-			)
-	print("", end="", flush=True)
+	var: npt.NDArray[np.double] = np.diag(np.var(central_points, 0))
+	result: npt.NDArray[np.double] = np.concatenate([np_rng.multivariate_normal(pt, var, extra_point_ratio, "raise", method="cholesky") for pt in central_points])
+	print(
+		"\tSample Extra Points, {}, {}".format(
+			utility.format_array("<r>", np.average(result, 0)),
+			utility.format_array("stddev", np.std(result, 0))
+		),
+		flush=True
+	)
+	return result

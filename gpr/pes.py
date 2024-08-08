@@ -5,7 +5,6 @@ This module provides methods for the model, including adiabatic potential energy
 corresponding Hellmann-Feynmann forces, and non-adiabatic coupling.
 """
 import enum
-import typing
 
 import numpy as np
 import numpy.typing as npt
@@ -32,13 +31,13 @@ class Model(enum.IntEnum):
 	ECR = enum.auto()
 
 
-MODEL: typing.Literal[Model.DAC] = Model.DAC
-NUM_PES: typing.Literal[2] = 2
-NUM_ELM: typing.Literal[4] = NUM_PES * NUM_PES
-NUM_TRIG: typing.Literal[3] = NUM_PES * (NUM_PES + 1) // 2
-DIM: typing.Literal[1] = 1
-PHASEDIM: typing.Literal[2] = 2
-HBAR: float = 1.0
+MODEL = Model.DAC
+NUM_PES = 2
+NUM_ELM = NUM_PES * NUM_PES
+NUM_TRIG = NUM_PES * (NUM_PES + 1) // 2
+DIM = 1
+PHASEDIM = DIM * 2
+HBAR = 1.0
 tril_row_indices: npt.NDArray[np.int_]
 tril_col_indices: npt.NDArray[np.int_]
 tril_row_indices, tril_col_indices = np.tril_indices(NUM_PES)
@@ -95,7 +94,9 @@ class InitialDistribution:
 	Notes
 	-----
 	The density is a multidimensional gaussian distribution with given center and width.
+
 	The population on each surface and their phase factor difference is set in the function.
+
 	The off-diagonal elements guarantee the purity of the initial distribution to be 1, i.e., pure state.
 	"""
 	__slots__: tuple = ("r0", "sigma_r0", "weight_phase", "factors")

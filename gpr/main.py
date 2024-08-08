@@ -294,7 +294,7 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 			np.savetxt(mgn_f, marginal.reshape(pes.PHASEDIM * pes.NUM_ELM, n_grids), footer="\n", comments="")
 			# calculate averages
 			print(iTick * output_interval, end=" ", file=ave_f)
-			mca.update_pts(gp_pts, predictors.predict)
+			mca.update_pts(gp_pts, lambda x, idx: predictors.predict(x, idx, False))
 			epmca.update_density(predictors.predict)
 			aver: expectation.Averager
 			for aver in [mca, aia, epmca]:

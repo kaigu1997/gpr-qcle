@@ -12,9 +12,9 @@ import typing
 
 import gpytorch
 import gpytorch.constraints
-import linear_operator
 import numpy as np
 import numpy.typing as npt
+import sklearn.neighbors
 import torch
 
 sys.path.append(os.path.dirname(__file__) + "/..")
@@ -68,9 +68,78 @@ class GP(gpytorch.models.ExactGP):
 		gpytorch.distributions.MultivariateNormal
 			A gaussian process with certain mean and covariance
 		"""
-		Mean: torch.Tensor | torch.distributions.Distribution | linear_operator.LinearOperator = self.mean(x)
+		Mean = self.mean(x)
 		assert isinstance(Mean, torch.Tensor)
 		return gpytorch.distributions.MultivariateNormal(Mean, self.cov(x))
+
+
+class NoConstraint(gpytorch.constraints.Interval):
+	"""
+	No constraint on the parameter, the value could be any float value
+
+	Parameters
+	----------
+	initial_value : torch.Tensor | None, optional
+		Initial value for the parameter, by default None
+
+	Methods
+	-------
+	transform(tensor)
+		To transform the raw value to the actual value
+	inverse_transform(transformed_tensor)
+		To transform the actual value to the raw value
+	"""
+	def __init__(self, initial_value: torch.Tensor | None = None):
+		super().__init__(
+			lower_bound=-math.inf,
+			upper_bound=math.inf,
+			transform=lambda x: x,
+			inv_transform=lambda x: x,
+			initial_value=initial_value,
+		)
+
+	def __repr__(self) -> str:
+		"""
+		The official string representation of an object
+
+		Returns
+		-------
+		str
+			The name of the class with an empty parenthesis
+		"""
+		return __class__.__name__ + "()"
+
+	def transform(self, tensor: torch.Tensor) -> torch.Tensor:
+		"""
+		To transform the raw value to the actual value
+
+		Parameters
+		----------
+		tensor : torch.Tensor
+			The raw value
+
+		Returns
+		-------
+		torch.Tensor
+			The transformed, actual value
+		"""
+		return tensor
+
+	def inverse_transform(self, transformed_tensor: torch.Tensor) -> torch.Tensor:
+		"""
+		To transform the actual value to the raw value
+
+		Parameters
+		----------
+		transformed_tensor : torch.Tensor
+			The transformed, actual value
+
+		Returns
+		-------
+		torch.Tensor
+			The raw value
+		"""
+		return transformed_tensor
 
 
 class SinglePredictor:
@@ -81,6 +150,8 @@ class SinglePredictor:
 	----------
 	kernel : gpytorch.kernels.Kernel
 		The kernel to use
+	num_neighbors : int, optional
+		The number of neighbors (`k`) searched by kNN for local GP, by default `__NUM_NEIGHBOR`
 
 	Attributes
 	----------
@@ -88,13 +159,21 @@ class SinglePredictor:
 		Maximum iteration of optimization
 	__FTOL : float
 		Absolute and relative tolerance of function in optimization
+	__GTOL_SQRT : float
+		Tolerance of gradient norm in optimization
 	__GTOL : float
-		Tolerance of gradient in optimization
-	__NOISE: float
+		Square of `__GTOL_SQRT`
+	__NOISE : float
 		Extra noise term added for numerical stability in matrix inversion
+	__NUM_NEIGHBOR : typing.Literal[32]
+		The default number of neighbors to construct local GP
 
 	Methods
 	-------
+	__preconditioned_ldl_solve(A, B, single_entry)
+		To solve linear system `AX=B` by LDL factorization with pre-conditioned matrix for numerical stability
+	__print_stuff(model, loss, learning_rate, indent, print_grad, hessian, start_str, end_str, flush)
+		To print all stuffs needed
 	__update_weights()
 		To update the weights, :math:`K^{-1}y`
 	get_training_features()
@@ -112,28 +191,153 @@ class SinglePredictor:
 	get_marginal(dimensions)
 		To get the marginal distribution over given dimensions
 	"""
-	__MAX_ITER: typing.Literal[15000] = 15000
+	__MAX_ITER = 15000
 	__FTOL: float = 2.2204460492503131e-09
-	__GTOL: float = 1e-5 ** 2
-	__NOISE: float = 1e-4
-	__slots__: tuple = ("__kernel", "__x_all", "__y_all", "__scale", "model", "__k_inv_y", "__weights_updated")
+	__GTOL_SQRT: float = 1e-5
+	__GTOL: float = __GTOL_SQRT ** 2
+	__NOISE: float = float(gpytorch.settings.min_fixed_noise.value(torch.double) or 1e-8)
+	__NUM_NEIGHBOR = 32
+	__slots__: tuple = ("__kernel", "__x_all", "__y_all", "__scale", "model", "__param_indices", "__k_inv_y", "__weights_updated", "__nn")
 
-	def __init__(self, kernel: gpytorch.kernels.Kernel):
+	@staticmethod
+	def __preconditioned_ldl_solve(A: torch.Tensor, B: torch.Tensor, single_entry: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
+		"""
+		To solve linear system `AX=B` by LDL factorization with pre-conditioned matrix for numerical stability
+
+		Parameters
+		----------
+		A : torch.Tensor, shape of (..., n, n)
+			Tensor consisting of symmetric or Hermitian matrices
+		B : torch.Tensor, shape of (..., n, k) or (..., n)
+			Right-hand side tensor
+		single_entry : bool, optional
+			Whether B has one dimension less than A or not, by default False
+
+		Returns
+		-------
+		tuple[torch.Tensor, torch.Tensor], of shape (..., n, k) or (..., n), and (..., n, n)
+			Solution and the pre-conditioned `A`
+		"""
+		cond_mat: torch.Tensor = torch.diag_embed(1.0 / torch.linalg.norm(A, torch.inf, -1).sqrt()) # Q
+		A_precond: torch.Tensor = cond_mat @ A @ cond_mat # (QAQ)(Q^{-1}x)=Qb -> x = Q @ solve(QAQ, Qb)
+		A_precond = (A_precond + A_precond.mT) / 2.0 # symmetrize
+		ld: torch.Tensor
+		pivot: torch.Tensor
+		ld, pivot, _ = torch.linalg.ldl_factor_ex(A_precond)
+		result: torch.Tensor
+		if single_entry:
+			result = (cond_mat @ torch.linalg.ldl_solve(ld, pivot, cond_mat @ B[..., None]))[..., 0]
+		else:
+			result = cond_mat @ torch.linalg.ldl_solve(ld, pivot, cond_mat @ B)
+		return result, A_precond
+
+	@staticmethod
+	def __print_stuff(
+		model: gpytorch.models.ExactGP,
+		loss: torch.Tensor,
+		learning_rate: float,
+		indent: int = 0,
+		print_grad: bool = False,
+		hessian: torch.Tensor | None = None,
+		start_str: str="",
+		end_str: str="",
+		flush: bool=False
+	) -> None:
+		"""
+		To print all stuffs needed
+
+		Parameters
+		----------
+		model : gpytorch.models.ExactGP
+			Gaussian process model, containing mean and covariances and their parameters
+		loss : torch.Tensor
+			Loss by error function
+		learning_rate : float
+			The learning rate
+		indent : int, optional
+			The number of "\\t" in front of each line, by default 0
+		print_grad : bool, optional
+			Whether to print gradient in the model or not, by default False
+		hessian : torch.Tensor, optional
+			Second order derivatives, only used when `print_grad=True`, by default None
+		start_str : str, optional
+			An extra string added at the front, by default ""
+		end_str : str, optional
+			An extra string added at the end, by default ""
+		flush : bool, optional
+			Whether to forcibly flush the stream, by default False
+		"""
+		def print_model(model_print_grad: bool = False) -> None:
+			"""
+			To print the parameters of the model
+
+			Parameters
+			----------
+			model_print_grad : bool, optional
+				Whether to print the gradient or not, by default False
+			"""
+			param_name_fmt_str: str = "{}Parameter name: {{}}".format("\t" * indent)
+			param_name: str
+			param: torch.nn.Parameter
+			constraint: gpytorch.constraints.Interval | None
+			for param_name, param, constraint in model.named_parameters_and_constraints():
+				if model_print_grad and param.grad is not None:
+					print(
+						param_name_fmt_str.format(param_name),
+						utility.format_array("value", param),
+						utility.format_array("grad", param.grad)
+					)
+				else:
+					print(
+						param_name_fmt_str.format("".join(param_name.split("raw_"))),
+						utility.format_array("value", constraint.transform(param) if isinstance(constraint, gpytorch.constraints.Interval) else param)
+					)
+
+		print("{}{}loss = {:.15e}, lr = {}".format("\t" * indent, start_str + " " if start_str != "" else "", loss.item(), learning_rate))
+		print_model()
+		if print_grad:
+			print_model(True)
+			if hessian is not None:
+				print("\t" * indent, utility.format_array("hessian", hessian.reshape(-1)), sep="")
+				print("{}Cond(hessian): {}".format("\t" * indent, torch.linalg.cond(hessian).item()))
+		print(("\t" * indent + end_str + "\n") if end_str != "" else "", end="", flush=flush)
+
+	def __init__(
+		self,
+		kernel: gpytorch.kernels.Kernel,
+		initial_values: list[torch.Tensor] = [],
+		num_neighbors: int = __NUM_NEIGHBOR
+	):
 		self.__kernel: gpytorch.kernels.Kernel = copy.deepcopy(kernel)
 		likelihood: gpytorch.likelihoods.FixedNoiseGaussianLikelihood = gpytorch.likelihoods.FixedNoiseGaussianLikelihood(torch.full((2,), __class__.__NOISE))
 		self.__x_all: torch.Tensor = torch.Tensor()
 		self.__y_all: torch.Tensor = torch.Tensor()
 		self.__scale: float = 1.0
 		self.model: GP = GP(torch.zeros((2, pes.PHASEDIM)), torch.zeros((2,)), likelihood, self.__kernel)
+		self.__param_indices: list[int] = [0]
+		with torch.no_grad():
+			for iParam, (name, param, constraint) in enumerate(self.model.named_parameters_and_constraints()):
+				# set parameter initial value
+				try:
+					param[...] = initial_values[iParam].expand_as(param).clone()
+				except (IndexError, RuntimeError): # unable to expand, or do not have the parameter
+					if isinstance(constraint, gpytorch.constraints.Interval):
+						if constraint.initial_value is not None:
+							param[...] = constraint.initial_value.expand_as(param).clone()
+					else:
+						param.fill_(1.0)
+				param.detach_().requires_grad = True
+				# get indices for each parameter
+				self.__param_indices.append(self.__param_indices[-1] + param.numel())
+				# set constraint
+				name_levels: list[str] = name.split(".")
+				attr = self.model
+				for i in range(len(name_levels) - 1):
+					attr = getattr(attr, name_levels[i])
+				attr.register_constraint(name_levels[-1], NoConstraint())
 		self.__k_inv_y: torch.Tensor = torch.Tensor()
 		self.__weights_updated: bool = False
-
-	def __update_weights(self) -> None:
-		"""
-		To update the weights, :math:`K^{-1}y`
-		"""
-		self.__k_inv_y = linear_operator.utils.stable_pinverse(self.model.cov(self.__x_all, self.get_training_features()).to_dense()) @ self.__y_all
-		self.__weights_updated = True
+		self.__nn: sklearn.neighbors.NearestNeighbors = sklearn.neighbors.NearestNeighbors(n_neighbors=num_neighbors, n_jobs=-1)
 
 	def get_training_features(self) -> torch.Tensor:
 		"""
@@ -146,6 +350,13 @@ class SinglePredictor:
 		"""
 		assert self.model.train_inputs is not None
 		return self.model.train_inputs[0].detach()
+
+	def __update_weights(self) -> None:
+		"""
+		To update the weights, :math:`K^{-1}y`
+		"""
+		self.__k_inv_y = torch.linalg.lstsq(self.model.cov(self.__x_all, self.get_training_features()).to_dense(), self.__y_all).solution
+		self.__weights_updated = True
 
 	def get_weights(self) -> torch.Tensor:
 		"""
@@ -160,7 +371,12 @@ class SinglePredictor:
 			self.__update_weights()
 		return self.__k_inv_y
 
-	def predict(self, x_test: torch.Tensor) -> torch.Tensor:
+	def predict(
+		self,
+		x_test: torch.Tensor,
+		use_local_GP: bool = True,
+		print_log: bool = DEBUG_MODE
+	) -> torch.Tensor:
 		"""
 		To predict the average estimation
 
@@ -168,6 +384,10 @@ class SinglePredictor:
 		----------
 		x_test : torch.Tensor, shape of (N, PHASEDIM)
 			Validation/Test inputs
+		use_local_GP : bool, optional
+			Whether use local full GP on selected points or not, by default True
+		print_log : bool, optional
+			Whether to print the log to console, by default `DEBUG_MODE`
 
 		Returns
 		-------
@@ -178,13 +398,36 @@ class SinglePredictor:
 		-----
 		Instance of prediction of projected process (PP)
 		"""
-		return (self.model.cov(x_test, self.get_training_features()) @ self.get_weights()).to_dense()
+		result: torch.Tensor = (self.model.cov(x_test, self.get_training_features()).to_dense() @ self.get_weights()).clone()
+		if use_local_GP:
+			neighbor_ind: torch.Tensor = torch.from_numpy(self.__nn.kneighbors(x_test.detach().numpy().reshape(-1, pes.PHASEDIM), return_distance=False)).reshape(x_test.shape[:-1] + (__class__.__NUM_NEIGHBOR,)) # ... * DIM -> ... * NEIGHBOR
+			neighbors: torch.Tensor = self.__x_all[neighbor_ind] # x_all must be M * DIM, this gives ... * NEIGHBOR * DIM
+			need_local_gp: torch.Tensor = torch.all(torch.abs(x_test - torch.mean(neighbors, -2)) < torch.std(neighbors, -2), -1).reshape(x_test.shape[:-1]) # ...
+			num_need_local_gp = torch.count_nonzero(need_local_gp).item()
+			if print_log:
+				print("{} inputs, where {} need local GP.".format(x_test.numel() // pes.PHASEDIM, num_need_local_gp))
+			if num_need_local_gp > 0:
+				neighbor_used: torch.Tensor = neighbors[need_local_gp] # NEED * NEIGHBOR * DIM
+				result[need_local_gp] = (self.model.cov(x_test[need_local_gp, None], neighbor_used).to_dense()\
+				@ __class__.__preconditioned_ldl_solve(self.model.cov(neighbor_used).to_dense(), self.__y_all[neighbor_ind[need_local_gp], None])[0]).reshape(-1)
+				"""
+					NEED * 1 * DIM @ NEED * NEIGHBOR * DIM -> NEED * 1 * NEIGHBOR
+					NEED * NEIGHBOR * DIM -> NEED * NEIGHBOR * NEIGHBOR
+					[... * NEIGHBOR[...], 1] -> NEED * NEIGHBOR * 1
+					-> NEED * 1 * 1 -> NEED
+				"""
+		return result
 
 	def error(self, use_weight: bool = True) -> torch.Tensor:
 		"""
 		Error function of projected process (PP)
 
 		This function gives the sum of squared error
+
+		Parameters
+		----------
+		use_weight : bool, optional
+			Whether to use precomputed :math:`K^{-1}y` (gradient unavailable) or not, by default True
 
 		Returns
 		-------
@@ -195,83 +438,19 @@ class SinglePredictor:
 			return torch.sum((self.__y_all - self.predict(self.__x_all)) ** 2) * (self.__scale ** 2)
 		else:
 			kmn: torch.Tensor = self.model.cov(self.__x_all, self.get_training_features()).to_dense()
-			return torch.sum((self.__y_all - kmn @ (linear_operator.utils.stable_pinverse(kmn) @ self.__y_all)) ** 2) * (self.__scale ** 2)
+			return torch.sum((self.__y_all - kmn @ torch.linalg.lstsq(kmn, self.__y_all).solution) ** 2) * (self.__scale ** 2)
 
-	def train(self) -> None:
+	def train(self, print_log: bool = DEBUG_MODE) -> None:
 		"""
 		To train the parameters
+
+		Parameters
+		----------
+		print_log : bool, optional
+			Whether to print the log to console, by default `DEBUG_MODE`
 		"""
-		def print_stuff(
-			loss: torch.Tensor,
-			learning_rate: float,
-			model: gpytorch.models.ExactGP,
-			indent: int = 0,
-			print_grad: bool = False,
-			hessian: torch.Tensor | None = None,
-			start_str: str="",
-			end_str: str="",
-			flush: bool=False
-		) -> None:
-			"""
-			To print all stuffs needed
-
-			Parameters
-			----------
-			loss : torch.Tensor
-				Loss by error function
-			learning_rate : float
-				The learning rate
-			model : gpytorch.models.ExactGP
-				Gaussian process model, containing mean and covariances and their parameters
-			indent : int, optional
-				The number of "\\t" in front of each line, by default 0
-			print_grad : bool, optional
-				Whether to print gradient in the model or not, by default False
-			hessian : torch.Tensor, optional
-				Second order derivatives, only used when `print_grad=True`, by default None
-			start_str : str, optional
-				An extra string added at the front, by default ""
-			end_str : str, optional
-				An extra string added at the end, by default ""
-			flush : bool, optional
-				Whether to forcibly flush the stream, by default False
-			"""
-			def print_model(model_print_grad: bool = False) -> None:
-				"""
-				To print the parameters of the model
-
-				Parameters
-				----------
-				model_print_grad : bool, optional
-					Whether to print the gradient or not, by default False
-				"""
-				param_name_fmt_str: str = "{}Parameter name: {{}}".format("\t" * indent)
-				param_name: str
-				param: torch.nn.Parameter
-				constraint: gpytorch.constraints.Interval | None
-				for param_name, param, constraint in model.named_parameters_and_constraints():
-					if model_print_grad and param.grad is not None:
-						print(
-							param_name_fmt_str.format(param_name),
-							utility.format_array("value", param),
-							utility.format_array("grad", param.grad)
-						)
-					else:
-						print(
-							param_name_fmt_str.format("".join(param_name.split("raw_"))),
-							utility.format_array("value", constraint.transform(param) if isinstance(constraint, gpytorch.constraints.Interval) else param)
-						)
-
-			print("{}{}loss = {:.15e}, lr = {}".format("\t" * indent, start_str + " " if start_str != "" else "", loss.item(), learning_rate))
-			print_model()
-			if print_grad:
-				print_model(True)
-				if hessian is not None:
-					print("\t" * indent, utility.format_array("hessian", hessian.reshape(-1)), sep="")
-					print("{}Cond(hessian): {}".format("\t" * indent, torch.linalg.cond(hessian).item()))
-			print("\t" * indent + end_str + "\n" if end_str != "" else "", end="", flush=flush)
-
 		def optimize_with_learning_rate(
+			model: gpytorch.models.ExactGP,
 			combined_parameters: torch.Tensor,
 			change: torch.Tensor,
 			param_indices: list[int],
@@ -279,47 +458,105 @@ class SinglePredictor:
 			method_name: str,
 			initial_learning_rate: float = 1.0
 		) -> tuple[torch.Tensor, float]:
-			learning_rate: float = initial_learning_rate
-			with torch.no_grad():
-				for iParam, param in enumerate(self.model.parameters()):
-					param[...] = (combined_parameters - learning_rate * change)[param_indices[iParam]:param_indices[iParam + 1]].reshape_as(param).detach()
-			loss: torch.Tensor = self.error(False)
-			while loss.item() >= last_loss:
-				learning_rate /= 2.0
+			"""
+			To change the parameter with adjustable learning rate
+
+			Parameters
+			----------
+			model : gpytorch.models.ExactGP
+				Gaussian process model, containing mean and covariances and their parameters
+			combined_parameters : torch.Tensor, shape of (N,)
+				Initial values of parameters
+			change : torch.Tensor, shape of (N,)
+				The changing quantity of the parameters, e.g., combined gradient of parameters
+			param_indices : list[int], len of n+1
+				The starting index of each parameters, staring from 0 and end at N+1
+			last_loss : float
+				Loss from last iteration, as a comparison
+			method_name : str
+				The name of the method, only used when there is no stepping forward
+			initial_learning_rate : float, optional
+				Trial learning rate at the beginning, by default 1.0
+
+			Returns
+			-------
+			tuple[torch.Tensor, float]
+				Final loss and learning rate
+			"""
+			def change_param(target: torch.Tensor) -> None:
+				"""
+				To change the parameter of the model to `target`
+
+				Parameters
+				----------
+				target : torch.Tensor
+					Combined values that the parameters should be
+				"""
 				with torch.no_grad():
-					for iParam, param in enumerate(self.model.parameters()):
-						param[...] = (combined_parameters - learning_rate * change)[param_indices[iParam]:param_indices[iParam + 1]].reshape_as(param).detach()
-				loss = self.error(False)
-				if DEBUG_MODE:
-					print_stuff(
-						loss,
-						learning_rate,
-						self.model,
-						2,
-						start_str="last = {:.15e}, ".format(last_value),
-						flush=True
-					)
-				if all((param.reshape(-1) == param_combined[param_indices[iParam]:param_indices[iParam + 1]]).all().item() for iParam, param in enumerate(self.model.parameters())):
-					# based on current learning rate, all parameters being the same
-					print("No stepping Forward for {}.".format(method_name))
+					for iParam, param in enumerate(model.parameters()):
+						param[...] = target[param_indices[iParam]:param_indices[iParam + 1]].reshape_as(param).detach()
+
+			def return_back() -> tuple[torch.Tensor, float]:
+				"""
+				To turn back to the status when the function is called
+
+				Returns
+				-------
+				tuple[torch.Tensor, float]
+					`last_loss` in `torch.Tensor` form, and `initial_learning_rate`
+				"""
+				if print_log:
+					print("\tNo stepping Forward for {}.".format(method_name))
+				with torch.no_grad():
+					for iParam, param in enumerate(model.parameters()):
+						param[...] = combined_parameters[param_indices[iParam]:param_indices[iParam + 1]].reshape_as(param).detach()
+				return torch.tensor(last_loss), initial_learning_rate
+
+			learning_rate: float = initial_learning_rate
+			change_param(combined_parameters - learning_rate * change)
+			learning_rate_threshold: float = sys.float_info.epsilon * (combined_parameters.norm() / change.norm()).item() # lr * |change| should > double precision * |param|
+			loss: torch.Tensor
+			while learning_rate >= learning_rate_threshold:
+				try:
+					loss = self.error(False)
 					break
+				except RuntimeError: # NANs
+					learning_rate /= 2.0
+			if learning_rate < learning_rate_threshold:
+				# based on current learning rate, all parameters have changes smaller than double precision
+				return return_back()
+			if print_log:
+				__class__.__print_stuff(model, loss, learning_rate, 2, start_str="last = {:.15e},".format(last_loss), flush=True)
+			while loss.isnan().item() or loss.item() >= last_loss:
+				learning_rate /= 2.0
+				change_param(combined_parameters - learning_rate * change)
+				try:
+					loss = self.error(False)
+				except RuntimeError: # NANs
+					return return_back()
+				if print_log:
+					__class__.__print_stuff(model, loss, learning_rate, 2, start_str="last = {:.15e},".format(last_value), flush=True)
+				if learning_rate < learning_rate_threshold:
+					# based on current learning rate, all parameters being the same
+					if loss.item() >= last_loss:
+						return return_back()
+					else:
+						if print_log:
+							print("\tNo stepping Forward for {}.".format(method_name))
+						break
 			return loss, learning_rate
 
 		self.__weights_updated = False
-		assert isinstance(self.model.train_targets, torch.Tensor)
 		# train model
-		self.model.likelihood = gpytorch.likelihoods.FixedNoiseGaussianLikelihood(torch.full((self.get_training_features().shape[0],), __class__.__NOISE))
+		self.model.likelihood = gpytorch.likelihoods.FixedNoiseGaussianLikelihood(torch.full(self.get_training_features().shape[:-1], __class__.__NOISE))
 		self.model.train()
 		self.model.likelihood.train()
-		param_indices: list[int] = [0]
-		for param in self.model.parameters():
-			param.requires_grad = True
-			param_indices.append(param_indices[-1] + param.numel())
 		finish_early: bool = False
 		loss: torch.Tensor = self.error(False)
 		last_value: float = torch.inf
-		learning_rate: float = 1.0
-		hessian: torch.Tensor = torch.zeros(param_indices[-1], param_indices[-1], dtype=torch.double)
+		learning_rate: float = -1.0
+		hessian: torch.Tensor = torch.eye(self.__param_indices[-1], dtype=torch.double)
+		hessian_precond: torch.Tensor
 		num_iter: int = 0
 		for i in range(1, __class__.__MAX_ITER + 1):
 			# calculate gradient and hessian
@@ -327,92 +564,90 @@ class SinglePredictor:
 				param.grad = torch.autograd.grad(loss, param, None, True, True, True, True, False, True)[0] # same shape of param
 				for iGrad, grad_elm in enumerate(param.grad.reshape(-1)):
 					for jParam, param_for_grad in enumerate(self.model.parameters()):
-						hessian[param_indices[iParam] + iGrad, param_indices[jParam]:param_indices[jParam + 1]] = torch.autograd.grad(grad_elm, param_for_grad, None, True, False, True, True, False, True)[0]
+						hessian[self.__param_indices[iParam] + iGrad, self.__param_indices[jParam]:self.__param_indices[jParam + 1]] = torch.autograd.grad(grad_elm, param_for_grad, None, True, False, True, True, False, True)[0]
 			hessian = (hessian + hessian.T) / 2.0 # symmetrize
-			cond_mat: torch.Tensor = (1.0 / torch.norm(hessian, torch.inf, 0).sqrt()).diag() # Q
-			hessian_precond: torch.Tensor = cond_mat @ hessian @ cond_mat # (QAQ)(Q^{-1}x)=Qb -> x = Q @ solve(QAQ, Qb)
-			hessian_precond = (hessian_precond + hessian_precond.T) / 2.0 # symmetrize
-			# log
-			if DEBUG_MODE:
-				print_stuff(
-					loss,
-					learning_rate,
-					self.model,
-					1,
-					True,
-					hessian,
-					"Iter {} - last = {:.15e}, ".format(i, last_value),
-					"Cond(preconditioned hessian) = {}".format(torch.linalg.cond(hessian_precond).item()),
-					True
-				)
-			else:
-				if i % (__class__.__MAX_ITER // 100) == 0:
-					print_stuff(
-						loss,
-						learning_rate,
-						self.model,
-						1,
-						True,
-						hessian,
-						"Iter {} - last = {:.15e}, ".format(i, last_value),
-						"Cond(preconditioned hessian) = {}".format(torch.linalg.cond(hessian_precond).item())
-					)
+			grad_combined: torch.Tensor = torch.cat([(param.grad if param.grad is not None else torch.zeros_like(param)).reshape(-1) for param in self.model.parameters()])
+			param_combined: torch.Tensor = torch.cat([param.reshape(-1) for param in self.model.parameters()])
+			if learning_rate == -1.0:
+				learning_rate = min((param_combined.norm() / grad_combined.norm()).item(), 1.0)
 			# stopping criteria
-			grad_sqnm: float = sum(torch.sum(param.grad ** 2).item() if param.grad is not None else 0.0 for param in self.model.parameters())
+			grad_sqnm: float = torch.sum(grad_combined ** 2).item()
 			if grad_sqnm < __class__.__GTOL:
 				finish_early = True
 				num_iter = i
-				print("Convergence: |Gradient| = {} <= GTOL = {}".format(math.sqrt(grad_sqnm), math.sqrt(__class__.__GTOL)))
+				print("Convergence: |Gradient| = {} <= GTOL = {}".format(math.sqrt(grad_sqnm), __class__.__GTOL_SQRT))
 				break
 			if abs(last_value - loss.item()) / max(abs(last_value), abs(loss.item()), 1.0) < __class__.__FTOL:
 				finish_early = True
 				num_iter = i
 				print("Convergence: |f_i - f_{{i+1}}| = {} / {} <= FTOL = {}".format(abs(last_value - loss.item()), max(abs(last_value), abs(loss.item()), 1.0), __class__.__FTOL))
 				break
-			# change parameter by Newton
+			# change parameter
 			last_value = loss.item()
-			ld: torch.Tensor
-			pivot: torch.Tensor
-			ld, pivot, _ = torch.linalg.ldl_factor_ex(hessian_precond)
-			grad_combined: torch.Tensor = torch.cat([(param.grad if param.grad is not None else torch.zeros_like(param)).reshape(-1) for param in self.model.parameters()])
-			change: torch.Tensor = (cond_mat @ torch.linalg.ldl_solve(ld, pivot, cond_mat @ grad_combined.reshape(-1, 1))).reshape(-1)
-			param_combined: torch.Tensor = torch.cat([param.reshape(-1) for param in self.model.parameters()])
+			newton_change: torch.Tensor
+			newton_change, hessian_precond = __class__.__preconditioned_ldl_solve(hessian, grad_combined, True)
 			if learning_rate < 1.0:
 				learning_rate *= 2.0
-			loss, learning_rate = optimize_with_learning_rate(
-				param_combined,
-				change,
-				param_indices,
-				last_value,
-				"Newton Method",
-				learning_rate
-			)
-			if loss.item() >= last_value:
-				loss, learning_rate = optimize_with_learning_rate(
-					param_combined,
-					grad_combined,
-					param_indices,
-					last_value,
-					"Gradient Descent"
+			# log
+			if print_log:
+				__class__.__print_stuff(
+					self.model,
+					loss,
+					learning_rate,
+					1,
+					True,
+					hessian,
+					"Iter {} - last = {:.15e},".format(i, last_value),
+					"Cond(preconditioned hessian) = {}".format(torch.linalg.cond(hessian_precond).item()),
+					True
 				)
-			if loss.item() >= last_value:
+			else:
+				if i % (__class__.__MAX_ITER // 100) == 0:
+					__class__.__print_stuff(
+						self.model,
+						loss,
+						learning_rate,
+						1,
+						True,
+						hessian,
+						"Iter {} - last = {:.15e},".format(i, last_value),
+						"Cond(preconditioned hessian) = {}".format(torch.linalg.cond(hessian_precond).item())
+					)
+			old_learning_rate: float = learning_rate
+			for change, method in zip([newton_change, grad_combined], ["Newton Method", "Gradient Descent"]):
+				loss, learning_rate = optimize_with_learning_rate(
+					self.model,
+					param_combined,
+					change,
+					self.__param_indices,
+					last_value,
+					method,
+					old_learning_rate
+				)
+				if loss.item() < last_value:
+					break
+			if loss.item() >= last_value: # tried all method and no one can step forward
 				finish_early = True
 				num_iter = i
+				print("Stop: No stepping Forward")
 				break
 		if not finish_early:
 			print("Stop: Total No. iterations reached limit.")
 			num_iter = __class__.__MAX_ITER
-		print_stuff(
+		__class__.__print_stuff(
+			self.model,
 			loss,
 			learning_rate,
-			self.model,
 			0,
 			True,
 			hessian,
-			"Iter {} - last = {:.15e}, ".format(num_iter, last_value),
-			"Cond(preconditioned hessian) = {}".format(torch.linalg.cond(hessian_precond).item()),
-			DEBUG_MODE
+			"Iter {} - last = {:.15e},".format(num_iter, last_value),
+			"" if "hessian_precond" not in locals() else "Cond(preconditioned hessian) = {}".format(torch.linalg.cond(hessian_precond).item()),
+			print_log
 		)
+		# turn to predict mode
+		self.model.eval()
+		self.model.likelihood.eval()
 
 	def update(
 		self,
@@ -436,10 +671,11 @@ class SinglePredictor:
 			The number of points located at the front of all points that is used as the subset
 		"""
 		assert x_all.shape[-1] == pes.PHASEDIM and x_all.numel() == y_all.numel() * pes.PHASEDIM
-		self.__x_all = copy.deepcopy(x_all.reshape(-1, pes.PHASEDIM))
-		self.__y_all = copy.deepcopy(y_all.reshape(-1))
+		self.__x_all = x_all.reshape(-1, pes.PHASEDIM).clone().detach()
+		self.__y_all = y_all.reshape(-1).clone().detach()
 		self.__scale = scale
 		self.model.set_train_data(self.__x_all[:num_points].detach(), self.__y_all[:num_points].detach(), False)
+		self.__nn.fit(self.__x_all[:num_points].detach().numpy())
 		self.__weights_updated = False
 
 	def get_marginal(self, dimensions: list[int], x_test: torch.Tensor) -> torch.Tensor:
@@ -458,12 +694,9 @@ class SinglePredictor:
 		torch.Tensor, shape of (N,)
 			Corresponding validation/test targets based on noise-free SR/PP mean.
 		"""
-		if not self.__weights_updated:
-			self.__update_weights()
-		marginal_kernel: gpytorch.kernels.Kernel = gpytorch.kernels.RBFKernel(len(dimensions))
-		marginal_kernel.lengthscale = self.model.cov.lengthscale.reshape(1, pes.PHASEDIM)[:, dimensions]
+		marginal_kernel: gpytorch.kernels.Kernel = gpytorch.kernels.RBFKernel(len(dimensions), lengthscale_constraint=NoConstraint(self.model.cov.lengthscale.reshape(1, pes.PHASEDIM)[:, dimensions]))
 		prefactor: float = np.sqrt((2.0 * torch.pi) ** (pes.PHASEDIM - len(dimensions))) * self.model.cov.lengthscale[:, [i for i in range(pes.PHASEDIM) if i not in dimensions]].prod().item()
-		return prefactor * (marginal_kernel(x_test, self.get_training_features()[:, dimensions]) @ self.__k_inv_y).to_dense()
+		return prefactor * marginal_kernel(x_test, self.get_training_features()[:, dimensions]).to_dense() @ self.get_weights()
 
 
 class GPRPredictors:
@@ -512,14 +745,10 @@ class GPRPredictors:
 	__slots__: tuple = ("__predictors", "__scale")
 
 	def __init__(self, parameter_initial_values: npt.NDArray[np.double] | None = None):
-		kernel: gpytorch.kernels.Kernel
-		if parameter_initial_values is not None:
-			assert parameter_initial_values.size == pes.PHASEDIM
-			kernel = gpytorch.kernels.RBFKernel(pes.PHASEDIM)
-			kernel.lengthscale = torch.from_numpy(parameter_initial_values)
-		else:
-			kernel = gpytorch.kernels.RBFKernel(pes.PHASEDIM)
-		self.__predictors: list[SinglePredictor] = [SinglePredictor(kernel) for _ in range(pes.NUM_ELM)]
+		initial_value: torch.Tensor | None = None
+		if parameter_initial_values is not None and parameter_initial_values.size == pes.PHASEDIM:
+			initial_value = torch.from_numpy(parameter_initial_values.reshape(-1))
+		self.__predictors: list[SinglePredictor] = [SinglePredictor(gpytorch.kernels.RBFKernel(pes.PHASEDIM, lengthscale_constraint=NoConstraint(initial_value))) for _ in range(pes.NUM_ELM)]
 		self.__scale: npt.NDArray[np.double] = np.ones(pes.NUM_ELM, np.double)
 
 	def __getitem__(self, ElementIndex: int) -> SinglePredictor:
@@ -574,16 +803,22 @@ class GPRPredictors:
 				num_points[TrilIndex]
 			)
 
-	def train(self) -> None:
+	def train(self, print_log: bool = DEBUG_MODE) -> None:
 		"""
 		To train each predictor
+
+		Parameters
+		----------
+		print_log : bool, optional
+			Whether to print the log to console, by default `DEBUG_MODE`
 		"""
 		for iElement in range(pes.NUM_ELM):
 			if __class__.__check_predictor(self.__predictors[iElement]):
-				print("Training " + utility.get_RI_label(iElement))
-				self.__predictors[iElement].train()
+				if print_log:
+					print("Training " + utility.get_RI_label(iElement))
+				self.__predictors[iElement].train(print_log)
 
-	def predict(self, x_input: npt.NDArray[np.double], ElementIndex: int) -> npt.NDArray[np.cdouble]:
+	def predict(self, x_input: npt.NDArray[np.double], ElementIndex: int, use_local_gp: bool = True) -> npt.NDArray[np.cdouble]:
 		"""
 		To predict test targets based on input and corresponding density matrix element
 
@@ -593,6 +828,8 @@ class GPRPredictors:
 			Test inputs
 		ElementIndex : int
 			Index of the element
+		use_local_GP : bool, optional
+			Whether use local full GP on selected points or not, by default True
 
 		Returns
 		-------
@@ -616,7 +853,7 @@ class GPRPredictors:
 				Test targets by the predictor
 			"""
 			if __class__.__check_predictor(pred):
-				return pred.predict(x_test).detach().numpy()
+				return pred.predict(x_test, use_local_gp).detach().numpy()
 			else:
 				return np.zeros(x_test.shape[0], np.double)
 

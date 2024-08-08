@@ -365,6 +365,7 @@ class AnalyticalAverager(Averager):
 				ElementIndex: int = iPES * pes.NUM_PES + jPES
 				pred: gp.SinglePredictor = self.__predictors[ElementIndex]
 				model: gp.GP = copy.deepcopy(pred.model)
-				model.cov.lengthscale *= np.sqrt(2.0)
-				result[iPES, jPES] = (np.pi ** pes.DIM) * pred.model.cov.lengthscale.prod().item() * (pred.get_weights() @ model.cov(pred.get_training_features(), pred.get_training_features()) @ pred.get_weights()).item()
+				with torch.no_grad():
+					model.cov.lengthscale[...] *= np.sqrt(2.0)
+				result[iPES, jPES] = (np.pi ** pes.DIM) * pred.model.cov.lengthscale.prod().item() * (pred.get_weights() @ model.cov(pred.get_training_features()).to_dense() @ pred.get_weights()).item()
 		return PURITY_FACTOR * (result + result.T - np.diag(np.diag(result)))

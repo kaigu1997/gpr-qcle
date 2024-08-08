@@ -7,6 +7,7 @@ import argparse
 import collections.abc
 import datetime
 import functools
+import math
 import os
 import subprocess
 import sys
@@ -176,9 +177,9 @@ def plot_average() -> None:
 		+ [("Cov(" + utility.dimension_name(jDim) + ", " + utility.dimension_name(iDim) + ")") if iDim != jDim else ("Var[" + utility.dimension_name(iDim) + "]") for iDim in range(pes.PHASEDIM) for jDim in range(iDim + 1)]\
 		+ ["Energy", "Purity"] # moments of 0th, 1st and 2nd order, and other (energy and purity)
 	NUM_TITLE: int = len(plot_titles)
-	fig: matplotlib.figure.Figure
-	axs: np.ndarray[collections.abc.Sequence[collections.abc.Sequence[matplotlib.axes.Axes]], np.dtype[np.object_]]
-	fig, axs = plt.subplots(NUM_AVE_TYPES * 2, NUM_TITLE, figsize=(FIGSIZE[0] * NUM_TITLE, FIGSIZE[1] * NUM_AVE_TYPES * 2)) # population, <x> and <p>, energy, purity
+	fig: matplotlib.figure.Figure = plt.figure(figsize=(FIGSIZE[0] * NUM_TITLE, FIGSIZE[1] * NUM_AVE_TYPES * 2))
+	axs = fig.subplots(NUM_AVE_TYPES * 2, NUM_TITLE) # population, <x> and <p>, energy, purity
+	assert isinstance(axs, np.ndarray)
 	averages: npt.NDArray[np.double] = np.loadtxt(AVERAGE_FILENAME + DATA_EXTENSION)
 	ticks: npt.NDArray[np.double] = averages[:, 0]
 	averages = averages[:, 1:].reshape(ticks.size, NUM_AVE_TYPES, (averages.shape[1] - 1) // NUM_AVE_TYPES)
@@ -227,9 +228,9 @@ def plot_error(output_interval: float) -> None:
 	output_interval : float
 		Interval between outputs, in unit of a.u.
 	"""
-	fig: matplotlib.figure.Figure
-	axs: np.ndarray[collections.abc.Sequence[matplotlib.axes.Axes], np.dtype[np.object_]]
-	fig, axs = plt.subplots(1, 3, figsize=(FIGSIZE[0] * 3, FIGSIZE[1]))
+	fig: matplotlib.figure.Figure = plt.figure(figsize=(FIGSIZE[0] * 3, FIGSIZE[1]))
+	axs = fig.subplots(1, 3)
+	assert isinstance(axs, np.ndarray)
 	error: npt.NDArray[np.double] = np.loadtxt(ERROR_FILENAME + DATA_EXTENSION).reshape(-1, 3, pes.NUM_ELM)
 	ticks: npt.NDArray[np.double] = np.arange(error.shape[0]) * output_interval
 	error_titles: list[str] = ["Original", "Rescaled", "Evolving"]
@@ -254,9 +255,9 @@ def plot_parameters(ticks: npt.NDArray[np.double]) -> None:
 	ticks : npt.NDArray[np.double]
 		The time since start for each output, in unit of a.u.
 	"""
-	fig: matplotlib.figure.Figure
-	axs: np.ndarray[collections.abc.Sequence[matplotlib.axes.Axes], np.dtype[np.object_]]
-	fig, axs = plt.subplots(1, pes.PHASEDIM, figsize=(FIGSIZE[0] * pes.PHASEDIM, FIGSIZE[1]))
+	fig: matplotlib.figure.Figure = plt.figure(figsize=(FIGSIZE[0] * pes.PHASEDIM, FIGSIZE[1]))
+	axs = fig.subplots(1, pes.PHASEDIM)
+	assert isinstance(axs, np.ndarray)
 	parameters: npt.NDArray[np.double] = np.loadtxt(PARAMETER_FILENAME + DATA_EXTENSION).reshape(-1, pes.NUM_ELM, pes.PHASEDIM)[:-1]
 	assert ticks.size == parameters.shape[0]
 	parameter_names: list[str] = [utility.dimension_name(iDim) for iDim in range(pes.PHASEDIM)]
@@ -283,9 +284,9 @@ def plot_loss_and_rescale_factors(ticks: npt.NDArray[np.double]) -> None:
 	"""
 	loss_scale_titles: list[str] = ["Loss on Sample Points", "Rescale Factor"]
 	loss_scale_ylabels: list[str] = ["Loss", "Rescale Factor"]
-	fig: matplotlib.figure.Figure
-	axs: np.ndarray[collections.abc.Sequence[matplotlib.axes.Axes], np.dtype[np.object_]]
-	fig, axs = plt.subplots(1, 2, figsize=(FIGSIZE[0] * 2, FIGSIZE[1]))
+	fig: matplotlib.figure.Figure = plt.figure(figsize=(FIGSIZE[0] * 2, FIGSIZE[1]))
+	axs = fig.subplots(1, 2)
+	assert isinstance(axs, np.ndarray)
 	loss_scale: npt.NDArray[np.double] = np.concatenate(
 		(
 			np.loadtxt(LOSS_FILENAME + DATA_EXTENSION).reshape(-1, pes.NUM_ELM, 1),
@@ -304,6 +305,218 @@ def plot_loss_and_rescale_factors(ticks: npt.NDArray[np.double]) -> None:
 		ax.legend()
 	fig.savefig(LOSS_FILENAME + "-" + SCALE_FILENAME + FIGURE_EXTENSION)
 	plt.close(fig)
+
+
+class PNLogNorm(matplotlib.colors.Normalize):
+	"""
+	Log scale for positive/negative values, e.g. (-1, -0.1, -0.01, 0, 0.01, 0.1, 1.0)
+
+	Parameters
+	----------
+	abs_min : float, optional
+		The absolute value minimum of the given dataset, by default sys.float_info.min
+	abs_max : float, optional
+		The absolute value maximum of the given dataset, by default sys.float_info.max
+	clip : bool, optional
+		Determines the behavior for mapping values outside the range, by default False
+
+	Methods
+	-------
+	inverse(value)
+		To map a value generally in [0, 1] back to [`-abs_max`, `abs_max`]
+	"""
+	__slots__ = ("__abs_min", "__abs_max", "__log2_abs_min", "__log2_abs_max", "__log2_diff")
+
+	def __init__(self, abs_min: float = sys.float_info.min, abs_max: float = sys.float_info.max, clip: bool = False):
+		assert 0 < abs_min < abs_max
+		super().__init__(-abs_max, abs_max, clip)
+		self.__abs_min: float = abs_min
+		self.__abs_max: float = abs_max
+		self.__log2_abs_min: float = math.log2(abs_min)
+		self.__log2_abs_max: float = math.log2(abs_max)
+		self.__log2_diff: float = self.__log2_abs_max - self.__log2_abs_min
+
+	@property
+	def abs_min(self):
+		return self.__abs_min
+
+	@property
+	def abs_max(self):
+		return self.__abs_max
+
+	def __repr__(self) -> str:
+		"""
+		The official string representation of an object
+
+		Returns
+		-------
+		str
+			The name of the class with min and max
+		"""
+		return __class__.__name__ + "({}, {})".format(self.__abs_min, self.__abs_max)
+
+	def __call__(self, value: typing.Any, clip: bool | None = None) -> float | npt.NDArray[np.double]:
+		"""
+		Mapping the given values within [`-abs_max`, `abs_max`] to [0, 1]
+
+		Values outside may map outside of [0, 1] based on `clip` parameter
+
+		Parameters
+		----------
+		value : typing.Any
+			Any value that could be regarded as `np.double` or `np.ndarray` of `np.double`
+		clip : bool | None, optional
+			Determines the behavior for mapping values outside the range, overwrite object behavior, by default None
+
+		Returns
+		-------
+		float | npt.NDArray[np.double]
+			Mapping result corresponding to value
+		"""
+		def process_single_value(value: float, clip: bool) -> float:
+			"""
+			To map a single value.
+
+			`value` > `abs_min` will be mapped to (0.5, `inf`) or (0.5, 1] if clipped
+
+			`value` < `-abs_min` will be mapped to (`-inf`, 0.5) or [0, 0.5) if clipped
+
+			`-abs_min` <= `value` <= `abs_min` will be mapped to 0.5
+
+			Parameters
+			----------
+			value : float
+				A value to be mapped
+			clip : bool
+				Determines the behavior for mapping values outside the range
+
+			Returns
+			-------
+			float
+				Mapping result to (`-inf`, `inf`) or [0, 1] if clipped
+			"""
+			if abs(value) <= self.__abs_min:
+				return 0.5
+			sgn_half: float = 0.5 if value > 0 else -0.5
+			if clip and abs(value) >= self.__abs_max:
+				return sgn_half + 0.5
+			else:
+				return (math.log2(abs(value)) - self.__log2_abs_min) / self.__log2_diff * sgn_half + 0.5
+
+		if clip is None:
+			clip = self.clip
+		result, is_scalar = super().process_value(value)
+		if is_scalar == 1:
+			return process_single_value(result.data.ravel()[0], clip)
+		else:
+			return np.ma.array(np.vectorize(process_single_value, otypes=[float])(result.data, clip), mask=result.mask)
+
+	def inverse(self, value: typing.Any) -> float | npt.NDArray[np.double]:
+		"""
+		To map a value generally in [0, 1] back to [`-abs_max`, `abs_max`]
+
+		Parameters
+		----------
+		value : typing.Any
+			Any value that could be regarded as `np.double` or `np.ndarray` of `np.double`
+
+		Returns
+		-------
+		float | npt.NDArray[np.double]
+			Mapping back result corresponding to value
+		"""
+		def process_single_value(value: float) -> float:
+			"""
+			Maps a single value back
+
+			`value` == 0.5 will be mapped back to 0
+
+			`value` > 0.5 will be mapped back to positive values
+
+			`value` < 0.5 will be mapped back to negative values
+
+			Parameters
+			----------
+			value : float
+				A value, generally in [0, 1]
+
+			Returns
+			-------
+			float
+				Generally in [`-abs_max`, `-abs_min`] U {0} U [`abs_min`, `abs_max`]
+			"""
+			if value == 0.5:
+				return 0.0
+			return (-1.0 if value < 0.5 else 1.0) * math.exp2(abs(value - 0.5) * 2 * self.__log2_diff + self.__log2_abs_min)
+
+		result, is_scalar = super().process_value(value)
+		if is_scalar == 1:
+			return process_single_value(result.data.ravel()[0])
+		else:
+			return np.ma.array(np.vectorize(process_single_value, otypes=[float])(result.data), mask=result.mask)
+
+
+def get_centered(abs_max: float, cmap: str | matplotlib.colors.Colormap) -> tuple[matplotlib.colors.CenteredNorm, npt.NDArray[np.double], npt.NDArray[np.double]]:
+	"""
+	To get the `CenteredNorm` from given input, and its corresponding levels and colorbar ticks
+
+	Parameters
+	----------
+	abs_max : float
+		The range of data values
+	cmap : str | matplotlib.colors.Colormap
+		The colormap, mainly for the RGB quantization levels
+
+	Returns
+	-------
+	tuple[matplotlib.colors.CenteredNorm, npt.NDArray[np.double], npt.NDArray[np.double]]
+		Norm, levels, and ticks
+	"""
+	abs_max = abs(abs_max)
+	if isinstance(cmap, str):
+		cmap = matplotlib.colormaps[cmap]
+	abs_max_10_level: float = math.pow(10, math.floor(math.log10(abs_max)))
+	centered_norm: matplotlib.colors.CenteredNorm = matplotlib.colors.CenteredNorm(0.0, math.ceil(abs_max / abs_max_10_level) * abs_max_10_level, True)
+	centered_levels: npt.NDArray[np.double] = np.linspace(-centered_norm.halfrange, centered_norm.halfrange, cmap.N // 8 * 8 + 1, True)
+	return centered_norm, centered_levels, centered_levels[::cmap.N // 8]
+
+
+def get_posneg_log(abs_min: float, abs_max: float, cmap: str | matplotlib.colors.Colormap) -> tuple[PNLogNorm, npt.NDArray[np.double], npt.NDArray[np.double]]:
+	"""
+	To get the `PNLogNorm` from given input, and its corresponding levels and colorbar ticks
+
+	Parameters
+	----------
+	abs_min : float
+		The absolute value minimum of the given dataset
+	abs_max : float
+		The absolute value maximum of the given dataset
+	cmap : str | matplotlib.colors.Colormap
+		The colormap, mainly for the RGB quantization levels
+
+	Returns
+	-------
+	tuple[PNLogNorm, npt.NDArray[np.double], npt.NDArray[np.double]]
+		Norm, levels, and ticks
+	"""
+	abs_min = abs(abs_min)
+	abs_max = abs(abs_max)
+	if abs_max == 0:
+		abs_max = sys.float_info.min * 2
+	if abs_min == 0:
+		abs_min = sys.float_info.min
+	abs_min = max(abs_min, abs_max * sys.float_info.epsilon)
+	lb_log10: int = int(math.floor(math.log10(abs_min)))
+	ub_log10: int = int(math.ceil(math.log10(abs_max)))
+	lb_log10 += (ub_log10 - lb_log10) % 4
+	if isinstance(cmap, str):
+		cmap = matplotlib.colormaps[cmap]
+	num_ticks: int = cmap.N // 8 * 8 + 3
+	pn_log_norm: matplotlib.colors.Normalize = PNLogNorm(math.pow(10, lb_log10), math.pow(10, ub_log10), True)
+	pn_log_levels: npt.NDArray[np.double] = np.zeros(num_ticks)
+	pn_log_levels[cmap.N // 8 * 4 + 2:] = np.exp2(np.linspace(math.log2(pn_log_norm.abs_min), math.log2(pn_log_norm.abs_max), cmap.N // 8 * 4 + 1, True))
+	pn_log_levels[cmap.N // 8 * 4::-1] = -pn_log_levels[cmap.N // 8 * 4 + 2:]
+	return pn_log_norm, pn_log_levels, np.concatenate([pn_log_levels[0:cmap.N // 8 * 4:cmap.N // 8], pn_log_levels[cmap.N // 8 * 4 + 1:cmap.N // 8 * 4 + 2], pn_log_levels[cmap.N // 8 * 5 + 2::cmap.N // 8]])
 
 
 class DensityMatrixDrawer:
@@ -357,11 +570,9 @@ class DensityMatrixDrawer:
 		To get the omitting factors in plotting
 	"""
 	__CMAP: typing.Literal["seismic"] = "seismic"
-	__NTICKS: int = matplotlib.colormaps[__CMAP].N
-	__COLORBAR_NTICKS: typing.Literal[21] = 21
 	FILENAME_PREFIX: typing.Literal["dm"] = "dm"
 	__PICNAME_NO_DIGITS: typing.Literal["dm_{{:0{}}}.png"] = FILENAME_PREFIX + "_{{:0{}}}" + FIGURE_EXTENSION
-	__slots__: tuple = ("__output_interval", "dm_data", "__grid_data", "__draw_scattered", "__draw_rescaled", "__x_grids", "__p_grids", "picname", "__xv", "__pv", "__LEVEL", "__NORM", "__fig", "__axs", "__title", "__super_title", "__points", "__belongings", "__row_divisor", "__col_divisor")
+	__slots__: tuple = ("__output_interval", "dm_data", "__grid_data", "__draw_scattered", "__draw_rescaled", "__x_grids", "__p_grids", "picname", "__xv", "__pv", "__CENTER_NORM", "__CENTER_LEVEL", "__LOG_NORM", "__LOG_LEVEL", "__fig", "__axs", "__title", "__super_title", "__points", "__belongings", "__row_divisor", "__col_divisor")
 
 	@staticmethod
 	def __get_divisors(
@@ -451,58 +662,78 @@ class DensityMatrixDrawer:
 		self.__xv: npt.NDArray[np.double]
 		self.__pv: npt.NDArray[np.double]
 		self.__xv, self.__pv = np.meshgrid(self.__x_grids, self.__p_grids)
-		# levels and norms
-		COLORBAR_LIMIT: float
+		# levels, norms and ticks
+		LOG_MAX: float
+		LOG_MIN: float
+		CENTER_MAX: float
 		if self.__draw_rescaled:
-			COLORBAR_LIMIT = 1.0
+			LOG_MAX = 1.0
+			CENTER_MAX = LOG_MAX
 		elif init_dist is not None:
-			COLORBAR_LIMIT = 1.5 * np.max(np.abs(init_dist.factors))
+			LOG_MAX = 1.5 * np.max(np.abs(init_dist.factors))
+			CENTER_MAX = LOG_MAX
 		else:
 			assert self.dm_data is not None
-			COLORBAR_LIMIT = 1.1 * np.max(np.abs(self.dm_data))
-		self.__LEVEL = matplotlib.ticker.MaxNLocator(nbins=__class__.__NTICKS).tick_values(-COLORBAR_LIMIT, COLORBAR_LIMIT)
-		self.__NORM: matplotlib.colors.CenteredNorm = matplotlib.colors.CenteredNorm(0.0, COLORBAR_LIMIT, True)
+			LOG_MAX = np.max(np.abs(self.dm_data))
+			CENTER_MAX = 1.1 * LOG_MAX
+		if self.dm_data is not None:
+			LOG_MIN = np.min(np.abs(self.dm_data[self.dm_data != 0])) / np.max(np.abs(self.dm_data))
+		else:
+			LOG_MIN = LOG_MAX * sys.float_info.epsilon
+		self.__CENTER_NORM: matplotlib.colors.CenteredNorm
+		self.__CENTER_LEVEL: npt.NDArray[np.double]
+		CENTER_TICKS: npt.NDArray[np.double]
+		self.__CENTER_NORM, self.__CENTER_LEVEL, CENTER_TICKS = get_centered(CENTER_MAX, __class__.__CMAP)
+		self.__LOG_NORM: PNLogNorm
+		self.__LOG_LEVEL: npt.NDArray[np.double]
+		LOG_TICKS: npt.NDArray[np.double]
+		self.__LOG_NORM, self.__LOG_LEVEL, LOG_TICKS = get_posneg_log(LOG_MIN, LOG_MAX, __class__.__CMAP)
 		# figure and axes, titles, and sample points (if available)
-		self.__fig: matplotlib.figure.Figure
-		self.__axs: np.ndarray[collections.abc.Sequence[collections.abc.Sequence[matplotlib.axes.Axes]], np.dtype[np.object_]]
 		self.__title: list[str] = ["Rescaled " if self.__draw_rescaled else ""]
 		self.__super_title: str = self.__title[0] + "Partial Wigner-Transformed Density Matrix"
+		self.__title.insert(0, self.__title[0] + "Log Scale ")
 		self.__points: npt.NDArray[np.double] | None = None
 		self.__belongings: npt. NDArray[np.int_] | None = None
-		if self.__grid_data is not None or draw_scattered: # more rows to draw
-			if self.__grid_data is not None:
-				self.__title += [self.__title[0] + "Exact ", self.__title[0] + "Difference of"]
-			if draw_scattered:
-				if self.dm_data is not None:
-					# read from file; otherwise pass from main
-					self.__points = np.loadtxt(POINTS_FILENAME + DATA_EXTENSION)
-					self.__points = self.__points.reshape(self.__points.shape[0] // pes.PHASEDIM, pes.PHASEDIM, self.__points.shape[1]) # N_TICKS * PHASEDIM * NUM_PTS
-					self.__belongings = np.loadtxt(BELONGING_FILENAME + DATA_EXTENSION).astype(np.int_) # N_TICKS * NUM_PTS
-				self.__title.insert(0, self.__title[0] + "Scattered ") # scatter points first
-			nrows: int = len(self.__title)
-			self.__fig, self.__axs = plt.subplots(nrows=nrows, ncols=pes.NUM_ELM, figsize=(FIGSIZE[0] * pes.NUM_ELM, FIGSIZE[1] * nrows))
-			for iRow in range(nrows):
-				for iElement in range(pes.NUM_ELM):
-					ax: matplotlib.axes.Axes = self.__axs[iRow, iElement]
-					ax.set_xlabel("x")
-					ax.set_ylabel("p")
-					ax.set_title(self.__title[iRow] + utility.get_RI_label(iElement))
-					ax.contourf(self.__xv, self.__pv, np.zeros_like(self.__xv), levels=self.__LEVEL, cmap=__class__.__CMAP, norm=self.__NORM)
-		else:
-			# simply draw the predicted density
-			self.__fig, self.__axs = plt.subplots(nrows=pes.NUM_PES, ncols=pes.NUM_PES, figsize=(FIGSIZE[0] * pes.NUM_PES, FIGSIZE[1] * pes.NUM_PES))
-			for iPES in range(pes.NUM_PES):
-				for jPES in range(pes.NUM_PES):
-					ax: matplotlib.axes.Axes = self.__axs[iPES, jPES]
-					ax.set_xlabel("x")
-					ax.set_ylabel("p")
-					ax.set_title(self.__title[0] + utility.get_RI_label(iPES * pes.NUM_PES + jPES))
-					ax.contourf(self.__xv, self.__pv, np.zeros_like(self.__xv), levels=self.__LEVEL, cmap=__class__.__CMAP, norm=self.__NORM)
+		if draw_scattered:
+			if self.dm_data is not None:
+				# read from file; otherwise pass from main
+				self.__points = np.loadtxt(POINTS_FILENAME + DATA_EXTENSION)
+				self.__points = self.__points.reshape(self.__points.shape[0] // pes.PHASEDIM, pes.PHASEDIM, self.__points.shape[1]) # N_TICKS * PHASEDIM * NUM_PTS
+				self.__belongings = np.loadtxt(BELONGING_FILENAME + DATA_EXTENSION).astype(np.int_) # N_TICKS * NUM_PTS
+			self.__title.append(self.__title[0] + "Scattered ")
+		if self.__grid_data is not None:
+			self.__title.append(self.__title[0] + "Exact ")
+			self.__title.append(self.__title[0] + "Difference of ")
+		nrows: int = len(self.__title)
+		self.__fig: matplotlib.figure.Figure = plt.figure(figsize=(FIGSIZE[0] * pes.NUM_ELM, FIGSIZE[1] * nrows))
+		axs = self.__fig.subplots(nrows, pes.NUM_ELM, squeeze=False)
+		assert isinstance(axs, np.ndarray)
+		self.__axs: np.ndarray[collections.abc.Sequence[collections.abc.Sequence[matplotlib.axes.Axes]], np.dtype[np.object_]] = axs
+		for iRow in range(nrows):
+			for iElement in range(pes.NUM_ELM):
+				ax: matplotlib.axes.Axes = self.__axs[iRow, iElement]
+				ax.set_xlabel("x")
+				ax.set_ylabel("p")
+				ax.set_title(self.__title[iRow] + utility.get_RI_label(iElement))
+				ax.contourf(
+					self.__xv,
+					self.__pv,
+					np.zeros_like(self.__xv),
+					self.__LOG_LEVEL if iRow == 0 else self.__CENTER_LEVEL,
+					cmap=__class__.__CMAP,
+					norm=self.__LOG_NORM if iRow == 0 else self.__CENTER_NORM
+				)
 		self.__fig.colorbar(
-			matplotlib.cm.ScalarMappable(cmap=__class__.__CMAP, norm=self.__NORM),
-			ax=self.__axs.ravel().tolist(),
-			ticks=matplotlib.ticker.MaxNLocator(nbins=__class__.__COLORBAR_NTICKS).tick_values(-COLORBAR_LIMIT, COLORBAR_LIMIT)
-		) # set up the colorbar once. This will influence size of axes
+			matplotlib.cm.ScalarMappable(self.__LOG_NORM, __class__.__CMAP),
+			ax=self.__axs[0].tolist(),
+			ticks=LOG_TICKS,
+			format="%+.1e"
+		)
+		self.__fig.colorbar(
+			matplotlib.cm.ScalarMappable(self.__CENTER_NORM, __class__.__CMAP),
+			ax=self.__axs[1:].ravel().tolist(),
+			ticks=CENTER_TICKS
+		)
 		self.__fig.suptitle(self.__super_title)
 		self.__row_divisor: int
 		self.__col_divisor: int
@@ -537,20 +768,10 @@ class DensityMatrixDrawer:
 		scale : npt.NDArray[np.double], shape of (NUM_ELM,)
 			The rescale factor, by default None (and `get_rescale_factor` will be used instead)
 		"""
-		# calculate rescale factors
-		rescale_factors: npt.NDArray[np.double]
-		if self.__draw_rescaled:
-			if scale is not None:
-				rescale_factors = scale
-			else:
-				assert self.dm_data is not None
-				rescale_factors = get_rescale_factor(self.dm_data[frame_index])
-		else:
-			rescale_factors = np.ones(pes.NUM_ELM)
-
 		def draw_an_axs(
 			ax: matplotlib.axes.Axes,
 			data: npt.NDArray[np.double],
+			use_logscale: bool = False,
 			title: str | None = None,
 			central_points: npt.NDArray[np.double] | None = None,
 			extra_points: npt.NDArray[np.double] | None = None
@@ -564,6 +785,8 @@ class DensityMatrixDrawer:
 				The Axes on which to draw
 			data : npt.NDArray[np.double]
 				The data for the contourf
+			use_logscale : bool, optional
+				Whether to plot with log norm or not, by default False
 			title : str | None, optional
 				The title of the Axe, by default None
 			central_points : npt.NDArray[np.double], shape of (NUM_PES, NUM_PTS) | None, optional
@@ -571,7 +794,14 @@ class DensityMatrixDrawer:
 			extra_points : npt.NDArray[np.double], shape of (NUM_PES, NUM_PTS * EXTRA_RATIO) | None, optional
 				The extra points to scatter on the element, by default None
 			"""
-			ax.contourf(self.__xv, self.__pv, data[::self.__col_divisor, ::self.__row_divisor].T, levels=self.__LEVEL, cmap=__class__.__CMAP, norm=self.__NORM)
+			ax.contourf(
+				self.__xv,
+				self.__pv,
+				data[::self.__col_divisor, ::self.__row_divisor].T,
+				self.__LOG_LEVEL if use_logscale else self.__CENTER_LEVEL,
+				cmap=__class__.__CMAP,
+				norm=self.__LOG_NORM if use_logscale else self.__CENTER_NORM
+			)
 			if title is not None:
 				ax.set_title(title)
 			# scatter the central points on top
@@ -590,82 +820,90 @@ class DensityMatrixDrawer:
 					"black"
 				)
 
+		# calculate rescale factors
+		rescale_factors: npt.NDArray[np.double]
+		if self.__draw_rescaled:
+			if scale is not None:
+				rescale_factors = scale
+			else:
+				assert self.dm_data is not None
+				rescale_factors = get_rescale_factor(self.dm_data[frame_index])
+		else:
+			rescale_factors = np.ones(pes.NUM_ELM)
+		# get data
 		pred_data: npt.NDArray[np.double]
 		if data is not None:
 			pred_data = data
 		else:
 			assert self.dm_data is not None
 			pred_data = self.dm_data[frame_index]
-		if self.__axs.shape[-1] == pes.NUM_ELM:
-			row_index: int = 0
-			if self.__draw_scattered: # scatter points, no title change
-				for iElement in range(pes.NUM_ELM):
-					if isinstance(num_points, int): # all elements have same number of points
-						num_points = np.full(pes.NUM_TRIG, num_points, np.int_)
-					if num_points is not None and points is not None: # from main
-						TrilIndex: int = pes.flatten_tril_index[iElement // pes.NUM_PES, iElement % pes.NUM_PES]
+		for iElement in range(pes.NUM_ELM): # contourfs for predicted data
+			draw_an_axs(
+				self.__axs[0, iElement],
+				pred_data[iElement].T * rescale_factors[iElement],
+				True,
+				self.__title[0] + utility.get_RI_label(iElement) + ("\nRescaled Factor = {:.6e}".format(rescale_factors[iElement]) if self.__draw_rescaled else "")
+			)
+			draw_an_axs(
+				self.__axs[1, iElement],
+				pred_data[iElement].T * rescale_factors[iElement],
+				False,
+				self.__title[1] + utility.get_RI_label(iElement) + ("\nRescaled Factor = {:.6e}".format(rescale_factors[iElement]) if self.__draw_rescaled else "")
+			)
+		row_index: int = 2
+		if self.__draw_scattered: # scatter points, no title change
+			for iElement in range(pes.NUM_ELM):
+				if isinstance(num_points, int): # all elements have same number of points
+					num_points = np.full(pes.NUM_TRIG, num_points, np.int_)
+				if num_points is not None and points is not None: # from main
+					TrilIndex: int = pes.flatten_tril_index[iElement // pes.NUM_PES, iElement % pes.NUM_PES]
+					draw_an_axs(
+						self.__axs[row_index, iElement],
+						pred_data[iElement].T * rescale_factors[iElement],
+						central_points=points[TrilIndex][:num_points[TrilIndex]].T,
+						extra_points=points[TrilIndex][num_points[TrilIndex]:].T,
+					)
+				else: # from file
+					assert self.__points is not None and self.__belongings is not None
+					TrilElementIndex: int = iElement if iElement // pes.NUM_PES >= iElement % pes.NUM_PES else iElement % pes.NUM_PES * pes.NUM_PES + iElement // pes.NUM_PES
+					if frame_index < self.__points.shape[0] or frame_index < self.__belongings.shape[0]:
 						draw_an_axs(
 							self.__axs[row_index, iElement],
 							pred_data[iElement].T * rescale_factors[iElement],
-							central_points=points[TrilIndex][:num_points[TrilIndex]].T,
-							extra_points=points[TrilIndex][num_points[TrilIndex]:].T,
-						)
-					else: # from file
-						assert self.__points is not None and self.__belongings is not None
-						TrilElementIndex: int = iElement if iElement // pes.NUM_PES >= iElement % pes.NUM_PES else iElement % pes.NUM_PES * pes.NUM_PES + iElement // pes.NUM_PES
-						if frame_index < self.__points.shape[0] or frame_index < self.__belongings.shape[0]:
-							draw_an_axs(
-								self.__axs[row_index, iElement],
-								pred_data[iElement].T * rescale_factors[iElement],
-								central_points=self.__points[frame_index][:, self.__belongings[frame_index] == TrilElementIndex],
-								extra_points=self.__points[frame_index][:, self.__belongings[frame_index] == TrilElementIndex + pes.NUM_ELM],
-							) # mixing of basic and advanced slicing leads to error
-						else: # have points, but unavailable due to output
-							draw_an_axs(self.__axs[row_index, iElement], pred_data[iElement].T * rescale_factors[iElement])
-				row_index += 1
-			for iElement in range(pes.NUM_ELM): # contourfs for predicted data
-				draw_an_axs(
-					self.__axs[row_index, iElement],
-					pred_data[iElement].T * rescale_factors[iElement],
-					self.__title[row_index] + utility.get_RI_label(iElement) + ("\nRescaled Factor = {:.6e}".format(rescale_factors[iElement]) if self.__draw_rescaled else ""),
-				)
+							central_points=self.__points[frame_index][:, self.__belongings[frame_index] == TrilElementIndex],
+							extra_points=self.__points[frame_index][:, self.__belongings[frame_index] == TrilElementIndex + pes.NUM_ELM],
+						) # mixing of basic and advanced slicing leads to error
+					else: # have points, but unavailable due to output
+						draw_an_axs(self.__axs[row_index, iElement], pred_data[iElement].T * rescale_factors[iElement])
 			row_index += 1
-			if self.__grid_data is not None:
-				if frame_index < self.__grid_data.shape[0]:
-					for iElement in range(pes.NUM_ELM): # contourfs for grid data, no title change
-						draw_an_axs(self.__axs[row_index, iElement], self.__grid_data[frame_index, iElement].T * rescale_factors[iElement])
-					row_index += 1
-					for iElement in range(pes.NUM_ELM): # pred - grid
-						ax: matplotlib.axes.Axes = self.__axs[row_index, iElement]
-						diff: npt.NDArray[np.double] = pred_data[iElement] - self.__grid_data[frame_index, iElement]
-						max_idx: int = int(np.argmax(np.abs(diff).reshape(-1)))
-						ax.scatter(self.__x_grids[max_idx // self.__x_grids.size], self.__p_grids[max_idx % self.__x_grids.size], 15, "black")
-						draw_an_axs(
-							ax,
-							diff.T * rescale_factors[iElement],
-							"{}\n{}Max Abs diff = {:.6e}".format(
-								self.__title[row_index] + utility.get_RI_label(iElement),
-								"Rescaled " if self.__draw_rescaled else "",
-								np.max(np.abs(diff))
-							)
+		if self.__grid_data is not None:
+			if frame_index < self.__grid_data.shape[0]:
+				for iElement in range(pes.NUM_ELM): # contourfs for grid data, no title change
+					draw_an_axs(self.__axs[row_index, iElement], self.__grid_data[frame_index, iElement].T * rescale_factors[iElement])
+				row_index += 1
+				for iElement in range(pes.NUM_ELM): # pred - grid
+					ax: matplotlib.axes.Axes = self.__axs[row_index, iElement]
+					diff: npt.NDArray[np.double] = pred_data[iElement] - self.__grid_data[frame_index, iElement]
+					max_idx: int = int(np.argmax(np.abs(diff).reshape(-1)))
+					ax.scatter(self.__x_grids[max_idx // self.__x_grids.size], self.__p_grids[max_idx % self.__x_grids.size], 15, "black")
+					draw_an_axs(
+						ax,
+						diff.T * rescale_factors[iElement],
+						title="{}\n{}Max Abs diff = {:.6e}".format(
+							self.__title[row_index] + utility.get_RI_label(iElement),
+							"Rescaled " if self.__draw_rescaled else "",
+							np.max(np.abs(diff))
 						)
-					row_index += 1
-				else:
-					# unable to compare, set invisible
-					for iElement in range(pes.NUM_ELM):
-						self.__axs[row_index, iElement].set_visible(False)
-					row_index += 1
-					for iElement in range(pes.NUM_ELM):
-						self.__axs[row_index, iElement].set_visible(False)
-					row_index += 1
-		else:
-			# only density
-			for iElement in range(pes.NUM_ELM):
-				draw_an_axs(
-					self.__axs[iElement // pes.NUM_PES, iElement % pes.NUM_PES],
-					pred_data[iElement].T * rescale_factors[iElement],
-					utility.get_RI_label(iElement) + (("\n" + RESCALE_TEMPLATE.format(rescale_factors[iElement])) if self.__draw_rescaled else "")
-				)
+					)
+				row_index += 1
+			else:
+				# unable to compare, set invisible
+				for iElement in range(pes.NUM_ELM):
+					self.__axs[row_index, iElement].set_visible(False)
+				row_index += 1
+				for iElement in range(pes.NUM_ELM):
+					self.__axs[row_index, iElement].set_visible(False)
+				row_index += 1
 		self.__fig.suptitle(self.__super_title + "\n" + TIME_TEMPLATE.format(frame_index * self.__output_interval))
 		self.__fig.savefig(self.picname.format(frame_index))
 
@@ -744,10 +982,10 @@ class WavefunctionPlotter:
 			self.__grids = get_grids(r0, self.wfn_sqnm.shape[-1])
 		self.picname: str = __class__.__PICNAME_NO_DIGITS.format(num_digits_of_ticks)
 		# figure and axes
-		self.__fig: matplotlib.figure.Figure
-		self.__axs: np.ndarray[collections.abc.Sequence[matplotlib.axes.Axes], np.dtype[np.object_]]
-		self.__fig, self.__axs = plt.subplots(pes.DIM, 2, figsize=(FIGSIZE[0] * 2, FIGSIZE[1] * pes.DIM))
-		self.__axs = self.__axs.reshape(pes.DIM, 2) # guaranteen it is matrix in case pes.DIM == 1
+		self.__fig: matplotlib.figure.Figure = plt.figure(figsize=(FIGSIZE[0] * 2, FIGSIZE[1] * pes.DIM))
+		axs = self.__fig.subplots(pes.DIM, 2, squeeze=False) # guaranteen it is matrix in case pes.DIM == 1
+		assert isinstance(axs, np.ndarray)
+		self.__axs: np.ndarray[collections.abc.Sequence[matplotlib.axes.Axes], np.dtype[np.object_]] = axs
 		self.__fig.suptitle(self.__title)
 		labels: list[str] = [utility.dimension_name(iDim) for iDim in range(pes.PHASEDIM)]
 		titles: list[str] = ["Position", "Momentum"]

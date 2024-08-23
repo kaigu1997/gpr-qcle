@@ -47,12 +47,16 @@ class GP(gpytorch.models.ExactGP):
 	forward(x)
 		The implementation of GPR
 	"""
-	__slots__: tuple = ("mean", "cov")
+	__slots__: tuple = ("__mean", "__cov")
 
 	def __init__(self, x: torch.Tensor, y: torch.Tensor, likelihood: gpytorch.likelihoods.Likelihood, kernel: gpytorch.kernels.Kernel):
 		super().__init__(x, y, likelihood)
-		self.mean: gpytorch.means.Mean = gpytorch.means.ZeroMean()
-		self.cov: gpytorch.kernels.Kernel = kernel
+		self.__mean: gpytorch.means.Mean = gpytorch.means.ZeroMean()
+		self.__cov: gpytorch.kernels.Kernel = kernel
+
+	@property
+	def cov(self) -> gpytorch.kernels.Kernel:
+		return self.__cov
 
 	def forward(self, x: torch.Tensor) -> gpytorch.distributions.MultivariateNormal:
 		"""
@@ -68,9 +72,9 @@ class GP(gpytorch.models.ExactGP):
 		gpytorch.distributions.MultivariateNormal
 			A gaussian process with certain mean and covariance
 		"""
-		Mean = self.mean(x)
+		Mean = self.__mean(x)
 		assert isinstance(Mean, torch.Tensor)
-		return gpytorch.distributions.MultivariateNormal(Mean, self.cov(x))
+		return gpytorch.distributions.MultivariateNormal(Mean, self.__cov(x))
 
 
 class NoConstraint(gpytorch.constraints.Interval):
@@ -174,12 +178,12 @@ class SinglePredictor:
 		To solve linear system `AX=B` by LDL factorization with pre-conditioned matrix for numerical stability
 	__print_stuff(model, loss, learning_rate, indent, print_grad, hessian, start_str, end_str, flush)
 		To print all stuffs needed
-	__update_weights()
-		To update the weights, :math:`K^{-1}y`
 	get_training_features()
 		To get the training features of the core subset
-	get_weights()
-		To get the weights, :math:`K^{-1}y`
+	__update_weights()
+		To update the weights, :math:`K^{-1}y`
+	__update_neighbor()
+		To construct the neighbors and to determine whether use local GP or not
 	predict(x_test)
 		To predict the average estimation
 	error()
@@ -197,7 +201,7 @@ class SinglePredictor:
 	__GTOL: float = __GTOL_SQRT ** 2
 	__NOISE: float = float(gpytorch.settings.min_fixed_noise.value(torch.double) or 1e-8)
 	__NUM_NEIGHBOR = 32
-	__slots__: tuple = ("__kernel", "__x_all", "__y_all", "__scale", "model", "__param_indices", "__k_inv_y", "__weights_updated", "__nn")
+	__slots__: tuple = ("__kernel", "__x_all", "__y_all", "__scale", "__model", "__param_indices", "__k_inv_y", "__weights_updated", "__nn", "__use_local", "__neighbor_updated")
 
 	@staticmethod
 	def __preconditioned_ldl_solve(A: torch.Tensor, B: torch.Tensor, single_entry: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
@@ -313,10 +317,10 @@ class SinglePredictor:
 		self.__x_all: torch.Tensor = torch.Tensor()
 		self.__y_all: torch.Tensor = torch.Tensor()
 		self.__scale: float = 1.0
-		self.model: GP = GP(torch.zeros((2, pes.PHASEDIM)), torch.zeros((2,)), likelihood, self.__kernel)
+		self.__model: GP = GP(torch.zeros((2, pes.PHASEDIM)), torch.zeros((2,)), likelihood, self.__kernel)
 		self.__param_indices: list[int] = [0]
 		with torch.no_grad():
-			for iParam, (name, param, constraint) in enumerate(self.model.named_parameters_and_constraints()):
+			for iParam, (name, param, constraint) in enumerate(self.__model.named_parameters_and_constraints()):
 				# set parameter initial value
 				try:
 					param[...] = initial_values[iParam].expand_as(param).clone()
@@ -331,13 +335,19 @@ class SinglePredictor:
 				self.__param_indices.append(self.__param_indices[-1] + param.numel())
 				# set constraint
 				name_levels: list[str] = name.split(".")
-				attr = self.model
+				attr = self.__model
 				for i in range(len(name_levels) - 1):
 					attr = getattr(attr, name_levels[i])
 				attr.register_constraint(name_levels[-1], NoConstraint())
 		self.__k_inv_y: torch.Tensor = torch.Tensor()
 		self.__weights_updated: bool = False
 		self.__nn: sklearn.neighbors.NearestNeighbors = sklearn.neighbors.NearestNeighbors(n_neighbors=num_neighbors, n_jobs=-1)
+		self.__use_local: bool = False
+		self.__neighbor_updated: bool = False
+
+	@property
+	def model(self) -> GP:
+		return self.__model
 
 	def get_training_features(self) -> torch.Tensor:
 		"""
@@ -348,34 +358,44 @@ class SinglePredictor:
 		torch.Tensor
 			The training features
 		"""
-		assert self.model.train_inputs is not None
-		return self.model.train_inputs[0].detach()
+		assert self.__model.train_inputs is not None
+		return self.__model.train_inputs[0].detach()
 
 	def __update_weights(self) -> None:
 		"""
 		To update the weights, :math:`K^{-1}y`
 		"""
-		self.__k_inv_y = torch.linalg.lstsq(self.model.cov(self.__x_all, self.get_training_features()).to_dense(), self.__y_all).solution
+		self.__k_inv_y = torch.linalg.lstsq(self.__model.cov(self.__x_all, self.get_training_features()).to_dense(), self.__y_all).solution
 		self.__weights_updated = True
 
-	def get_weights(self) -> torch.Tensor:
-		"""
-		To get the weights, :math:`K^{-1}y`
-
-		Returns
-		-------
-		torch.Tensor
-			Weights, :math:`K^{-1}y`
-		"""
+	@property
+	def k_inv_y(self) -> torch.Tensor:
 		if not self.__weights_updated:
 			self.__update_weights()
 		return self.__k_inv_y
 
+	def __update_neighbor(self) -> None:
+		"""
+		To construct the neighbors and to determine whether use local GP or not
+		"""
+		self.__nn.fit(self.__x_all.detach().numpy())
+		direct_err: float = ((self.__model.cov(self.__x_all, self.get_training_features()).to_dense() @ self.k_inv_y - self.__y_all) ** 2).sum().item()
+		neighbor_ind: torch.Tensor = torch.from_numpy(self.__nn.kneighbors(self.__x_all.detach().numpy().reshape(-1, pes.PHASEDIM), return_distance=False)).reshape(self.__x_all.shape[:-1] + (__class__.__NUM_NEIGHBOR,)) # ... * DIM -> ... * NEIGHBOR
+		neighbors: torch.Tensor = self.__x_all[neighbor_ind] # x_all must be M * DIM, this gives ... * NEIGHBOR * DIM
+		local_err: float = (((self.__model.cov(self.__x_all[..., None, :], neighbors).to_dense() @ __class__.__preconditioned_ldl_solve(self.__model.cov(neighbors).to_dense(), self.__y_all[neighbor_ind, None])[0]).reshape(self.__x_all.shape[:-1]) - self.__y_all) ** 2).sum().item()
+		self.__use_local = local_err < direct_err
+		self.__neighbor_updated = True
+
+	@property
+	def use_local(self) -> bool:
+		if not self.__neighbor_updated:
+			self.__update_neighbor()
+		return self.__use_local
+
 	def predict(
 		self,
 		x_test: torch.Tensor,
-		use_local_GP: bool = True,
-		print_log: bool = DEBUG_MODE
+		use_local_GP: bool = True
 	) -> torch.Tensor:
 		"""
 		To predict the average estimation
@@ -386,8 +406,6 @@ class SinglePredictor:
 			Validation/Test inputs
 		use_local_GP : bool, optional
 			Whether use local full GP on selected points or not, by default True
-		print_log : bool, optional
-			Whether to print the log to console, by default `DEBUG_MODE`
 
 		Returns
 		-------
@@ -398,25 +416,19 @@ class SinglePredictor:
 		-----
 		Instance of prediction of projected process (PP)
 		"""
-		result: torch.Tensor = (self.model.cov(x_test, self.get_training_features()).to_dense() @ self.get_weights()).clone()
-		if use_local_GP:
-			neighbor_ind: torch.Tensor = torch.from_numpy(self.__nn.kneighbors(x_test.detach().numpy().reshape(-1, pes.PHASEDIM), return_distance=False)).reshape(x_test.shape[:-1] + (__class__.__NUM_NEIGHBOR,)) # ... * DIM -> ... * NEIGHBOR
-			neighbors: torch.Tensor = self.__x_all[neighbor_ind] # x_all must be M * DIM, this gives ... * NEIGHBOR * DIM
-			need_local_gp: torch.Tensor = torch.all(torch.abs(x_test - torch.mean(neighbors, -2)) < torch.std(neighbors, -2), -1).reshape(x_test.shape[:-1]) # ...
-			num_need_local_gp = torch.count_nonzero(need_local_gp).item()
-			if print_log:
-				print("{} inputs, where {} need local GP.".format(x_test.numel() // pes.PHASEDIM, num_need_local_gp))
-			if num_need_local_gp > 0:
-				neighbor_used: torch.Tensor = neighbors[need_local_gp] # NEED * NEIGHBOR * DIM
-				result[need_local_gp] = (self.model.cov(x_test[need_local_gp, None], neighbor_used).to_dense()\
-				@ __class__.__preconditioned_ldl_solve(self.model.cov(neighbor_used).to_dense(), self.__y_all[neighbor_ind[need_local_gp], None])[0]).reshape(-1)
-				"""
-					NEED * 1 * DIM @ NEED * NEIGHBOR * DIM -> NEED * 1 * NEIGHBOR
-					NEED * NEIGHBOR * DIM -> NEED * NEIGHBOR * NEIGHBOR
-					[... * NEIGHBOR[...], 1] -> NEED * NEIGHBOR * 1
-					-> NEED * 1 * 1 -> NEED
-				"""
-		return result
+		# if use_local_GP and self.use_local:
+		# 	neighbor_ind: torch.Tensor = torch.from_numpy(self.__nn.kneighbors(x_test.detach().numpy().reshape(-1, pes.PHASEDIM), return_distance=False)).reshape(x_test.shape[:-1] + (__class__.__NUM_NEIGHBOR,)) # ... * DIM -> ... * NEIGHBOR
+		# 	neighbors: torch.Tensor = self.__x_all[neighbor_ind] # x_all must be M * DIM, this gives ... * NEIGHBOR * DIM
+		# 	return (self.__model.cov(x_test[..., None, :], neighbors).to_dense() @ __class__.__preconditioned_ldl_solve(self.__model.cov(neighbors).to_dense(), self.__y_all[neighbor_ind, None])[0]).reshape(x_test.shape[:-1])
+		# 	"""
+		# 		... * 1 * DIM @ ... * NEIGHBOR * DIM -> ... * 1 * NEIGHBOR
+		# 		... * NEIGHBOR * DIM -> ... * NEIGHBOR * NEIGHBOR
+		# 		[... * NEIGHBOR, 1] -> ... * NEIGHBOR * 1
+		# 		-> ... * 1 * 1 -> ...
+		# 	"""
+		# else:
+		# 	return self.__model.cov(x_test, self.get_training_features()).to_dense() @ self.k_inv_y
+		return self.__model.cov(x_test, self.get_training_features()).to_dense() @ self.k_inv_y
 
 	def error(self, use_weight: bool = True) -> torch.Tensor:
 		"""
@@ -437,7 +449,7 @@ class SinglePredictor:
 		if use_weight:
 			return torch.sum((self.__y_all - self.predict(self.__x_all)) ** 2) * (self.__scale ** 2)
 		else:
-			kmn: torch.Tensor = self.model.cov(self.__x_all, self.get_training_features()).to_dense()
+			kmn: torch.Tensor = self.__model.cov(self.__x_all, self.get_training_features()).to_dense()
 			return torch.sum((self.__y_all - kmn @ torch.linalg.lstsq(kmn, self.__y_all).solution) ** 2) * (self.__scale ** 2)
 
 	def train(self, print_log: bool = DEBUG_MODE) -> None:
@@ -548,9 +560,9 @@ class SinglePredictor:
 
 		self.__weights_updated = False
 		# train model
-		self.model.likelihood = gpytorch.likelihoods.FixedNoiseGaussianLikelihood(torch.full(self.get_training_features().shape[:-1], __class__.__NOISE))
-		self.model.train()
-		self.model.likelihood.train()
+		self.__model.likelihood = gpytorch.likelihoods.FixedNoiseGaussianLikelihood(torch.full(self.get_training_features().shape[:-1], __class__.__NOISE))
+		self.__model.train()
+		self.__model.likelihood.train()
 		finish_early: bool = False
 		loss: torch.Tensor = self.error(False)
 		last_value: float = torch.inf
@@ -560,14 +572,14 @@ class SinglePredictor:
 		num_iter: int = 0
 		for i in range(1, __class__.__MAX_ITER + 1):
 			# calculate gradient and hessian
-			for iParam, param in enumerate(self.model.parameters()):
+			for iParam, param in enumerate(self.__model.parameters()):
 				param.grad = torch.autograd.grad(loss, param, None, True, True, True, True, False, True)[0] # same shape of param
 				for iGrad, grad_elm in enumerate(param.grad.reshape(-1)):
-					for jParam, param_for_grad in enumerate(self.model.parameters()):
+					for jParam, param_for_grad in enumerate(self.__model.parameters()):
 						hessian[self.__param_indices[iParam] + iGrad, self.__param_indices[jParam]:self.__param_indices[jParam + 1]] = torch.autograd.grad(grad_elm, param_for_grad, None, True, False, True, True, False, True)[0]
 			hessian = (hessian + hessian.T) / 2.0 # symmetrize
-			grad_combined: torch.Tensor = torch.cat([(param.grad if param.grad is not None else torch.zeros_like(param)).reshape(-1) for param in self.model.parameters()])
-			param_combined: torch.Tensor = torch.cat([param.reshape(-1) for param in self.model.parameters()])
+			grad_combined: torch.Tensor = torch.cat([(param.grad if param.grad is not None else torch.zeros_like(param)).reshape(-1) for param in self.__model.parameters()])
+			param_combined: torch.Tensor = torch.cat([param.reshape(-1) for param in self.__model.parameters()])
 			if learning_rate == -1.0:
 				learning_rate = min((param_combined.norm() / grad_combined.norm()).item(), 1.0)
 			# stopping criteria
@@ -591,7 +603,7 @@ class SinglePredictor:
 			# log
 			if print_log:
 				__class__.__print_stuff(
-					self.model,
+					self.__model,
 					loss,
 					learning_rate,
 					1,
@@ -604,7 +616,7 @@ class SinglePredictor:
 			else:
 				if i % (__class__.__MAX_ITER // 100) == 0:
 					__class__.__print_stuff(
-						self.model,
+						self.__model,
 						loss,
 						learning_rate,
 						1,
@@ -616,7 +628,7 @@ class SinglePredictor:
 			old_learning_rate: float = learning_rate
 			for change, method in zip([newton_change, grad_combined], ["Newton Method", "Gradient Descent"]):
 				loss, learning_rate = optimize_with_learning_rate(
-					self.model,
+					self.__model,
 					param_combined,
 					change,
 					self.__param_indices,
@@ -635,19 +647,19 @@ class SinglePredictor:
 			print("Stop: Total No. iterations reached limit.")
 			num_iter = __class__.__MAX_ITER
 		__class__.__print_stuff(
-			self.model,
+			self.__model,
 			loss,
 			learning_rate,
 			0,
 			True,
 			hessian,
 			"Iter {} - last = {:.15e},".format(num_iter, last_value),
-			"" if "hessian_precond" not in locals() else "Cond(preconditioned hessian) = {}".format(torch.linalg.cond(hessian_precond).item()),
+			"",
 			print_log
 		)
 		# turn to predict mode
-		self.model.eval()
-		self.model.likelihood.eval()
+		self.__model.eval()
+		self.__model.likelihood.eval()
 
 	def update(
 		self,
@@ -674,9 +686,9 @@ class SinglePredictor:
 		self.__x_all = x_all.reshape(-1, pes.PHASEDIM).clone().detach()
 		self.__y_all = y_all.reshape(-1).clone().detach()
 		self.__scale = scale
-		self.model.set_train_data(self.__x_all[:num_points].detach(), self.__y_all[:num_points].detach(), False)
-		self.__nn.fit(self.__x_all[:num_points].detach().numpy())
+		self.__model.set_train_data(self.__x_all[:num_points].detach(), self.__y_all[:num_points].detach(), False)
 		self.__weights_updated = False
+		self.__neighbor_updated = False
 
 	def get_marginal(self, dimensions: list[int], x_test: torch.Tensor) -> torch.Tensor:
 		"""
@@ -694,9 +706,9 @@ class SinglePredictor:
 		torch.Tensor, shape of (N,)
 			Corresponding validation/test targets based on noise-free SR/PP mean.
 		"""
-		marginal_kernel: gpytorch.kernels.Kernel = gpytorch.kernels.RBFKernel(len(dimensions), lengthscale_constraint=NoConstraint(self.model.cov.lengthscale.reshape(1, pes.PHASEDIM)[:, dimensions]))
-		prefactor: float = np.sqrt((2.0 * torch.pi) ** (pes.PHASEDIM - len(dimensions))) * self.model.cov.lengthscale[:, [i for i in range(pes.PHASEDIM) if i not in dimensions]].prod().item()
-		return prefactor * marginal_kernel(x_test, self.get_training_features()[:, dimensions]).to_dense() @ self.get_weights()
+		marginal_kernel: gpytorch.kernels.Kernel = gpytorch.kernels.RBFKernel(len(dimensions), lengthscale_constraint=NoConstraint(self.__model.cov.lengthscale.reshape(1, pes.PHASEDIM)[:, dimensions]))
+		prefactor: float = np.sqrt((2.0 * torch.pi) ** (pes.PHASEDIM - len(dimensions))) * self.__model.cov.lengthscale[:, [i for i in range(pes.PHASEDIM) if i not in dimensions]].prod().item()
+		return prefactor * marginal_kernel(x_test, self.get_training_features()[:, dimensions]).to_dense() @ self.k_inv_y
 
 
 class GPRPredictors:

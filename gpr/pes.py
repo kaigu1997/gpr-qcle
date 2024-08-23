@@ -99,7 +99,7 @@ class InitialDistribution:
 
 	The off-diagonal elements guarantee the purity of the initial distribution to be 1, i.e., pure state.
 	"""
-	__slots__: tuple = ("r0", "sigma_r0", "weight_phase", "factors")
+	__slots__: tuple = ("__r0", "__sigma_r0", "__weight_phase", "__factors")
 
 	def __init__(
 		self,
@@ -108,12 +108,24 @@ class InitialDistribution:
 		initial_population: npt.NDArray[np.double],
 		initial_phase_factor: npt.NDArray[np.double]
 	):
-		self.r0: npt.NDArray[np.double] = r0
-		self.sigma_r0: npt.NDArray[np.double] = sigma_r0
+		self.__r0: npt.NDArray[np.double] = r0
+		self.__sigma_r0: npt.NDArray[np.double] = sigma_r0
 		wavefunction_weight_phase: npt.NDArray[np.cdouble] = (initial_population * np.exp(1.0j * initial_phase_factor)).astype(np.cdouble)
 		weight_phase: npt.NDArray[np.cdouble] = (wavefunction_weight_phase.conj()[:, np.newaxis] * wavefunction_weight_phase / np.sum(initial_population ** 2)) # shape of (NUM_PES, NUM_PES)
-		self.weight_phase = (weight_phase + weight_phase.T.conj()) / 2.0 # remove numerical error, shape of (NUM_PES, NUM_PES)
-		self.factors: npt.NDArray[np.cdouble] = self.weight_phase.reshape(-1) / (2.0 * np.pi) ** DIM / self.sigma_r0.prod() # divide by normalization factor, shape of (NUM_ELM,)
+		self.__weight_phase = (weight_phase + weight_phase.T.conj()) / 2.0 # remove numerical error, shape of (NUM_PES, NUM_PES)
+		self.__factors: npt.NDArray[np.cdouble] = self.__weight_phase.reshape(-1) / (2.0 * np.pi) ** DIM / self.__sigma_r0.prod() # divide by normalization factor, shape of (NUM_ELM,)
+
+	@property
+	def r0(self) -> npt.NDArray[np.double]:
+		return self.__r0
+
+	@property
+	def sigma_r0(self) -> npt.NDArray[np.double]:
+		return self.__sigma_r0
+	
+	@property
+	def weight(self) -> npt.NDArray[np.double]:
+		return np.abs(self.__weight_phase)
 
 	def __call__(self, r: npt.NDArray[np.double], ElementIndex: int) -> npt.NDArray[np.cdouble]:
 		"""
@@ -132,7 +144,7 @@ class InitialDistribution:
 			Density of the given element
 		"""
 		assert 0 <= ElementIndex < NUM_ELM
-		return np.exp(-(((r - self.r0) / self.sigma_r0) ** 2).sum(-1) / 2.0) * self.factors[ElementIndex]
+		return np.exp(-(((r - self.__r0) / self.__sigma_r0) ** 2).sum(-1) / 2.0) * self.__factors[ElementIndex]
 
 
 class potential:

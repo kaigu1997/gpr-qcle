@@ -133,7 +133,7 @@ def get_grids(r0: npt.NDArray[np.double], n_grids: int) -> list[npt.NDArray[np.d
 	return [arr for arr in np.linspace(xmin, xmax, n_grids, True).T] + [arr for arr in np.linspace(pmin, pmax, n_grids, True).T]
 
 
-def get_rescale_factor(data: npt.NDArray[np.double] | list[npt.NDArray[np.cdouble]]) -> npt.NDArray[np.double]:
+def get_rescale_factor(data: npt.NDArray[np.double]) -> npt.NDArray[np.double]:
 	"""
 	To calculate the scale factor from the given data.
 
@@ -141,28 +141,15 @@ def get_rescale_factor(data: npt.NDArray[np.double] | list[npt.NDArray[np.cdoubl
 
 	Parameters
 	----------
-	data : npt.NDArray[np.double], of shape (NUM_ELM, n_grids, n_grids) | list[npt.NDArray[np.cdouble]], len of NUM_TRIG, each of shape (num_points,)
-		The data
+	data : npt.NDArray[np.double], of shape (NUM_ELM, n_grids, n_grids)
 
 	Returns
 	-------
 	npt.NDArray[np.double], of shape (NUM_ELM,)
 		Scale of each element
 	"""
-	if isinstance(data, list):
-		result: npt.NDArray[np.double] = np.empty((pes.NUM_PES, pes.NUM_PES), np.double)
-		for iPES in range(pes.NUM_PES):
-			for jPES in range(iPES + 1):
-				TrilIndex: int = pes.flatten_tril_index[iPES, jPES]
-				if iPES == jPES:
-					result[iPES, jPES] = 0 if np.all(data[TrilIndex] == 0.0) else 1.0 / np.max(np.abs(data[TrilIndex]))
-				else:
-					result[iPES, jPES] = 0 if np.all(data[TrilIndex].imag == 0.0) else 1.0 / np.max(np.abs(data[TrilIndex].imag))
-					result[jPES, iPES] = 0 if np.all(data[TrilIndex].real == 0.0) else 1.0 / np.max(np.abs(data[TrilIndex].real))
-		return result.reshape(-1)
-	else:
-		with np.errstate(divide="ignore"):
-			return np.where(np.any(data.reshape(pes.NUM_ELM, -1) != 0, -1), 1.0 / np.max(np.abs(data.reshape(pes.NUM_ELM, -1)), -1), 0)
+	with np.errstate(divide="ignore"):
+		return np.where(np.any(data.reshape(pes.NUM_ELM, -1) != 0, -1), 1.0 / np.max(np.abs(data.reshape(pes.NUM_ELM, -1)), -1), 0)
 
 
 def plot_average() -> None:
@@ -670,7 +657,7 @@ class DensityMatrixDrawer:
 			LOG_MAX = 1.0
 			CENTER_MAX = LOG_MAX
 		elif init_dist is not None:
-			LOG_MAX = 1.5 * np.max(np.abs(init_dist.factors))
+			LOG_MAX = 1.5 * np.max(np.abs(init_dist.weight)) / (2.0 * np.pi) ** pes.DIM / init_dist.sigma_r0.prod()
 			CENTER_MAX = LOG_MAX
 		else:
 			assert self.dm_data is not None
@@ -998,7 +985,7 @@ class WavefunctionPlotter:
 			if self.__draw_rescaled:
 				max_y = 1.0
 			elif init_dist is not None:
-				max_y = 1.5 * np.max(np.abs(init_dist.weight_phase.diagonal() / np.sqrt(2.0 * np.pi) / init_dist.sigma_r0[iDim]))
+				max_y = 1.5 * np.max(np.abs(init_dist.weight.diagonal())) / np.sqrt(2.0 * np.pi) / init_dist.sigma_r0[iDim]
 			else:
 				assert self.wfn_sqnm is not None
 				max_y = 1.1 * float(np.max(self.wfn_sqnm[:, iDim]))

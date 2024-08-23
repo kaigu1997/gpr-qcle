@@ -18,7 +18,7 @@ sys.path.append(os.path.dirname(__file__))
 import evolve
 import gp
 import pes
-import sample
+import point
 
 PURITY_FACTOR: float = (2.0 * np.pi * pes.HBAR) ** pes.DIM
 
@@ -177,7 +177,7 @@ class MonteCarloAverage(Averager):
 
 		Parameters
 		----------
-		ref_pts : npt.NDArray[np.double]
+		ref_pts : list[npt.NDArray[np.double]], len of NUM_TRIG, each of shape (NUM_PTS, PHASEDIM)
 			Current points, used to estimate average and variance
 		predictor : typing.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
 			Used to predict the density of the points
@@ -187,7 +187,7 @@ class MonteCarloAverage(Averager):
 				TrilIndex: int = pes.flatten_tril_index[iPES, jPES]
 				center: npt.NDArray[np.double] = np.mean(ref_pts[TrilIndex], 0)
 				stddev: npt.NDArray[np.double] = 1.5 * np.std(ref_pts[TrilIndex], 0)
-				self.point_set[TrilIndex] = sample.normal_sample(self.__num_pts, center, stddev)
+				self.point_set[TrilIndex] = point.normal_sample(self.__num_pts, center, stddev)
 				self.weight[TrilIndex] = np.exp(-np.sum(((self.point_set[TrilIndex] - center) / stddev) ** 2, -1) / 2.0) / ((2.0 * np.pi) ** pes.DIM * stddev.prod()) # N
 				self.density[TrilIndex] = predictor(self.point_set[TrilIndex], iPES * pes.NUM_PES + jPES)
 
@@ -255,10 +255,10 @@ class EvolvingPointsMCAverage(MonteCarloAverage):
 	def __init__(self, num_pts: int, init_dist: pes.InitialDistribution, evolve_coordinates_only: bool = False):
 		super().__init__(num_pts)
 		self.__evolve_coordinates_only: bool = evolve_coordinates_only
-		self.point_set[:] = sample.normal_sample(num_pts, init_dist.r0, init_dist.sigma_r0)
+		self.point_set[:] = point.normal_sample(num_pts, init_dist.r0, init_dist.sigma_r0)
 		for i, ElementIndex in enumerate(pes.tril_element_indices):
 			self.density[i] = init_dist(self.point_set[i], ElementIndex)
-			self.weight[i] = np.abs(self.density[i]) / np.abs(init_dist.weight_phase[ElementIndex // pes.NUM_PES, ElementIndex % pes.NUM_PES])
+			self.weight[i] = np.abs(self.density[i]) / init_dist.weight[ElementIndex // pes.NUM_PES, ElementIndex % pes.NUM_PES]
 
 	def evolve(
 		self,
@@ -331,7 +331,7 @@ class AnalyticalAverager(Averager):
 		for iPES in range(pes.NUM_PES):
 			ElementIndex: int = iPES * pes.NUM_PES + iPES
 			pred: gp.SinglePredictor = self.__predictors[ElementIndex]
-			result[iPES] = pred.model.cov.lengthscale.prod().item() * pred.get_weights().sum().item()
+			result[iPES] = pred.model.cov.lengthscale.prod().item() * pred.k_inv_y.sum().item()
 		return result * __class__.__AVERAGE_CONSTANT
 
 	def coordinates(self) -> npt.NDArray[np.double]:
@@ -339,7 +339,7 @@ class AnalyticalAverager(Averager):
 		for iPES in range(pes.NUM_PES):
 			ElementIndex: int = iPES * pes.NUM_PES + iPES
 			pred: gp.SinglePredictor = self.__predictors[ElementIndex]
-			result += pred.model.cov.lengthscale.prod().item() * (pred.get_weights()[:, None] * pred.get_training_features()).sum(0).detach().numpy()
+			result += pred.model.cov.lengthscale.prod().item() * (pred.k_inv_y[:, None] * pred.get_training_features()).sum(0).detach().numpy()
 		return result * __class__.__AVERAGE_CONSTANT
 
 	def square_coordinates(self) -> npt.NDArray[np.double]:
@@ -348,8 +348,8 @@ class AnalyticalAverager(Averager):
 			ElementIndex: int = iPES * pes.NUM_PES + iPES
 			pred: gp.SinglePredictor = self.__predictors[ElementIndex]
 			result += pred.model.cov.lengthscale.prod().item() * (
-				(pred.get_weights()[:, None, None] * pred.get_training_features()[:, :, None] * pred.get_training_features()[:, None, :]).sum(0)
-				+ pred.get_weights().sum() * torch.diagflat(pred.model.cov.lengthscale ** 2)).detach().numpy()
+				(pred.k_inv_y[:, None, None] * pred.get_training_features()[:, :, None] * pred.get_training_features()[:, None, :]).sum(0)
+				+ pred.k_inv_y.sum() * torch.diagflat(pred.model.cov.lengthscale ** 2)).detach().numpy()
 		return result * __class__.__AVERAGE_CONSTANT
 
 	def covariance(self) -> npt.NDArray[np.double]:
@@ -367,5 +367,5 @@ class AnalyticalAverager(Averager):
 				model: gp.GP = copy.deepcopy(pred.model)
 				with torch.no_grad():
 					model.cov.lengthscale[...] *= np.sqrt(2.0)
-				result[iPES, jPES] = (np.pi ** pes.DIM) * pred.model.cov.lengthscale.prod().item() * (pred.get_weights() @ model.cov(pred.get_training_features()).to_dense() @ pred.get_weights()).item()
+				result[iPES, jPES] = (np.pi ** pes.DIM) * pred.model.cov.lengthscale.prod().item() * (pred.k_inv_y @ model.cov(pred.get_training_features()).to_dense() @ pred.k_inv_y).item()
 		return PURITY_FACTOR * (result + result.T - np.diag(np.diag(result)))

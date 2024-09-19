@@ -23,7 +23,6 @@ import pes
 import utility
 
 torch.set_default_dtype(torch.double)
-torch.manual_seed(0)
 DEBUG_MODE: bool = True
 
 
@@ -589,19 +588,12 @@ class SinglePredictor:
 				num_iter = i
 				print("Convergence: |Gradient| = {} <= GTOL = {}".format(math.sqrt(grad_sqnm), __class__.__GTOL_SQRT))
 				break
-			if abs(last_value - loss.item()) / max(abs(last_value), abs(loss.item()), 1.0) < __class__.__FTOL:
-				finish_early = True
-				num_iter = i
-				print("Convergence: |f_i - f_{{i+1}}| = {} / {} <= FTOL = {}".format(abs(last_value - loss.item()), max(abs(last_value), abs(loss.item()), 1.0), __class__.__FTOL))
-				break
-			# change parameter
-			last_value = loss.item()
+			# change parameter and log
 			newton_change: torch.Tensor
 			newton_change, hessian_precond = __class__.__preconditioned_ldl_solve(hessian, grad_combined, True)
 			if learning_rate < 1.0:
 				learning_rate *= 2.0
-			# log
-			if print_log:
+			if print_log or i % (__class__.__MAX_ITER // 100) == 0:
 				__class__.__print_stuff(
 					self.__model,
 					loss,
@@ -613,18 +605,7 @@ class SinglePredictor:
 					"Cond(preconditioned hessian) = {}".format(torch.linalg.cond(hessian_precond).item()),
 					True
 				)
-			else:
-				if i % (__class__.__MAX_ITER // 100) == 0:
-					__class__.__print_stuff(
-						self.__model,
-						loss,
-						learning_rate,
-						1,
-						True,
-						hessian,
-						"Iter {} - last = {:.15e},".format(i, last_value),
-						"Cond(preconditioned hessian) = {}".format(torch.linalg.cond(hessian_precond).item())
-					)
+			last_value = loss.item()
 			old_learning_rate: float = learning_rate
 			for change, method in zip([newton_change, grad_combined], ["Newton Method", "Gradient Descent"]):
 				loss, learning_rate = optimize_with_learning_rate(
@@ -642,6 +623,11 @@ class SinglePredictor:
 				finish_early = True
 				num_iter = i
 				print("Stop: No stepping Forward")
+				break
+			if abs(last_value - loss.item()) / max(abs(last_value), abs(loss.item()), 1.0) < __class__.__FTOL:
+				finish_early = True
+				num_iter = i
+				print("Convergence: |f_i - f_{{i+1}}| = {} / {} <= FTOL = {}".format(abs(last_value - loss.item()), max(abs(last_value), abs(loss.item()), 1.0), __class__.__FTOL))
 				break
 		if not finish_early:
 			print("Stop: Total No. iterations reached limit.")

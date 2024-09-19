@@ -84,8 +84,8 @@ def read_input() -> tuple[npt.NDArray[np.double], npt.NDArray[np.double], npt.ND
 		output_interval: float = float(lines[17])
 		reopt_interval: float = float(lines[19])
 		dt: float = float(lines[21])
-		output_interval = round(output_interval / dt) * dt
-		reopt_interval = round(reopt_interval / output_interval) * output_interval
+		output_interval = round(output_interval / dt) * dt if output_interval > dt else dt
+		reopt_interval = round(reopt_interval / output_interval) * output_interval if reopt_interval > output_interval else output_interval
 		return mass, np.concatenate((x0, p0)), np.concatenate((pes.HBAR / 2.0 / sigma_p0, sigma_p0)), dx, init_ppl, init_phase, output_interval, reopt_interval, dt
 
 

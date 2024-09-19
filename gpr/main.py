@@ -225,7 +225,7 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 			"""
 			# get scale
 			scale: npt.NDArray[np.double] = pts.rescale_factor
-			print("Tick {}, {}, {}".format(iTick, utility.format_array("scales", scale), datetime.datetime.now()))
+			print("Tick {}, {}, {}".format(iTick, utility.format_array("scales", scale), datetime.datetime.now()), flush=True)
 			# save points
 			# index of central points corresponds to the element
 			# index of extra points is the element index + num_elements
@@ -353,18 +353,12 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 					print_parameter_scale_loss(scale)
 				# update and predict
 				train_pred_draw(iTick, iTick % reopt_steps == 0)
+				print_parameter_scale_loss(scale)
 				# check stopping criteria, when grid solution is not given
 				# use predictors (aia) with old points
 				if grid_data is None:
 					if np.any(mca.coordinates()[:pes.DIM] > np.abs(r0[:pes.DIM])) or np.any(aia.coordinates()[:pes.DIM] > np.abs(r0[:pes.DIM])) or np.any(epmca.coordinates()[:pes.DIM] > np.abs(r0[:pes.DIM])):
 						to_stop = True
-				# sample extra points and predict them
-				pts.sh_to_gp(predictors.predict)
-				scale: npt.NDArray[np.double] = pts.rescale_factor
-				predictors.update(pts.center, pts.density, pts.num_center, scale)
-				if iTick % reopt_steps == 0:
-					predictors.train()
-				print_parameter_scale_loss(scale)
 				if end_time is not None:
 					current_time: int = int(time.time())
 					time_pass: int = current_time - start_time

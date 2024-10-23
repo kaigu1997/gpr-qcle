@@ -2,6 +2,7 @@ import collections.abc
 import math
 import os
 import sys
+import traceback
 import typing
 
 import gpytorch
@@ -18,6 +19,19 @@ torch.set_default_dtype(torch.float64)
 PARAM_UPLIM = 10
 
 
+def format_array(arr_name : str | None, arr: typing.Any) -> str:
+	result: str = (arr_name + " = ") if arr_name else ""
+	if isinstance(arr, torch.Tensor) or isinstance(arr, np.ndarray):
+		result += " ".join(format_array(None, val.item()) for val in arr.ravel())
+	elif isinstance(arr, collections.abc.Iterable):
+		result += " ".join(format_array(None, item) for item in arr)
+	elif isinstance(arr, complex):
+		result += "{} + {}i".format(arr.real, arr.imag)
+	else:
+		result += str(arr)
+	return result
+
+
 def print_stuff(
 	model: gpytorch.models.ExactGP,
 	loss: float,
@@ -29,17 +43,6 @@ def print_stuff(
 	end_str: str="",
 	flush: bool=False
 ) -> None:
-	def format_array(arr_name : str | None, arr: typing.Any) -> str:
-		result: str = (arr_name + " = ") if arr_name else ""
-		if isinstance(arr, torch.Tensor) or isinstance(arr, np.ndarray):
-			result += " ".join(format_array(None, val.item()) for val in arr.ravel())
-		elif isinstance(arr, collections.abc.Iterable):
-			result += " ".join(format_array(None, item) for item in arr)
-		elif isinstance(arr, complex):
-			result += "{} + {}i".format(arr.real, arr.imag)
-		else:
-			result += str(arr)
-		return result
 
 	def print_model(model_print_grad: bool = False) -> None:
 		param_name_fmt_str: str = "{}Parameter name: {{}}".format("\t" * indent)
@@ -166,14 +169,18 @@ class GradientOptimization:
 
 		# calculate gradient and hessian
 		hessian: torch.Tensor | None = torch.eye(self.__param_indices[-1]) if self.__param_indices[-1] <= PARAM_UPLIM else None
-		for iParam, param in enumerate(self.__model.parameters()):
-			param.grad = torch.autograd.grad(loss, param, None, True, True, True, True, False, True)[0] # same shape of param
-			if torch.any(torch.isnan(param.grad)).item() or torch.any(torch.isinf(param.grad)).item():
-					return math.nan, loss, False
-			if hessian is not None:
-				for iGrad, grad_elm in enumerate(param.grad.reshape(-1)):
-					for jParam, param_for_grad in enumerate(self.__model.parameters()):
-						hessian[self.__param_indices[iParam] + iGrad, self.__param_indices[jParam]:self.__param_indices[jParam + 1]] = torch.autograd.grad(grad_elm, param_for_grad, None, True, False, True, True, False, True)[0].reshape(-1)
+		try:
+			for iParam, param in enumerate(self.__model.parameters()):
+				param.grad = torch.autograd.grad(loss, param, None, True, True, True, True, False, True)[0] # same shape of param
+				if torch.any(torch.isnan(param.grad)).item() or torch.any(torch.isinf(param.grad)).item():
+						return math.nan, loss, False
+				if hessian is not None:
+					for iGrad, grad_elm in enumerate(param.grad.reshape(-1)):
+						for jParam, param_for_grad in enumerate(self.__model.parameters()):
+							hessian[self.__param_indices[iParam] + iGrad, self.__param_indices[jParam]:self.__param_indices[jParam + 1]] = torch.autograd.grad(grad_elm, param_for_grad, None, True, False, True, True, False, True)[0].reshape(-1)
+		except Exception as e:
+			traceback.print_exception(e)
+			return math.nan, loss, False
 		if hessian is not None:
 			if torch.any(torch.isnan(hessian)).item() or torch.any(torch.isinf(hessian)).item():
 				return math.nan, loss, False
@@ -377,110 +384,114 @@ def gpytorch_train(
 	initial_value_search: bool = True,
 	**kwargs
 ) -> gp.GPR | None:
-	MAX_ITER: typing.Literal[50000] = 50000
-	NOISE: float = float(gpytorch.settings.min_fixed_noise.value(torch.double) or 1e-8)
-	model: gp.GPR = gp.GPR(x, y, gpytorch.likelihoods.FixedNoiseGaussianLikelihood(torch.full(x.shape[:-1], NOISE)), kernel)
-	param_indices: list[int] = [0]
-	with torch.no_grad():
-		for iParam, (name, param, constraint) in enumerate(model.named_parameters_and_constraints()):
-			try:
-				param[...] = initial_values[iParam].expand_as(param).clone()
-			except (IndexError, RuntimeError): # unable to expand:
-				if isinstance(constraint, gpytorch.constraints.Interval) and constraint.initial_value is not None:
-					param[...] = constraint.initial_value.expand_as(param).clone()
-				else:
-					param.fill_(1.0)
-			param.detach_().requires_grad = True
-			param_indices.append(param_indices[-1] + param.numel())
-			# set constraint
-			name_levels: list[str] = name.split(".")
-			num_name_levels: int = len(name_levels)
-			attr = model
-			for i in range(num_name_levels - 1):
-				attr = getattr(attr, name_levels[i])
-			attr.register_constraint(name_levels[-1], gp.NoConstraint())
-	# train model
-	assert model.likelihood is not None
-	model.train()
-	model.likelihood.train()
-	# initial scan for [param/10, param*2]
-	loss: torch.Tensor | None = None
-	last_value: float = torch.inf
-	if initial_value_search:
-		init_params: torch.Tensor = torch.cat([constraint.transform(param) if isinstance(constraint, gpytorch.constraints.Interval) else param for _, param, constraint in model.named_parameters_and_constraints()])
-		best_weight: float = 0.0
-		for weight in (torch.arange(20.0) + 1.0) / 10.0:
-			try:
+	try:
+		MAX_ITER: typing.Literal[50000] = 50000
+		NOISE: float = float(gpytorch.settings.min_fixed_noise.value(torch.double) or 1e-8)
+		model: gp.GPR = gp.GPR(x, y, gpytorch.likelihoods.FixedNoiseGaussianLikelihood(torch.full(x.shape[:-1], NOISE)), kernel)
+		param_indices: list[int] = [0]
+		with torch.no_grad():
+			for iParam, (name, param, constraint) in enumerate(model.named_parameters_and_constraints()):
+				try:
+					param[...] = initial_values[iParam].expand_as(param).clone()
+				except (IndexError, RuntimeError): # unable to expand:
+					if isinstance(constraint, gpytorch.constraints.Interval) and constraint.initial_value is not None:
+						param[...] = constraint.initial_value.expand_as(param).clone()
+					else:
+						param.fill_(1.0)
+				param.detach_().requires_grad = True
+				param_indices.append(param_indices[-1] + param.numel())
+				# set constraint
+				name_levels: list[str] = name.split(".")
+				num_name_levels: int = len(name_levels)
+				attr = model
+				for i in range(num_name_levels - 1):
+					attr = getattr(attr, name_levels[i])
+				attr.register_constraint(name_levels[-1], gp.NoConstraint())
+		# train model
+		assert model.likelihood is not None
+		model.train()
+		model.likelihood.train()
+		# initial scan for [param/10, param*2]
+		loss: torch.Tensor | None = None
+		last_value: float = torch.inf
+		if initial_value_search:
+			init_params: torch.Tensor = torch.cat([constraint.transform(param) if isinstance(constraint, gpytorch.constraints.Interval) else param for _, param, constraint in model.named_parameters_and_constraints()])
+			best_weight: float = 0.0
+			for weight in (torch.arange(20.0) + 1.0) / 10.0:
+				try:
+					with torch.no_grad():
+						for iParam, (_, param, constraint) in enumerate(model.named_parameters_and_constraints()):
+							param[...] = (init_params[param_indices[iParam]:param_indices[iParam + 1]].reshape_as(param) * weight).detach()
+							if isinstance(constraint, gpytorch.constraints.Interval):
+								param[...] = constraint.inverse_transform(param).detach()
+					loss = loss_func(model.cov, x, y, **kwargs)
+					if print_log:
+						print_stuff(model, loss.item(), 1.0, 1, start_str="last = {:.15e},".format(last_value), flush=True)
+					if loss.item() < last_value:
+						last_value = loss.item()
+						best_weight = weight.item()
+				except RuntimeError: # NANs
+					pass
+			if best_weight == 0.0: # no non-NAN value
+				print("Bad choice of initial value!", flush=True)
+				return None
+			else:
 				with torch.no_grad():
 					for iParam, (_, param, constraint) in enumerate(model.named_parameters_and_constraints()):
-						param[...] = (init_params[param_indices[iParam]:param_indices[iParam + 1]].reshape_as(param) * weight).detach()
+						param[...] = (init_params[param_indices[iParam]:param_indices[iParam + 1]].reshape_as(param) * best_weight).detach()
 						if isinstance(constraint, gpytorch.constraints.Interval):
 							param[...] = constraint.inverse_transform(param).detach()
+				last_value = torch.inf
 				loss = loss_func(model.cov, x, y, **kwargs)
-				if print_log:
-					print_stuff(model, loss.item(), 1.0, 1, start_str="last = {:.15e},".format(last_value), flush=True)
-				if loss.item() < last_value:
-					last_value = loss.item()
-					best_weight = weight.item()
-			except RuntimeError: # NANs
-				pass
-		if best_weight == 0.0: # no non-NAN value
-			print("Bad choice of initial value!", flush=True)
-			return None
 		else:
-			with torch.no_grad():
-				for iParam, (_, param, constraint) in enumerate(model.named_parameters_and_constraints()):
-					param[...] = (init_params[param_indices[iParam]:param_indices[iParam + 1]].reshape_as(param) * best_weight).detach()
-					if isinstance(constraint, gpytorch.constraints.Interval):
-						param[...] = constraint.inverse_transform(param).detach()
-			last_value = torch.inf
-			loss = loss_func(model.cov, x, y, **kwargs)
-	else:
-		try:
-			loss = loss_func(model.cov, x, y, **kwargs)
-		except RuntimeError: # NANs
-			print("Bad choice of initial value!", flush=True)
-			return None
-	# start optimization
-	assert loss is not None
-	learning_rate: float = -1.0
-	num_iter: int = 0
-	grad_opt: GradientOptimization = GradientOptimization(model, param_indices, loss_func, x, y, print_log, model.COV_NAME, **kwargs)
-	non_grad_opt: NonGradientOptimization | None = None
-	while num_iter < MAX_ITER:
-		num_iter += 1
-		if non_grad_opt is None:
-			learning_rate, loss, to_end = grad_opt(learning_rate, loss)
-			if to_end:
-				break
-			if math.isnan(learning_rate):
-				non_grad_opt = NonGradientOptimization(model, loss_func, x, y, print_log, model.COV_NAME, **kwargs)
+			try:
+				loss = loss_func(model.cov, x, y, **kwargs)
+			except RuntimeError: # NANs
+				print("Bad choice of initial value!", flush=True)
+				return None
+		# start optimization
+		assert loss is not None
+		learning_rate: float = -1.0
+		num_iter: int = 0
+		grad_opt: GradientOptimization = GradientOptimization(model, param_indices, loss_func, x, y, print_log, model.COV_NAME, **kwargs)
+		non_grad_opt: NonGradientOptimization | None = None
+		while num_iter < MAX_ITER:
+			num_iter += 1
+			if non_grad_opt is None:
+				learning_rate, loss, to_end = grad_opt(learning_rate, loss)
+				if to_end:
+					break
+				if math.isnan(learning_rate):
+					non_grad_opt = NonGradientOptimization(model, loss_func, x, y, print_log, model.COV_NAME, **kwargs)
+					if non_grad_opt.converged:
+						break
+			else:
+				loss = torch.tensor(non_grad_opt())
 				if non_grad_opt.converged:
 					break
-		else:
-			loss = torch.tensor(non_grad_opt())
-			if non_grad_opt.converged:
-				break
-		if print_log or num_iter % (MAX_ITER // 100) == 0:
-			print_stuff(
-				model,
-				loss.item(),
-				learning_rate,
-				1,
-				start_str="Iter {} - last = {:.15e},".format(num_iter, last_value),
-				flush=True
-			)
-		last_value = loss.item()
-	if num_iter == MAX_ITER:
-		print("Stop: Maximum number of iterations has been exceeded.")
-	print_stuff(
-		model,
-		loss.item(),
-		learning_rate,
-		start_str="Iter {} - last = {:.15e},".format(num_iter, last_value),
-		flush=print_log
-	)
-	# predict
-	model.eval()
-	model.likelihood.eval()
-	return model
+			if print_log or num_iter % (MAX_ITER // 100) == 0:
+				print_stuff(
+					model,
+					loss.item(),
+					learning_rate,
+					1,
+					start_str="Iter {} - last = {:.15e},".format(num_iter, last_value),
+					flush=True
+				)
+			last_value = loss.item()
+		if num_iter == MAX_ITER:
+			print("Stop: Maximum number of iterations has been exceeded.")
+		print_stuff(
+			model,
+			loss.item(),
+			learning_rate,
+			start_str="Iter {} - last = {:.15e},".format(num_iter, last_value),
+			flush=print_log
+		)
+		# predict
+		model.eval()
+		model.likelihood.eval()
+		return model
+	except Exception as e:
+		traceback.print_exception(e)
+		return None

@@ -61,6 +61,10 @@ def main(seed: int = 0) -> None:
 	print(datetime.datetime.now(), flush=True)
 	gc.collect()
 
+	local.local_parameter_trial(pinv_model, pts)
+	print(datetime.datetime.now(), flush=True)
+	gc.collect()
+
 	num_neighbor: int
 	nn: sklearn.neighbors.NearestNeighbors
 	central_neighbor_ind: torch.Tensor
@@ -71,7 +75,7 @@ def main(seed: int = 0) -> None:
 	# nn: sklearn.neighbors.NearestNeighbors = sklearn.neighbors.NearestNeighbors(n_neighbors=num_neighbor, n_jobs=-1).fit(pts.extra_x)
 	# central_neighbor_ind: torch.Tensor = local.get_central_neighbor_indices(nn, pts.extra_x)
 
-	local_model: gp.GPR = plot.plot_lengthscale_error("local", pc, pts, se.approx_se, predictor=local.local_predict, x_all=pts.extra_x_t, y_all=pts.extra_y_t, num_neighbor=num_neighbor, nn=nn, neighbor_ind=central_neighbor_ind)
+	local_model: gp.GPR = plot.plot_lengthscale_error("local", pc, pts, se.approx_se, predictor=local.local_predict, x_all=pts.x_all_t, y_all=pts.y_all_t, num_neighbor=num_neighbor, nn=nn, neighbor_ind=central_neighbor_ind)
 	print(datetime.datetime.now(), flush=True)
 	gc.collect()
 
@@ -83,9 +87,14 @@ def main(seed: int = 0) -> None:
 	print(datetime.datetime.now(), flush=True)
 	gc.collect()
 
+	local.local_global_model_mix_trial(local_model, pinv_model, pts, pc, se.pinv_pred, num_neighbor, nn, central_neighbor_ind)
+	print(datetime.datetime.now(), flush=True)
+	gc.collect()
+
 	local.local_separate_kernel_trial(pts, pc, num_neighbor)
 	print(datetime.datetime.now(), flush=True)
 	gc.collect()
+
 
 if __name__ == "__main__":
 	if len(sys.argv) > 1:

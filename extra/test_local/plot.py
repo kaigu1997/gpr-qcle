@@ -1,3 +1,4 @@
+import collections.abc
 import math
 import os
 import sys
@@ -20,7 +21,7 @@ import opt
 import sample
 
 torch.set_default_dtype(torch.float64)
-FIGSIZE: list[float] = matplotlib.rcParams["figure.figsize"]
+FIGSIZE: tuple[float, float] = tuple(matplotlib.rcParams["figure.figsize"])
 
 
 class PNLogNorm(matplotlib.colors.Normalize):
@@ -62,7 +63,7 @@ class PNLogNorm(matplotlib.colors.Normalize):
 			return np.ma.array(np.vectorize(process_single_value, otypes=[float])(result.data, clip), mask=result.mask)
 
 	def __repr__(self) -> str:
-		return __class__.__name__ + "({}, {})".format(self.__abs_min, self.__abs_max)
+		return f"{__class__.__name__}({self.__abs_min}, {self.__abs_max})"
 		
 	def inverse(self, value: typing.Any) -> float | npt.NDArray[np.double]:
 		def process_single_value(value: float) -> float:
@@ -77,7 +78,7 @@ class PNLogNorm(matplotlib.colors.Normalize):
 			return np.ma.array(np.vectorize(process_single_value, otypes=[float])(result.data), mask=result.mask)
 
 
-def get_centered_norm_and_levels(abs_max: float, cmap: str | matplotlib.colors.Colormap) -> tuple[matplotlib.colors.CenteredNorm, npt.NDArray[np.double], npt.NDArray[np.double]]:
+def get_centered_norm_levels_ticks(abs_max: float, cmap: str | matplotlib.colors.Colormap) -> tuple[matplotlib.colors.CenteredNorm, npt.NDArray[np.double], npt.NDArray[np.double]]:
 	abs_max = abs(abs_max)
 	if isinstance(cmap, str):
 		cmap = matplotlib.colormaps[cmap]
@@ -87,7 +88,7 @@ def get_centered_norm_and_levels(abs_max: float, cmap: str | matplotlib.colors.C
 	return centered_norm, centered_levels, centered_levels[::cmap.N // 8]
 
 
-def get_posneg_log_norm_and_levels(abs_min: float, abs_max: float, cmap: str | matplotlib.colors.Colormap) -> tuple[PNLogNorm, npt.NDArray[np.double], npt.NDArray[np.double]]:
+def get_posneg_log_norm_levels_ticks(abs_min: float, abs_max: float, cmap: str | matplotlib.colors.Colormap) -> tuple[PNLogNorm, npt.NDArray[np.double], npt.NDArray[np.double]]:
 	abs_min = abs(abs_min)
 	abs_max = abs(abs_max)
 	if abs_max == 0:
@@ -97,7 +98,8 @@ def get_posneg_log_norm_and_levels(abs_min: float, abs_max: float, cmap: str | m
 	abs_min = max(abs_min, abs_max * sys.float_info.epsilon)
 	lb_log10: int = int(math.floor(math.log10(abs_min)))
 	ub_log10: int = int(math.ceil(math.log10(abs_max)))
-	lb_log10 += (ub_log10 - lb_log10) % 4
+	if ub_log10 - lb_log10 > 4:
+		lb_log10 += (ub_log10 - lb_log10) % 4
 	if isinstance(cmap, str):
 		cmap = matplotlib.colormaps[cmap]
 	num_ticks: int = cmap.N // 8 * 8 + 3
@@ -123,19 +125,19 @@ class PlotConstants:
 		self.CTR_NORM: matplotlib.colors.Normalize
 		self.CTR_LEVELS: npt.NDArray[np.double]
 		self.CTR_TICKS: npt.NDArray[np.double]
-		self.CTR_NORM, self.CTR_LEVELS, self.CTR_TICKS = get_centered_norm_and_levels(self.ABS_MAX_LIMIT * __class__.COLOR_RATIO, __class__.CMAP)
+		self.CTR_NORM, self.CTR_LEVELS, self.CTR_TICKS = get_centered_norm_levels_ticks(self.ABS_MAX_LIMIT * __class__.COLOR_RATIO, __class__.CMAP)
 		self.LOG_NORM: matplotlib.colors.Normalize
 		self.LOG_LEVELS: npt.NDArray[np.double]
 		self.LOG_TICKS: npt.NDArray[np.double]
-		self.LOG_NORM, self.LOG_LEVELS, self.LOG_TICKS = get_posneg_log_norm_and_levels(self.ABS_MIN_LIMIT, self.ABS_MAX_LIMIT, __class__.CMAP)
+		self.LOG_NORM, self.LOG_LEVELS, self.LOG_TICKS = get_posneg_log_norm_levels_ticks(self.ABS_MIN_LIMIT, self.ABS_MAX_LIMIT, __class__.CMAP)
 
 	def draw_function(self) -> None:
 		fig: matplotlib.figure.Figure = plt.figure(figsize=(FIGSIZE[0] * 3, FIGSIZE[1]))
 		ax0, ax1, ax2 = fig.subplots(ncols=3)
 		ax0.contourf(limited_region(sample.distribution.x1), limited_region(sample.distribution.x2), limited_region(self.label), self.CTR_LEVELS, cmap=__class__.CMAP, norm=self.CTR_NORM)
-		# ax0.scatter(CENTER[:, 0], CENTER[:, 1], 20 * np.abs(WEIGHT), 'black')
+		# ax0.scatter(CENTER[:, 0], CENTER[:, 1], 20 * np.abs(WEIGHT), "black")
 		ax1.contourf(sample.distribution.x1, sample.distribution.x2, self.label, self.CTR_LEVELS, cmap=__class__.CMAP, norm=self.CTR_NORM)
-		# ax1.scatter(CENTER[:, 0], CENTER[:, 1], 10, 'black')
+		# ax1.scatter(CENTER[:, 0], CENTER[:, 1], 10, "black")
 		fig.colorbar(matplotlib.cm.ScalarMappable(self.CTR_NORM, __class__.CMAP), ax=[ax0, ax1], ticks=self.CTR_TICKS)
 		ax2.contourf(sample.distribution.x1, sample.distribution.x2, self.label, self.LOG_LEVELS, cmap=__class__.CMAP, norm=self.LOG_NORM)
 		fig.colorbar(matplotlib.cm.ScalarMappable(self.LOG_NORM, __class__.CMAP), ax=ax2, ticks=self.LOG_TICKS, format="%+.1e")
@@ -146,16 +148,16 @@ class PlotConstants:
 		fig: matplotlib.figure.Figure = plt.figure(figsize=(FIGSIZE[0] * 3, FIGSIZE[1]))
 		ax0, ax1, ax2 = fig.subplots(ncols=3)
 		ax0.contourf(limited_region(sample.distribution.x1), limited_region(sample.distribution.x2), limited_region(self.label), self.CTR_LEVELS, cmap=__class__.CMAP, norm=self.CTR_NORM)
-		ax0.scatter(np.clip(extra_pts[:, 0], sample.distribution.MIN / 4, sample.distribution.MAX / 4), np.clip(extra_pts[:, 1], sample.distribution.MIN / 4, sample.distribution.MAX / 4), 1, 'green')
-		ax0.scatter(np.clip(central_pts[:, 0], sample.distribution.MIN / 4, sample.distribution.MAX / 4), np.clip(central_pts[:, 1], sample.distribution.MIN / 4, sample.distribution.MAX / 4), 10, 'black')
+		ax0.scatter(np.clip(extra_pts[:, 0], sample.distribution.MIN / 4, sample.distribution.MAX / 4), np.clip(extra_pts[:, 1], sample.distribution.MIN / 4, sample.distribution.MAX / 4), 1, "green")
+		ax0.scatter(np.clip(central_pts[:, 0], sample.distribution.MIN / 4, sample.distribution.MAX / 4), np.clip(central_pts[:, 1], sample.distribution.MIN / 4, sample.distribution.MAX / 4), 10, "black")
 		ax1.contourf(sample.distribution.x1, sample.distribution.x2, self.label, self.CTR_LEVELS, cmap=__class__.CMAP, norm=self.CTR_NORM)
 		fig.colorbar(matplotlib.cm.ScalarMappable(self.CTR_NORM, __class__.CMAP), ax=[ax0, ax1], ticks=self.CTR_TICKS)
 		ax2.contourf(sample.distribution.x1, sample.distribution.x2, self.label, self.LOG_LEVELS, cmap=__class__.CMAP, norm=self.LOG_NORM)
 		fig.colorbar(matplotlib.cm.ScalarMappable(self.LOG_NORM, __class__.CMAP), ax=ax2, ticks=self.LOG_TICKS, format="%.1e")
 		for ax in [ax1, ax2]:
-			ax.scatter(extra_pts[:, 0], extra_pts[:, 1], 1, 'green')
-			ax.scatter(central_pts[:, 0], central_pts[:, 1], 10, 'black')
-		fig.savefig("sample_points_{}.png".format(number))
+			ax.scatter(extra_pts[:, 0], extra_pts[:, 1], 1, "green")
+			ax.scatter(central_pts[:, 0], central_pts[:, 1], 10, "black")
+		fig.savefig(f"sample_points_{number}.png")
 		plt.close(fig)
 
 
@@ -174,9 +176,9 @@ def plot(
 	print("Mean absolute error =", mae)
 	print("Maximum error =", max_e)
 	if (mse_contribute := max_e ** 2 / (mse * pc.label.size) ) > 0.01:
-		print("Maximum error point contribute {:.2f}% of MSE".format(mse_contribute * 100))
+		print(f"Maximum error point contribute {mse_contribute * 100:.2f}% of MSE")
 	if (mae_contribute := max_e / (mae * pc.label.size)) > 0.01:
-		print("Maximum error point contribute {:.2f}% of MAE".format(mae_contribute * 100))
+		print(f"Maximum error point contribute {mae_contribute * 100:.2f}% of MAE")
 	print("", end="", flush=True)
 	max_ind: tuple = np.unravel_index(np.argmax(np.abs(diff)), diff.shape)
 	fig: matplotlib.figure.Figure = plt.figure(figsize=(FIGSIZE[0] * 3, FIGSIZE[1] * 4))
@@ -189,32 +191,57 @@ def plot(
 		axs[1, i].contourf(sample.distribution.x1, sample.distribution.x2, data[i], pc.CTR_LEVELS, cmap=PlotConstants.CMAP, norm=pc.CTR_NORM)
 		axs[2, i].contourf(sample.distribution.x1, sample.distribution.x2, data[i], pc.CTR_LEVELS, cmap=PlotConstants.CMAP, norm=pc.CTR_NORM)
 		if plot_extra:
-			axs[2, i].scatter(pts.extra_x[:, 0], pts.extra_x[:, 1], 1, 'green')
-			axs[2, i].scatter(pts.x[:, 0], pts.x[:, 1], 10, 'black')
+			axs[2, i].scatter(pts.extra_x[:, 0], pts.extra_x[:, 1], 1, "green")
+			axs[2, i].scatter(pts.x[:, 0], pts.x[:, 1], 10, "black")
 		else:
-			axs[2, i].scatter(pts.x[:, 0], pts.x[:, 1], 1, 'black')
+			axs[2, i].scatter(pts.x[:, 0], pts.x[:, 1], 1, "black")
 		axs[3, i].contourf(sample.distribution.x1, sample.distribution.x2, data[i], pc.LOG_LEVELS, cmap=PlotConstants.CMAP, norm=pc.LOG_NORM)
 	fig.colorbar(matplotlib.cm.ScalarMappable(pc.CTR_NORM, PlotConstants.CMAP), ax=axs[:3, :2].ravel().tolist(), ticks=pc.CTR_TICKS)
 	fig.colorbar(matplotlib.cm.ScalarMappable(pc.LOG_NORM, PlotConstants.CMAP), ax=axs[3, :2].tolist(), ticks=pc.LOG_TICKS, format="%.1e")
 
-	ctr_norm, ctr_levels, ctr_ticks = get_centered_norm_and_levels(np.max(np.abs(diff)) * PlotConstants.COLOR_RATIO, PlotConstants.CMAP)
-	pn_log_norm, pn_log_levels, pn_log_ticks = get_posneg_log_norm_and_levels(np.min(np.abs(diff[diff != 0])), np.max(np.abs(diff)), PlotConstants.CMAP)
-	axs[0, 2].set_title("Error\nMaximum at ({:.2f}, {:.2f})".format(sample.distribution.x1[max_ind], sample.distribution.x2[max_ind]))
+	ctr_norm, ctr_levels, ctr_ticks = get_centered_norm_levels_ticks(np.max(np.abs(diff)) * PlotConstants.COLOR_RATIO, PlotConstants.CMAP)
+	pn_log_norm, pn_log_levels, pn_log_ticks = get_posneg_log_norm_levels_ticks(np.min(np.abs(diff[diff != 0])), np.max(np.abs(diff)), PlotConstants.CMAP)
+	axs[0, 2].set_title(f"Error\nMaximum at ({sample.distribution.x1[max_ind]:.2f}, {sample.distribution.x2[max_ind]:.2f})")
 	axs[0, 2].contourf(limited_region(sample.distribution.x1), limited_region(sample.distribution.x2), limited_region(diff), ctr_levels, cmap=PlotConstants.CMAP, norm=ctr_norm)
-	axs[0, 2].scatter(np.clip(sample.distribution.x1[max_ind], sample.distribution.MIN / 4, sample.distribution.MAX / 4), np.clip(sample.distribution.x2[max_ind], sample.distribution.MIN / 4, sample.distribution.MAX / 4), 10, 'black')
+	axs[0, 2].scatter(np.clip(sample.distribution.x1[max_ind], sample.distribution.MIN / 4, sample.distribution.MAX / 4), np.clip(sample.distribution.x2[max_ind], sample.distribution.MIN / 4, sample.distribution.MAX / 4), 10, "black")
 	axs[1, 2].contourf(sample.distribution.x1, sample.distribution.x2, diff, ctr_levels, cmap=PlotConstants.CMAP, norm=ctr_norm)
-	axs[1, 2].scatter(sample.distribution.x1[max_ind], sample.distribution.x2[max_ind], 10, 'black')
+	axs[1, 2].scatter(sample.distribution.x1[max_ind], sample.distribution.x2[max_ind], 10, "black")
 	axs[2, 2].contourf(sample.distribution.x1, sample.distribution.x2, diff, ctr_levels, cmap=PlotConstants.CMAP, norm=ctr_norm)
 	if plot_extra:
-		axs[2, 2].scatter(pts.extra_x[:, 0], pts.extra_x[:, 1], 1, 'green')
-		axs[2, 2].scatter(pts.x[:, 0], pts.x[:, 1], 10, 'black')
+		axs[2, 2].scatter(pts.extra_x[:, 0], pts.extra_x[:, 1], 1, "green")
+		axs[2, 2].scatter(pts.x[:, 0], pts.x[:, 1], 10, "black")
 	else:
-		axs[2, 2].scatter(pts.x[:, 0], pts.x[:, 1], 1, 'black')
+		axs[2, 2].scatter(pts.x[:, 0], pts.x[:, 1], 1, "black")
 	axs[3, 2].contourf(sample.distribution.x1, sample.distribution.x2, diff, pn_log_levels, cmap=PlotConstants.CMAP, norm=pn_log_norm)
 	fig.colorbar(matplotlib.cm.ScalarMappable(ctr_norm, PlotConstants.CMAP), ax=axs[:3, 2].tolist(), ticks=ctr_ticks)
 	fig.colorbar(matplotlib.cm.ScalarMappable(pn_log_norm, PlotConstants.CMAP), ax=axs[3, 2], ticks=pn_log_ticks, format="%.1e")
 	fig.savefig(name + ".png")
 	plt.close(fig)
+
+
+def generate_and_plot_model(
+	name: str,
+	pc: PlotConstants,
+	dist: sample.distribution,
+	pts: sample.data,
+	erf: opt.LossFuncType,
+	predictor: gp.PredType[gpytorch.kernels.Kernel] | None = None
+) -> gp.GPR:
+	model: gp.GPR | None = opt.gpytorch_train(
+		pts.x_t,
+		pts.y_t,
+		gpytorch.kernels.RBFKernel(sample.distribution.DIM),
+		erf,
+		initial_values=[torch.from_numpy(dist.WIDTH) if dist.is_trivial else torch.ones(sample.distribution.DIM)]
+	)
+	assert model is not None
+	plot(
+		gp.gpytorch_gpr(model.cov, pts, predictor=predictor),
+		pc,
+		pts,
+		f"opt_{name}"
+	)
+	return model
 
 
 def plot_lengthscale_error(
@@ -225,8 +252,7 @@ def plot_lengthscale_error(
 	min: float | npt.NDArray[np.double] = 0.25,
 	max: float | npt.NDArray[np.double] = 1.25,
 	n_grids_to_plot: int = 101,
-	predictor: gp.PredType | None = None,
-	**kwargs
+	predictor: gp.PredType[gpytorch.kernels.Kernel] | None = None
 ) -> gp.GPR:
 	NOISE: float = float(gpytorch.settings.min_fixed_noise.value(torch.double) or 1e-8)
 	if not isinstance(min, np.ndarray):
@@ -246,16 +272,15 @@ def plot_lengthscale_error(
 					pts.y_t,
 					gpytorch.likelihoods.FixedNoiseGaussianLikelihood(torch.full(pts.x.shape[:-1], NOISE)),
 					gpytorch.kernels.RBFKernel(sample.distribution.DIM, lengthscale_constraint=gp.NoConstraint(torch.from_numpy(lengths[i, j])))
-				).eval(),
+				).eval().cov,
 				pts,
-				predictor=predictor,
-				**kwargs
+				predictor=predictor
 			) - pts.y_test
 			values[0, i, j] = np.average(diff ** 2)
 			values[1, i, j] = np.average(np.abs(diff))
 			values[2, i, j] = np.max(np.abs(diff))
 	fig, axs = plt.subplots(1, 3, figsize=(FIGSIZE[0] * 3, FIGSIZE[1]))
-	titles: list[str] = ['Mean Squared Error', 'Mean Absolute Error', 'Maximum Error']
+	titles: list[str] = ["Mean Squared Error", "Mean Absolute Error", "Maximum Error"]
 	for i in range(3):
 		ax: matplotlib.axes.Axes = axs[i]
 		lg_lb: float = np.floor(np.log10(np.min(values[i])))
@@ -264,12 +289,12 @@ def plot_lengthscale_error(
 		levels: npt.NDArray[np.double] = np.power(10.0, np.linspace(lg_lb, lg_ub, matplotlib.colormaps[PlotConstants.CMAP].N, True))
 		ax.contourf(xv, pv, values[i], levels, cmap=PlotConstants.CMAP, norm=norm)
 		argmin_ind = np.unravel_index(np.argmin(values[i]), values[i].shape)
-		ax.set_title(titles[i] + '\nMinimum at {}'.format(lengths[argmin_ind]) + '\nMinimum is {}'.format(values[i][argmin_ind]))
+		ax.set_title(f"{titles[i]}\nMinimum at {lengths[argmin_ind]}\nMinimum is {values[i][argmin_ind]}")
 		ax.scatter(lengths[argmin_ind][0], lengths[argmin_ind][1], 10, "black")
-		ax.set_xlabel('Length of x')
-		ax.set_ylabel('Length of p')
+		ax.set_xlabel("Length of x")
+		ax.set_ylabel("Length of p")
 		fig.colorbar(matplotlib.cm.ScalarMappable(cmap=PlotConstants.CMAP, norm=norm), ax=ax, ticks=np.power(10.0, np.linspace(lg_lb, lg_ub, int(lg_ub - lg_lb) + 1, True)), format="%.1e")
-	fig.savefig("length_{}.png".format(name))
+	fig.savefig(f"length_{name}.png")
 	plt.close(fig)
 	del fig
 	model = opt.gpytorch_train(
@@ -278,16 +303,107 @@ def plot_lengthscale_error(
 		gpytorch.kernels.RBFKernel(sample.distribution.DIM),
 		erf,
 		initial_values=[torch.from_numpy(lengths[np.unravel_index(np.argmin(values[0]), values[0].shape)])],
-		# initial_values=[torch.from_numpy(sample.distribution.WIDTH)],
-		initial_value_search=False,
-		pred=predictor,
-		**kwargs
+		initial_value_search=False
 	)
 	assert model is not None
 	plot(
-		gp.gpytorch_gpr(model, pts, predictor=predictor, **kwargs),
+		gp.gpytorch_gpr(model.cov, pts, predictor=predictor),
 		pc,
 		pts,
-		"opt_{}".format(name)
+		f"opt_{name}"
 	)
 	return model
+
+
+def label_scatter(
+	pts: npt.NDArray[np.double],
+	label_values: npt.NDArray[np.int_],
+	labels: collections.abc.Sequence[str] | None,
+	filename: str
+) -> None:
+	assert np.all(label_values >= 0)
+	num_color = np.max(label_values) + 1
+	pts_colors: npt.NDArray[np.double]
+	if num_color <= len(matplotlib.color_sequences["Set1"]):
+		pts_colors = np.array(matplotlib.color_sequences["Set1"][:num_color])
+	else:
+		pts_colors = matplotlib.colormaps["gist_rainbow"](np.linspace(0.0, 1.0, num_color, True))
+	if labels is None:
+		labels = [""]
+	pts = pts.reshape(-1, 2)
+	label_values = label_values.reshape(-1)
+	fig: matplotlib.figure.Figure = plt.figure(figsize=(FIGSIZE[0] * 2, FIGSIZE[1]))
+	ax0: matplotlib.axes.Axes
+	ax1: matplotlib.axes.Axes
+	ax0, ax1 = fig.subplots(ncols=2)
+	for i in range(num_color):
+		correspond_pts: npt.NDArray[np.double] = pts[label_values == i]
+		correspond_color: npt.NDArray[np.double] = pts_colors[i].reshape(1, -1)
+		label: str
+		if labels is None or len(labels) <= i:
+			label = ""
+		else:
+			label = labels[i] or ""
+		ax0.scatter(
+			np.clip(correspond_pts[:, 0], sample.distribution.MIN / 4, sample.distribution.MAX / 4),
+			np.clip(correspond_pts[:, 1], sample.distribution.MIN / 4, sample.distribution.MAX / 4),
+			1,
+			correspond_color,
+			label=label
+		)
+		ax1.scatter(
+			correspond_pts[:, 0],
+			correspond_pts[:, 1],
+			1,
+			correspond_color,
+			label=label
+		)
+	ax0.legend()
+	ax1.legend()
+	fig.savefig(f"{filename}.png")
+	plt.close(fig)
+
+
+def error_scatter(
+	pts: npt.NDArray[np.double],
+	values: npt.NDArray[np.double],
+	filename: str,
+	use_logscale: bool
+) -> None:
+	error_scatter.CMAP = matplotlib.colormaps["YlOrRd"]
+	values = np.abs(values)
+	val_min: float = values.min()
+	val_max: float = values.max()
+	norm: matplotlib.colors.Normalize
+	ticks: npt.NDArray[np.double]
+	if use_logscale:
+		if val_max == 0:
+			val_max = sys.float_info.min * 2
+		if val_min == 0:
+			val_min = sys.float_info.min
+		val_min = max(val_min, val_max * sys.float_info.epsilon)
+		lb_log10: int = int(math.floor(math.log10(val_min)))
+		ub_log10: int = int(math.ceil(math.log10(val_max)))
+		lb_log10 += (ub_log10 - lb_log10) % 4
+		val_min = math.pow(10, lb_log10)
+		val_max = math.pow(10, ub_log10)
+		norm = matplotlib.colors.LogNorm(val_min, val_max, True)
+		ticks = np.exp2(np.linspace(math.log2(val_min), math.log2(val_max), error_scatter.CMAP.N // 4 * 4 + 1, True))[::error_scatter.CMAP.N // 4]
+	else:
+		lb_log10: int = int(math.floor(math.log10(val_min)))
+		ub_log10: int = int(math.floor(math.log10(val_max)))
+		val_min = math.floor(val_min / math.pow(10, lb_log10)) * math.pow(10, lb_log10)
+		val_max = math.ceil(val_max / math.pow(10, ub_log10)) * math.pow(10, ub_log10)
+		norm = matplotlib.colors.Normalize(val_min, val_max, True)
+		ticks = np.linspace(val_min, val_max, error_scatter.CMAP.N // 4 * 4 + 1, True)[::error_scatter.CMAP.N // 4]
+	fig: matplotlib.figure.Figure = plt.figure(figsize=FIGSIZE)
+	ax: matplotlib.axes.Axes = fig.subplots(ncols=1)
+	ax.scatter(
+		pts[:, 0],
+		pts[:, 1],
+		1,
+		error_scatter.CMAP(norm(values))
+	)
+	fig.colorbar(matplotlib.cm.ScalarMappable(norm, error_scatter.CMAP), ax=ax, ticks=ticks, format="%.1e")
+	fig.savefig(f"{filename}.png")
+	plt.close(fig)

@@ -1,3 +1,4 @@
+import collections.abc
 import math
 import os
 import sys
@@ -67,45 +68,33 @@ def preconditioned_lstsq_solve(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor
 
 
 def default_predict(
-	cov: gpytorch.kernels.Kernel,
+	covs: gpytorch.kernels.Kernel,
 	x: torch.Tensor,
 	y: torch.Tensor,
 	x_test: torch.Tensor
 ) -> torch.Tensor:
-	return (cov(x_test, x) @ square_solver(cov(x).to_dense(), y)).to_dense()
+	return (covs(x_test, x) @ square_solver(covs(x).to_dense(), y)).to_dense()
 
 
-class PredType(typing.Protocol):
-	def __call__(
-		self,
-		cov: gpytorch.kernels.Kernel,
-		x: torch.Tensor,
-		y: torch.Tensor,
-		x_test: torch.Tensor,
-		**kwargs: typing.Any
-	) -> torch.Tensor:
-		...
+KernelsType = typing.TypeVar("KernelsType", bound=gpytorch.kernels.Kernel | collections.abc.Sequence[gpytorch.kernels.Kernel])
+type PredType[KernelsType] = collections.abc.Callable[[KernelsType, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]
 
 
-class ApproxPredType(typing.Protocol):
-	def __call__(
-		self,
-		cov: gpytorch.kernels.Kernel,
-		x: torch.Tensor,
-		y: torch.Tensor,
-		x_test: torch.Tensor,
-		x_all: torch.Tensor,
-		y_all: torch.Tensor,
-		**kwargs: typing.Any
-	) -> torch.Tensor:
-		...
-
-
-def gpytorch_gpr(model: GPR, pts: sample.data, x_test: torch.Tensor | None = None, predictor: PredType | None = None, **kwargs) -> npt.NDArray[np.double]:
+def gpytorch_gpr(
+	covs: KernelsType,
+	pts: sample.data,
+	x_test: torch.Tensor | None = None,
+	predictor: PredType[KernelsType] | None = None,
+) -> npt.NDArray[np.double]:
 	if x_test is None:
 		x_test = pts.x_test_t
 	try:
-		result: torch.Tensor = predictor(model.cov, pts.x_t, pts.y_t, x_test, **kwargs) if predictor is not None else default_predict(model.cov, pts.x_t, pts.y_t, x_test)
+		result: torch.Tensor
+		if predictor is not None:
+			result = predictor(covs, pts.x_t, pts.y_t, x_test)
+		else:
+			assert isinstance(covs, gpytorch.kernels.Kernel)
+			result = default_predict(covs, pts.x_t, pts.y_t, x_test)
 		return result.detach().numpy().reshape(sample.distribution.N_GRIDS, sample.distribution.N_GRIDS)
 	except Exception as e:
 		traceback.print_exception(e)

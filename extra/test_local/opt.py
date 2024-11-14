@@ -19,14 +19,14 @@ torch.set_default_dtype(torch.float64)
 PARAM_UPLIM = 10
 
 
-def format_array(arr_name : str | None, arr: typing.Any) -> str:
+def format_array(arr_name : str | None, arr: typing.Any, sep: str = " ") -> str:
 	result: str = (arr_name + " = ") if arr_name else ""
 	if isinstance(arr, torch.Tensor) or isinstance(arr, np.ndarray):
-		result += " ".join(format_array(None, val.item()) for val in arr.ravel())
+		result += sep.join(format_array(None, val.item()) for val in arr.ravel())
 	elif isinstance(arr, collections.abc.Iterable):
-		result += " ".join(format_array(None, item) for item in arr)
+		result += sep.join(format_array(None, item) for item in arr)
 	elif isinstance(arr, complex):
-		result += "{} + {}i".format(arr.real, arr.imag)
+		result += f"{arr.real} + {arr.imag}i"
 	else:
 		result += str(arr)
 	return result
@@ -43,9 +43,8 @@ def print_stuff(
 	end_str: str="",
 	flush: bool=False
 ) -> None:
-
 	def print_model(model_print_grad: bool = False) -> None:
-		param_name_fmt_str: str = "{}Parameter name: {{}}".format("\t" * indent)
+		param_name_fmt_str: str = f"{"\t" * indent}Parameter name: {{}}"
 		param_name: str
 		param: torch.nn.Parameter
 		constraint: gpytorch.constraints.Interval | None
@@ -64,27 +63,25 @@ def print_stuff(
 					)
 			else:
 				if model_print_grad and param.grad is not None:
-					print(param_name_fmt_str.format(param_name), "|grad| = {}".format(param.grad.norm().item()))
+					print(param_name_fmt_str.format(param_name), f"|grad| = {param.grad.norm().item()}")
 
-	print("{}{}loss = {:.15e}, lr = {}".format("\t" * indent, start_str + " " if start_str != "" else "", loss, learning_rate))
+	print(f"{"\t" * indent}{start_str + " " if start_str != "" else ""}loss = {loss:.15e}, lr = {learning_rate}")
 	print_model()
 	if print_grad:
 		print_model(True)
 		if hessian is not None:
 			print("\t" * indent, format_array("hessian", hessian.reshape(-1)), sep="")
-			print("{}Cond(hessian): {}".format("\t" * indent, torch.linalg.cond(hessian).item()))
+			print(f"{"\t" * indent}Cond(hessian): {torch.linalg.cond(hessian).item()}")
 	print(("\t" * indent + end_str + "\n") if end_str != "" else "", end="", flush=flush)
 
 
-class LossFuncType(typing.Protocol):
-	def __call__(self, cov: gpytorch.kernels.Kernel, x: torch.Tensor, y: torch.Tensor, **kwargs: typing.Any) -> torch.Tensor:
-		...
+LossFuncType = collections.abc.Callable[[gpytorch.kernels.Kernel, torch.Tensor, torch.Tensor], torch.Tensor]
 
 
 class GradientOptimization:
 	__FTOL: float = 2.2204460492503131e-09
 	__GTOL: float = 1e-5
-	__slots__ = ("__model", "__param_indices", "__loss_func", "__x", "__y", "__print_log", "__cov", "__ftol", "__xtol", "__kwargs")
+	__slots__ = ("__model", "__param_indices", "__loss_func", "__x", "__y", "__print_log", "__cov", "__ftol", "__xtol")
 	def __init__(
 		self,
 		model: gpytorch.models.ExactGP,
@@ -96,7 +93,6 @@ class GradientOptimization:
 		cov_name: str = "cov",
 		ftol: float | None = None,
 		xtol: float | None = None,
-		**kwargs
 	):
 		self.__model: gpytorch.models.ExactGP = model
 		self.__param_indices: list[int] = param_indices
@@ -109,7 +105,6 @@ class GradientOptimization:
 		assert isinstance(self.__cov, gpytorch.kernels.Kernel)
 		self.__ftol: float = ftol or __class__.__FTOL
 		self.__xtol: float = xtol or __class__.__GTOL
-		self.__kwargs: dict[str, typing.Any] = kwargs
 
 	def __call__(self, learning_rate: float, loss: torch.Tensor) -> tuple[float, torch.Tensor, bool]:
 		def optimize_with_learning_rate(
@@ -126,7 +121,7 @@ class GradientOptimization:
 
 			def return_back() -> tuple[torch.Tensor, float]:
 				if self.__print_log:
-					print("\tNo stepping Forward for {}.".format(method_name))
+					print(f"\tNo stepping Forward for {method_name}.")
 				with torch.no_grad():
 					for iParam, param in enumerate(self.__model.parameters()):
 						param[...] = combined_parameters[self.__param_indices[iParam]:self.__param_indices[iParam + 1]].reshape_as(param).detach()
@@ -138,7 +133,7 @@ class GradientOptimization:
 			loss: torch.Tensor | None = None
 			while learning_rate >= learning_rate_threshold:
 				try:
-					loss = self.__loss_func(self.__cov, self.__x, self.__y, **self.__kwargs)
+					loss = self.__loss_func(self.__cov, self.__x, self.__y)
 					break
 				except RuntimeError: # NANs
 					learning_rate /= 2.0
@@ -147,23 +142,23 @@ class GradientOptimization:
 				return return_back()
 			assert loss is not None
 			if self.__print_log:
-				print_stuff(self.__model, loss.item(), learning_rate, 2, start_str="last = {:.15e},".format(last_loss), flush=True)
+				print_stuff(self.__model, loss.item(), learning_rate, 2, start_str=f"last = {last_loss:.15e},", flush=True)
 			while loss.isnan().item() or loss.item() >= last_loss:
 				learning_rate /= 2.0
 				change_param(combined_parameters - learning_rate * change)
 				try:
-					loss = self.__loss_func(self.__cov, self.__x, self.__y, **self.__kwargs)
+					loss = self.__loss_func(self.__cov, self.__x, self.__y)
 				except RuntimeError: # NANs
 					return return_back()
 				if self.__print_log:
-					print_stuff(self.__model, loss.item(), learning_rate, 2, start_str="last = {:.15e},".format(last_loss), flush=True)
+					print_stuff(self.__model, loss.item(), learning_rate, 2, start_str=f"last = {last_loss:.15e},", flush=True)
 				if learning_rate < learning_rate_threshold:
 					# based on current learning rate, all parameters being the same
 					if loss.item() >= last_loss:
 						return return_back()
 					else:
 						if self.__print_log:
-							print("\tNo stepping Forward for {}.".format(method_name))
+							print(f"\tNo stepping Forward for {method_name}.")
 						break
 			return loss, learning_rate
 
@@ -192,12 +187,14 @@ class GradientOptimization:
 		# stopping criteria
 		grad_sqnm: float = torch.sum(grad_combined ** 2).item()
 		if grad_sqnm < self.__xtol ** 2:
-			print("Convergence: |Gradient| = {} <= GTOL = {}".format(math.sqrt(grad_sqnm), self.__xtol))
+			print(f"Convergence: |Gradient| = {math.sqrt(grad_sqnm)} <= GTOL = {self.__xtol}")
 			return learning_rate, loss, True
 		# change parameter and log
 		newton_change: torch.Tensor | None = gp.square_solver(hessian, grad_combined) if hessian is not None else None
 		if learning_rate < 1.0:
 			learning_rate *= 2.0
+		elif learning_rate >= 1.0:
+			learning_rate = 1.0
 		if self.__print_log:
 			print_stuff(
 				self.__model,
@@ -227,8 +224,10 @@ class GradientOptimization:
 		if loss.item() >= last_value:
 			print("Stop: No stepping Forward for Gradient-Based Optimization")
 			return math.nan, loss, False # tried all method and no one can step forward
-		if abs(last_value - loss.item()) / max(abs(last_value), abs(loss.item()), 1.0) < self.__ftol:
-			print("Convergence: |f_i - f_{{i+1}}| = {} / {} <= FTOL = {}".format(abs(last_value - loss.item()), max(abs(last_value), abs(loss.item()), 1.0), self.__ftol))
+		f_diff: float = abs(last_value - loss.item())
+		f_denom: float = max(abs(last_value), abs(loss.item()), 1.0)
+		if f_diff / f_denom < self.__ftol:
+			print(f"Convergence: |f_i - f_{{i+1}}| = {f_diff} / {f_denom} <= FTOL = {self.__ftol}")
 			return learning_rate, loss, True
 		return learning_rate, loss, False # generally, doing next step with gradient again
 
@@ -242,7 +241,7 @@ class NonGradientOptimization:
 	__SIGMA = 0.5
 	__NONZDELT = 0.05
 	__ZDELT = 0.00025
-	__slots__ = ("__model", "__loss_func", "__x", "__y", "__print_log", "__ftol", "__xtol", "__cov", "__kwargs", "__N", "__sim", "__one2np1", "__fsim")
+	__slots__ = ("__model", "__loss_func", "__x", "__y", "__print_log", "__ftol", "__xtol", "__cov", "__N", "__sim", "__one2np1", "__fsim")
 
 	def __assign_value_to_model(self, x: npt.NDArray[np.double]) -> None:
 		idx: int = 0
@@ -252,7 +251,7 @@ class NonGradientOptimization:
 
 	def __func(self, x: npt.NDArray[np.double]) -> float:
 		self.__assign_value_to_model(x)
-		return self.__loss_func(self.__cov, self.__x, self.__y, **self.__kwargs).item()
+		return self.__loss_func(self.__cov, self.__x, self.__y).item()
 
 	def __init__(
 		self,
@@ -263,8 +262,7 @@ class NonGradientOptimization:
 		print_log: bool,
 		cov_name: str = "cov",
 		ftol: float | None = None,
-		xtol: float | None = None,
-		**kwargs
+		xtol: float | None = None
 	) -> None:
 		self.__model: gpytorch.models.ExactGP = model
 		self.__loss_func: LossFuncType = loss_func
@@ -276,7 +274,6 @@ class NonGradientOptimization:
 		assert hasattr(model, cov_name)
 		self.__cov = getattr(model, cov_name)
 		assert isinstance(self.__cov, gpytorch.kernels.Kernel)
-		self.__kwargs: dict[str, typing.Any] = kwargs
 		# remove gradient
 		with torch.no_grad():
 			for param in self.__model.parameters():
@@ -309,11 +306,14 @@ class NonGradientOptimization:
 
 	@property
 	def converged(self) -> bool:
-		if np.max(np.abs(self.__fsim[0] - self.__fsim[1:])) / max(np.max(np.abs(self.__fsim)), 1.0) <= self.__ftol:
-			print("Convergence: |f_0 - f_i| = {} / {} <= FTOL = {}".format(np.max(np.abs(self.__fsim[0] - self.__fsim[1:])), max(np.max(np.abs(self.__fsim)), 1.0), self.__ftol))
+		f_diff: float = np.max(np.abs(self.__fsim[0] - self.__fsim[1:]))
+		f_denom: float = max(np.max(np.abs(self.__fsim)), 1.0)
+		if f_diff / f_denom <= self.__ftol:
+			print(f"Convergence: |f_0 - f_i| = {f_diff} / {f_denom} <= FTOL = {self.__ftol}")
 			return True
-		if np.max(np.linalg.norm(self.__sim[1:] - self.__sim[0], axis=1)) <= self.__xtol:
-			print("Convergence: ||x_0 - x_i|| = {} <= XTOL = {}".format(np.max(np.linalg.norm(self.__sim[1:] - self.__sim[0], axis=1)), self.__xtol))
+		x_diff: float = np.max(np.linalg.norm(self.__sim[1:] - self.__sim[0], axis=1))
+		if x_diff <= self.__xtol:
+			print(f"Convergence: ||x_0 - x_i|| = {x_diff} <= XTOL = {self.__xtol}")
 			return True
 		return False
 
@@ -381,8 +381,7 @@ def gpytorch_train(
 	loss_func: LossFuncType,
 	print_log: bool = True,
 	initial_values: list[torch.Tensor] = [],
-	initial_value_search: bool = True,
-	**kwargs
+	initial_value_search: bool = True
 ) -> gp.GPR | None:
 	try:
 		MAX_ITER: typing.Literal[50000] = 50000
@@ -424,9 +423,9 @@ def gpytorch_train(
 							param[...] = (init_params[param_indices[iParam]:param_indices[iParam + 1]].reshape_as(param) * weight).detach()
 							if isinstance(constraint, gpytorch.constraints.Interval):
 								param[...] = constraint.inverse_transform(param).detach()
-					loss = loss_func(model.cov, x, y, **kwargs)
+					loss = loss_func(model.cov, x, y)
 					if print_log:
-						print_stuff(model, loss.item(), 1.0, 1, start_str="last = {:.15e},".format(last_value), flush=True)
+						print_stuff(model, loss.item(), math.nan, 1, start_str=f"last = {last_value:.15e},", flush=True)
 					if loss.item() < last_value:
 						last_value = loss.item()
 						best_weight = weight.item()
@@ -442,10 +441,10 @@ def gpytorch_train(
 						if isinstance(constraint, gpytorch.constraints.Interval):
 							param[...] = constraint.inverse_transform(param).detach()
 				last_value = torch.inf
-				loss = loss_func(model.cov, x, y, **kwargs)
+				loss = loss_func(model.cov, x, y)
 		else:
 			try:
-				loss = loss_func(model.cov, x, y, **kwargs)
+				loss = loss_func(model.cov, x, y)
 			except RuntimeError: # NANs
 				print("Bad choice of initial value!", flush=True)
 				return None
@@ -453,7 +452,7 @@ def gpytorch_train(
 		assert loss is not None
 		learning_rate: float = -1.0
 		num_iter: int = 0
-		grad_opt: GradientOptimization = GradientOptimization(model, param_indices, loss_func, x, y, print_log, model.COV_NAME, **kwargs)
+		grad_opt: GradientOptimization = GradientOptimization(model, param_indices, loss_func, x, y, print_log, model.COV_NAME)
 		non_grad_opt: NonGradientOptimization | None = None
 		while num_iter < MAX_ITER:
 			num_iter += 1
@@ -462,7 +461,7 @@ def gpytorch_train(
 				if to_end:
 					break
 				if math.isnan(learning_rate):
-					non_grad_opt = NonGradientOptimization(model, loss_func, x, y, print_log, model.COV_NAME, **kwargs)
+					non_grad_opt = NonGradientOptimization(model, loss_func, x, y, print_log, model.COV_NAME)
 					if non_grad_opt.converged:
 						break
 			else:
@@ -475,7 +474,7 @@ def gpytorch_train(
 					loss.item(),
 					learning_rate,
 					1,
-					start_str="Iter {} - last = {:.15e},".format(num_iter, last_value),
+					start_str=f"Iter {num_iter} - last = {last_value:.15e},",
 					flush=True
 				)
 			last_value = loss.item()
@@ -485,7 +484,7 @@ def gpytorch_train(
 			model,
 			loss.item(),
 			learning_rate,
-			start_str="Iter {} - last = {:.15e},".format(num_iter, last_value),
+			start_str=f"Iter {num_iter} - last = {last_value:.15e},",
 			flush=print_log
 		)
 		# predict

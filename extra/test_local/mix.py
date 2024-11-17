@@ -236,7 +236,7 @@ def each_local_parameter_trial(
 			if loss[idx, 4] > 1e-3 or loss[idx, 5] > 1e-3:
 				norm: torch.Tensor = torch.linalg.norm(cov_mat, None, 0, True)
 				print(
-					f"{idx}: f({opt.format_array(None, pts.x[idx])}) = {pts.y[idx]}",
+					f"{idx}: f({sample.format_array(None, pts.x[idx])}) = {pts.y[idx]}",
 					noise,
 					cov_mat,
 					cov_mat @ cov_mat.T / norm / norm.T,
@@ -248,18 +248,18 @@ def each_local_parameter_trial(
 			loss[idx, 7] = torch.dist(model.cov(x_idx).to_dense() @ gp.square_solver(model.cov(x_idx).to_dense() + noise * torch.eye(y_idx.numel()), torch.eye(y_idx.numel())), torch.eye(y_idx.numel()))
 			loss[idx, 8] = torch.dist(gp.preconditioned_lstsq_solve(model.cov(x_idx).to_dense(), torch.eye(y_idx.numel())) @ model.cov(x_idx).to_dense(), torch.eye(y_idx.numel()))
 			loss[idx, 9] = torch.dist(model.cov(x_idx).to_dense() @ gp.preconditioned_lstsq_solve(model.cov(x_idx).to_dense(), torch.eye(y_idx.numel())), torch.eye(y_idx.numel()))
-		best_method_idx: torch.Tensor = torch.cat([torch.arange(pts.y.size), get_best_method_idx(covs, pts.x_t, pts.y_t, pts.extra_x_t, pts.extra_y_t, preds)])
-		num_use: torch.Tensor = (best_method_idx[pts.y.size:, None] == torch.arange(pts.y.size)).to(torch.int64).sum(0)
-		print(
-			f"{opt.format_array("#use in extra points", num_use)}",
-			f"Max use = {num_use.max().item()} at {num_use.argmax().item()} centered at f({opt.format_array(None, pts.x[int(num_use.argmax().item())], ", ")}) = {pts.y[int(num_use.argmax().item())]} with {opt.format_array("lengthscale", covs[int(num_use.argmax().item())].lengthscale)}",
-			f"Nonzeros are at {opt.format_array(None, torch.argwhere(num_use != 0))} with values {opt.format_array(None, num_use[num_use != 0])}",
-			sep="\n"
-		)
-		# best_method_idx: torch.Tensor = torch.arange(pts.y.size)
+		# best_method_idx: torch.Tensor = torch.cat([torch.arange(pts.y.size), get_best_method_idx(covs, pts.x_t, pts.y_t, pts.extra_x_t, pts.extra_y_t, preds)])
+		# num_use: torch.Tensor = (best_method_idx[pts.y.size:, None] == torch.arange(pts.y.size)).to(torch.int64).sum(0)
+		# print(
+		# 	f"{sample.format_array("#use in extra points", num_use)}",
+		# 	f"Max use = {num_use.max().item()} at {num_use.argmax().item()} centered at f({sample.format_array(None, pts.x[int(num_use.argmax().item())], ", ")}) = {pts.y[int(num_use.argmax().item())]} with {sample.format_array("lengthscale", covs[int(num_use.argmax().item())].lengthscale)}",
+		# 	f"Nonzeros are at {sample.format_array(None, torch.argwhere(num_use != 0))} with values {sample.format_array(None, num_use[num_use != 0])}",
+		# 	sep="\n"
+		# )
+		best_method_idx: torch.Tensor = torch.arange(pts.y.size)
 		plot.label_scatter(
-			pts.x_all,
-			# pts.x,
+			# pts.x_all,
+			pts.x,
 			best_method_idx.detach().numpy(),
 			(torch.arange(pts.y.size).detach().numpy() + 1).astype(np.str_).tolist(),
 			f"smallest_error_in_local_model_with_{func_name}"
@@ -268,14 +268,14 @@ def each_local_parameter_trial(
 			plot.error_scatter(pts.x, loss[:, i], f"{name}_with_{func_name}", True)
 		for i in range(covs[0].lengthscale.numel()):
 			plot.error_scatter(pts.x, np.array([cov.lengthscale.ravel()[i].item() for cov in covs]), f"lengthscale_{i}_with_{func_name}", False)
-		for lv in [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]:
+		for lv in [1, 2, 4, 8, 16, 32, 64, 128, 256]:
 			print(f"# Local voters = {lv}")
 			plot.plot(
 				gp.gpytorch_gpr(
 					covs,
 					pts,
-					predictor=model_mix_pred_generator(lv, preds, pts.x_all_t, best_method_idx)
-					# predictor=model_mix_pred_generator(lv, preds, pts.x_t, best_method_idx)
+					# predictor=model_mix_pred_generator(lv, preds, pts.x_all_t, best_method_idx)
+					predictor=model_mix_pred_generator(lv, preds, pts.x_t, best_method_idx)
 				),
 				pc,
 				pts,

@@ -254,7 +254,7 @@ def single_local_parameter_trial(
 	pred: torch.Tensor = (global_predictor or gp.default_predict)(global_model.cov, pts.x_t, pts.y_t, pts.x_all_t)
 	diff: torch.Tensor = pred - pts.y_all_t
 	max_diff_idx: int = int(torch.argmax(torch.abs(diff)).item())
-	print(f"Max diff = {torch.max(torch.abs(diff)).item()} at {max_diff_idx}, ({opt.format_array(None, pts.x_all[max_diff_idx])}), in {"center" if max_diff_idx < pts.x.shape[0] else "extra"}")
+	print(f"Max diff = {torch.max(torch.abs(diff)).item()} at {max_diff_idx}, ({sample.format_array(None, pts.x_all[max_diff_idx])}), in {"center" if max_diff_idx < pts.x.shape[0] else "extra"}")
 	nn: sklearn.neighbors.NearestNeighbors = sklearn.neighbors.NearestNeighbors(n_neighbors=num_neighbor, n_jobs=-1).fit(pts.x)
 	neighbor_ind: torch.Tensor
 	select_x: torch.Tensor = pts.x_all_t[max_diff_idx].reshape(1, sample.distribution.DIM)

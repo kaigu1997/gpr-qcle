@@ -14,22 +14,10 @@ import torch
 sys.path.append(os.path.dirname(__file__))
 
 import gp
+import sample
 
 torch.set_default_dtype(torch.float64)
 PARAM_UPLIM = 10
-
-
-def format_array(arr_name : str | None, arr: typing.Any, sep: str = " ") -> str:
-	result: str = (arr_name + " = ") if arr_name else ""
-	if isinstance(arr, torch.Tensor) or isinstance(arr, np.ndarray):
-		result += sep.join(format_array(None, val.item()) for val in arr.ravel())
-	elif isinstance(arr, collections.abc.Iterable):
-		result += sep.join(format_array(None, item) for item in arr)
-	elif isinstance(arr, complex):
-		result += f"{arr.real} + {arr.imag}i"
-	else:
-		result += str(arr)
-	return result
 
 
 def print_stuff(
@@ -53,13 +41,13 @@ def print_stuff(
 				if model_print_grad and param.grad is not None:
 					print(
 						param_name_fmt_str.format(param_name),
-						format_array("value", param),
-						format_array("grad", param.grad)
+						sample.format_array("value", param),
+						sample.format_array("grad", param.grad)
 					)
 				else:
 					print(
 						param_name_fmt_str.format("".join(param_name.split("raw_"))),
-						format_array("value", constraint.transform(param) if isinstance(constraint, gpytorch.constraints.Interval) else param)
+						sample.format_array("value", constraint.transform(param) if isinstance(constraint, gpytorch.constraints.Interval) else param)
 					)
 			else:
 				if model_print_grad and param.grad is not None:
@@ -70,7 +58,7 @@ def print_stuff(
 	if print_grad:
 		print_model(True)
 		if hessian is not None:
-			print("\t" * indent, format_array("hessian", hessian.reshape(-1)), sep="")
+			print("\t" * indent, sample.format_array("hessian", hessian.reshape(-1)), sep="")
 			print(f"{"\t" * indent}Cond(hessian): {torch.linalg.cond(hessian).item()}")
 	print(("\t" * indent + end_str + "\n") if end_str != "" else "", end="", flush=flush)
 

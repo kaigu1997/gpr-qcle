@@ -27,12 +27,12 @@ sys.path.append(os.path.dirname(__file__))
 import expectation
 import gp
 import pes
-import point
 import plot
+import point
 import utility
 
-NUM_MC_PTS: typing.Literal[10_000_000] = 10_000_000
-NUM_EVL_MC_PTS: typing.Literal[10_000] = 10_000
+NUM_MC_PTS = 1_000_000
+NUM_EVL_MC_PTS = 10_000
 
 
 def parse_argument() -> tuple[bool, str]:
@@ -225,7 +225,7 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 			"""
 			# get scale
 			scale: npt.NDArray[np.double] = pts.rescale_factor
-			print("Tick {}, {}, {}".format(iTick, utility.format_array("scales", scale), datetime.datetime.now()), flush=True)
+			print(f"Tick {iTick}, {utility.format_array("scales", scale)}, {datetime.datetime.now()}", flush=True)
 			# save points
 			# index of central points corresponds to the element
 			# index of extra points is the element index + num_elements
@@ -235,7 +235,7 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 			# fit
 			predictors.update(pts.center, pts.density, pts.num_center, scale)
 			if to_train:
-				predictors.train()
+				predictors.train(ftol=1e-9, xtol=1e-5)
 			# predict and marginal distribution
 			marginal: npt.NDArray[np.double] = np.empty((pes.PHASEDIM, pes.NUM_PES, pes.NUM_PES, n_grids), np.double)
 			for iPES in range(pes.NUM_PES):
@@ -270,8 +270,9 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 				print(*aver.population(), *aver.coordinates(), *aver.covariance()[np.tril_indices(pes.PHASEDIM)], aver.potential(), aver.kinetic(mass), *aver.purity().reshape(-1), end=" ", file=ave_f)
 			print("", file=ave_f, flush=True)
 			# calculate error, and predict density
+			evolving_density: list[npt.NDArray[np.cdouble]] = pts.density
 			if grid_data is not None: # interpolate the data
-				y_all: list[npt.NDArray[np.cdouble]] = [np.array([], dtype=np.cdouble) for _ in range(pes.NUM_TRIG)]
+				grid_interpolate: list[npt.NDArray[np.cdouble]] = [np.array([], dtype=np.cdouble) for _ in range(pes.NUM_TRIG)]
 				evolving_errors: npt.NDArray[np.double] = np.empty((pes.NUM_PES, pes.NUM_PES), np.double)
 				for iPES in range(pes.NUM_PES):
 					for jPES in range(iPES + 1):
@@ -283,9 +284,9 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 							False,
 							0.0
 						)
-						y_all[TrilIndex] = interpolator_re(pts.center[TrilIndex]).astype(np.cdouble)
+						grid_interpolate[TrilIndex] = interpolator_re(pts.center[TrilIndex]).astype(np.cdouble)
 						if iPES == jPES:
-							evolving_errors[iPES, jPES] = np.sum((y_all[TrilIndex].real - pts.density[TrilIndex].real) ** 2) / pts.num_center[TrilIndex]
+							evolving_errors[iPES, jPES] = np.sum((grid_interpolate[TrilIndex].real - evolving_density[TrilIndex].real) ** 2) / evolving_density[TrilIndex].size
 						else:
 							interpolator_im: scipy.interpolate.RegularGridInterpolator = scipy.interpolate.RegularGridInterpolator(
 								tuple(grids_each_dim),
@@ -294,19 +295,19 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 								False,
 								0.0
 							)
-							y_all[TrilIndex].imag = interpolator_im(pts.center[TrilIndex])
-							evolving_errors[jPES, iPES] = np.sum((y_all[TrilIndex].real - pts.density[TrilIndex].real) ** 2) / pts.num_center[TrilIndex]
-							evolving_errors[iPES, jPES] = np.sum((y_all[TrilIndex].imag - pts.density[TrilIndex].imag) ** 2) / pts.num_center[TrilIndex]
+							grid_interpolate[TrilIndex].imag = interpolator_im(pts.center[TrilIndex])
+							evolving_errors[jPES, iPES] = np.sum((grid_interpolate[TrilIndex].real - evolving_density[TrilIndex].real) ** 2) / evolving_density[TrilIndex].size
+							evolving_errors[iPES, jPES] = np.sum((grid_interpolate[TrilIndex].imag - evolving_density[TrilIndex].imag) ** 2) / evolving_density[TrilIndex].size
 				evolving_errors = evolving_errors.reshape(-1)
 				assert pred is not None # grid data will only be read when already enough space for prediction
 				diff: npt.NDArray[np.double] = pred.reshape((pes.NUM_ELM,) + pred.shape[2:]) - grid_data
 				original_errors: npt.NDArray[np.double] = np.sum(diff ** 2, (-2, -1))
 				rescaled_errors: npt.NDArray[np.double] = original_errors * scale ** 2
 				np.savetxt(err_f, (original_errors, rescaled_errors, evolving_errors), footer="\n", comments="")
-				np.savetxt(den_f, np.concatenate(y_all).view(np.double).reshape(-1, 2).T) # 2 stands for real and imag
+				np.savetxt(den_f, np.concatenate(grid_interpolate).view(np.double).reshape(-1, 2).T) # 2 stands for real and imag
 			else:
-				np.savetxt(den_f, np.concatenate(pts.density).view(np.double).reshape(-1, 2).T)
-			np.savetxt(den_f, np.concatenate(pts.density).view(np.double).reshape(-1, 2).T)
+				np.savetxt(den_f, np.concatenate(evolving_density).view(np.double).reshape(-1, 2).T)
+			np.savetxt(den_f, np.concatenate(evolving_density).view(np.double).reshape(-1, 2).T)
 			np.savetxt(den_f, np.concatenate([predictors.predict(pt, idx) for pt, idx in zip(pts.center, pes.tril_element_indices)]).view(np.double).reshape(-1, 2).T, footer="\n", comments="")
 			print("\n", end="\n", file=den_f)
 			if to_draw: # plots used whether grid solution is given or not
@@ -346,18 +347,19 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 			for iTick in range(1, total_ticks):
 				# evolve
 				for _ in range(output_steps):
-					pts.evolve(mass, dt, predictors.predict, mca.purity())
 					epmca.evolve(mass, dt, predictors.predict)
+					pts.evolve(mass, dt, predictors.predict, epmca.purity())
 					scale: npt.NDArray[np.double] = pts.rescale_factor
 					predictors.update(pts.center, pts.density, pts.num_center, scale)
+					predictors.train(ftol=1e-4, xtol=1e-4) # default value of scipy simplex
 					print_parameter_scale_loss(scale)
 				# update and predict
 				train_pred_draw(iTick, iTick % reopt_steps == 0)
-				print_parameter_scale_loss(scale)
+				print_parameter_scale_loss(pts.rescale_factor)
 				# check stopping criteria, when grid solution is not given
 				# use predictors (aia) with old points
 				if grid_data is None:
-					if np.any(mca.coordinates()[:pes.DIM] > np.abs(r0[:pes.DIM])) or np.any(aia.coordinates()[:pes.DIM] > np.abs(r0[:pes.DIM])) or np.any(epmca.coordinates()[:pes.DIM] > np.abs(r0[:pes.DIM])):
+					if np.any(epmca.coordinates()[:pes.DIM] > np.abs(r0[:pes.DIM])):
 						to_stop = True
 				if end_time is not None:
 					current_time: int = int(time.time())
@@ -365,7 +367,7 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 					time_left: int = end_time - current_time
 					if time_left < time_pass // iTick:
 						# time left is not enough for next output, kill and rerun the job
-						print("Time left is {} seconds, not enough for another iteration. Stop evolving after {} seconds, {} iterations".format(time_left, time_pass, iTick))
+						print(f"Time left is {time_left} seconds, not enough for another iteration. Stop evolving after {time_pass} seconds, {iTick} iterations")
 						to_stop = True
 				if to_stop:
 					total_ticks = iTick + 1

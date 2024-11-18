@@ -4,10 +4,10 @@ expectation
 This module evaluates the expectation values (population, <x> and <p>, energy, etc)
 """
 import abc
+import collections.abc
 import copy
 import os
 import sys
-import typing
 
 import numpy as np
 import numpy.typing as npt
@@ -146,7 +146,7 @@ class MonteCarloAverage(Averager):
 		The center of the points
 	stddev : npt.NDArray[np.double]
 		The standard deviation of the points
-	predictor : typing.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
+	predictor : collections.abc.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
 		The function that gives the density matrix element at corresponding phase points
 
 	Attributes
@@ -170,7 +170,7 @@ class MonteCarloAverage(Averager):
 	def update_pts(
 		self,
 		ref_pts: list[npt.NDArray[np.double]],
-		predictor: typing.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
+		predictor: collections.abc.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
 	):
 		"""
 		To update the point set used
@@ -179,7 +179,7 @@ class MonteCarloAverage(Averager):
 		----------
 		ref_pts : list[npt.NDArray[np.double]], len of NUM_TRIG, each of shape (NUM_PTS, PHASEDIM)
 			Current points, used to estimate average and variance
-		predictor : typing.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
+		predictor : collections.abc.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
 			Used to predict the density of the points
 		"""
 		for iPES in range(pes.NUM_PES):
@@ -264,7 +264,7 @@ class EvolvingPointsMCAverage(MonteCarloAverage):
 		self,
 		mass: npt.NDArray[np.double],
 		dt: float,
-		predictor: typing.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
+		predictor: collections.abc.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
 	) -> None:
 		"""
 		To evolve the coordinates, and density if applicable
@@ -275,7 +275,7 @@ class EvolvingPointsMCAverage(MonteCarloAverage):
 			Mass of classical degree of freedom
 		dt : float
 			Time interval
-		predictor : typing.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
+		predictor : collections.abc.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
 			It predicts the density matrix element based on given coordinates and element index
 		"""
 		if self.__evolve_coordinates_only:
@@ -285,20 +285,20 @@ class EvolvingPointsMCAverage(MonteCarloAverage):
 					pts[:, pes.DIM:],
 					mass,
 					dt,
-					evolve.Direction.Forward,
+					evolve.Direction.FORWARD,
 					row_idx,
 					col_idx
 				)
 		else:
 			evolve.evolve([ps for ps in self.point_set], [den for den in self.density], mass, dt, predictor)
 
-	def update_density(self, predictor: typing.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]) -> None:
+	def update_density(self, predictor: collections.abc.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]) -> None:
 		"""
 		To update the density using the predictor if the density is not evolved
 
 		Parameters
 		----------
-		predictor : typing.Callable[[npt.NDArray[np.double], int, bool], npt.NDArray[np.cdouble]]
+		predictor : collections.abc.Callable[[npt.NDArray[np.double], int, bool], npt.NDArray[np.cdouble]]
 			It predicts the density matrix element based on given coordinates and element index
 		"""
 		if self.__evolve_coordinates_only:

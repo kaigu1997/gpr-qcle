@@ -18,8 +18,8 @@ import matplotlib
 import matplotlib.animation
 import matplotlib.artist
 import matplotlib.axes
-import matplotlib.colors
 import matplotlib.cm
+import matplotlib.colors
 import matplotlib.figure
 import matplotlib.pyplot as plt
 import matplotlib.ticker
@@ -35,20 +35,20 @@ import pes
 import utility
 
 FIGSIZE: tuple[float, ...] = tuple(matplotlib.rcParams["figure.figsize"])
-TIME_TEMPLATE: typing.Literal["Time = {} a.u."] = "Time = {} a.u."
-RESCALE_TEMPLATE: typing.Literal["Rescale Factor = {:.6e}"] = "Rescale Factor = {:.6e}"
-POINTS_FILENAME: typing.Literal["points"] = "points"
-BELONGING_FILENAME: typing.Literal["belonging"] = "belonging"
-ALL_GRIDS_FILENAME: typing.Literal["all_grids"] = "all_grids"
-MARGINAL_FILENAME: typing.Literal["marginal"] = "marginal"
-AVERAGE_FILENAME: typing.Literal["ave"] = "ave"
-ERROR_FILENAME: typing.Literal["error"] = "error"
-PARAMETER_FILENAME: typing.Literal["parameters"] = "parameters"
-SCALE_FILENAME: typing.Literal["scale"] = "scale"
-LOSS_FILENAME: typing.Literal["loss"] = "loss"
-DATA_EXTENSION: typing.Literal[".txt"] = ".txt"
-FIGURE_EXTENSION: typing.Literal[".png"] = ".png"
-TAR_EXTENSION: typing.Literal[".tgz"] = ".tgz"
+TIME_TEMPLATE = "Time = {} a.u."
+RESCALE_TEMPLATE = "Rescale Factor = {:.6e}"
+POINTS_FILENAME = "points"
+BELONGING_FILENAME = "belonging"
+ALL_GRIDS_FILENAME = "all_grids"
+MARGINAL_FILENAME = "marginal"
+AVERAGE_FILENAME = "ave"
+ERROR_FILENAME = "error"
+PARAMETER_FILENAME = "parameters"
+SCALE_FILENAME = "scale"
+LOSS_FILENAME = "loss"
+DATA_EXTENSION = ".txt"
+FIGURE_EXTENSION = ".png"
+TAR_EXTENSION = ".tgz"
 
 
 def read_input() -> tuple[npt.NDArray[np.double], npt.NDArray[np.double], npt.NDArray[np.double], npt.NDArray[np.double], npt.NDArray[np.double], npt.NDArray[np.double], float, float, float]:
@@ -156,7 +156,7 @@ def plot_average() -> None:
 	"""
 	To plot all averages available
 	"""
-	NUM_MOMENTS: typing.Literal[5] = pes.PHASEDIM * (pes.PHASEDIM + 3) // 2
+	NUM_MOMENTS = pes.PHASEDIM * (pes.PHASEDIM + 3) // 2
 	ave_type_titles: list[str] = ["Monte Carlo", "Analytical", "Evolving Points Monte Carlo"]
 	NUM_AVE_TYPES: int = len(ave_type_titles)
 	plot_titles: list[str] = ["Population"]\
@@ -324,11 +324,27 @@ class PNLogNorm(matplotlib.colors.Normalize):
 		self.__log2_diff: float = self.__log2_abs_max - self.__log2_abs_min
 
 	@property
-	def abs_min(self):
+	def abs_min(self) -> float:
+		"""
+		The absolute value minimum that has color on the colorbar
+
+		Returns
+		-------
+		float
+			Min absolute value
+		"""
 		return self.__abs_min
 
 	@property
-	def abs_max(self):
+	def abs_max(self) -> float:
+		"""
+		The absolute value maxmimum that has color on the colorbar
+
+		Returns
+		-------
+		float
+			Max absolute value
+		"""
 		return self.__abs_max
 
 	def __repr__(self) -> str:
@@ -340,7 +356,7 @@ class PNLogNorm(matplotlib.colors.Normalize):
 		str
 			The name of the class with min and max
 		"""
-		return __class__.__name__ + "({}, {})".format(self.__abs_min, self.__abs_max)
+		return f"{__class__.__name__}({self.__abs_min}, {self.__abs_max})"
 
 	def __call__(self, value: typing.Any, clip: bool | None = None) -> float | npt.NDArray[np.double]:
 		"""
@@ -556,9 +572,9 @@ class DensityMatrixDrawer:
 	__get_divisors(fig, ax, array_shape)
 		To get the omitting factors in plotting
 	"""
-	__CMAP: typing.Literal["seismic"] = "seismic"
-	FILENAME_PREFIX: typing.Literal["dm"] = "dm"
-	__PICNAME_NO_DIGITS: typing.Literal["dm_{{:0{}}}.png"] = FILENAME_PREFIX + "_{{:0{}}}" + FIGURE_EXTENSION
+	__CMAP = "seismic"
+	FILENAME_PREFIX = "dm"
+	__PICNAME_NO_DIGITS = FILENAME_PREFIX + "_{{:0{}}}" + FIGURE_EXTENSION
 	__slots__: tuple = ("__output_interval", "dm_data", "__grid_data", "__draw_scattered", "__draw_rescaled", "__x_grids", "__p_grids", "picname", "__xv", "__pv", "__CENTER_NORM", "__CENTER_LEVEL", "__LOG_NORM", "__LOG_LEVEL", "__fig", "__axs", "__title", "__super_title", "__points", "__belongings", "__row_divisor", "__col_divisor")
 
 	@staticmethod
@@ -693,9 +709,7 @@ class DensityMatrixDrawer:
 			self.__title.append(self.__title[0] + "Difference of ")
 		nrows: int = len(self.__title)
 		self.__fig: matplotlib.figure.Figure = plt.figure(figsize=(FIGSIZE[0] * pes.NUM_ELM, FIGSIZE[1] * nrows))
-		axs = self.__fig.subplots(nrows, pes.NUM_ELM, squeeze=False)
-		assert isinstance(axs, np.ndarray)
-		self.__axs: np.ndarray[collections.abc.Sequence[collections.abc.Sequence[matplotlib.axes.Axes]], np.dtype[np.object_]] = axs
+		self.__axs: np.ndarray = self.__fig.subplots(nrows, pes.NUM_ELM, squeeze=False)
 		for iRow in range(nrows):
 			for iElement in range(pes.NUM_ELM):
 				ax: matplotlib.axes.Axes = self.__axs[iRow, iElement]
@@ -829,13 +843,13 @@ class DensityMatrixDrawer:
 				self.__axs[0, iElement],
 				pred_data[iElement].T * rescale_factors[iElement],
 				True,
-				self.__title[0] + utility.get_RI_label(iElement) + ("\nRescaled Factor = {:.6e}".format(rescale_factors[iElement]) if self.__draw_rescaled else "")
+				self.__title[0] + utility.get_RI_label(iElement) + (f"\nRescaled Factor = {rescale_factors[iElement]:.6e}" if self.__draw_rescaled else "")
 			)
 			draw_an_axs(
 				self.__axs[1, iElement],
 				pred_data[iElement].T * rescale_factors[iElement],
 				False,
-				self.__title[1] + utility.get_RI_label(iElement) + ("\nRescaled Factor = {:.6e}".format(rescale_factors[iElement]) if self.__draw_rescaled else "")
+				self.__title[1] + utility.get_RI_label(iElement) + (f"\nRescaled Factor = {rescale_factors[iElement]:.6e}" if self.__draw_rescaled else "")
 			)
 		row_index: int = 2
 		if self.__draw_scattered: # scatter points, no title change
@@ -876,12 +890,7 @@ class DensityMatrixDrawer:
 					draw_an_axs(
 						ax,
 						diff.T * rescale_factors[iElement],
-						title="{}\n{}Max Abs diff = {:.6e}".format(
-							self.__title[row_index] + utility.get_RI_label(iElement),
-							"Rescaled " if self.__draw_rescaled else "",
-							np.max(np.abs(diff))
-						)
-					)
+						title=self.__title[row_index] + utility.get_RI_label(iElement) + "\n" + ("Rescaled " if self.__draw_rescaled else "") + f"Max Abs diff = {np.max(np.abs(diff)):.6e}")
 				row_index += 1
 			else:
 				# unable to compare, set invisible
@@ -935,9 +944,9 @@ class WavefunctionPlotter:
 	else:
 		cmap: npt.NDArray[np.double] = matplotlib.colormaps["gist_rainbow"](np.linspace(0.0, 1.0, pes.NUM_PES, True))
 		__WFN_COLORS = list(zip(cmap[:, 0], cmap[:, 1], cmap[:, 2]))
-	__LABEL_TEMPLATE: typing.Literal["Surface {}"] = "Surface {}"
-	FILENAME_PREFIX: typing.Literal["wfn"] = "wfn"
-	__PICNAME_NO_DIGITS: typing.Literal["wfn_{{:0{}}}.png"] = FILENAME_PREFIX + "_{{:0{}}}.png"
+	__LABEL_TEMPLATE = "Surface {}"
+	FILENAME_PREFIX = "wfn"
+	__PICNAME_NO_DIGITS = FILENAME_PREFIX + "_{{:0{}}}.png"
 	__slots__: tuple = ("__output_interval", "wfn_sqnm", "__draw_rescaled", "__title", "__grids", "picname", "__fig", "__axs")
 
 	def __init__(
@@ -970,15 +979,13 @@ class WavefunctionPlotter:
 		self.picname: str = __class__.__PICNAME_NO_DIGITS.format(num_digits_of_ticks)
 		# figure and axes
 		self.__fig: matplotlib.figure.Figure = plt.figure(figsize=(FIGSIZE[0] * 2, FIGSIZE[1] * pes.DIM))
-		axs = self.__fig.subplots(pes.DIM, 2, squeeze=False) # guaranteen it is matrix in case pes.DIM == 1
-		assert isinstance(axs, np.ndarray)
-		self.__axs: np.ndarray[collections.abc.Sequence[matplotlib.axes.Axes], np.dtype[np.object_]] = axs
+		self.__axs: np.ndarray = self.__fig.subplots(pes.DIM, 2, squeeze=False) # guaranteen it is matrix in case pes.DIM == 1
 		self.__fig.suptitle(self.__title)
 		labels: list[str] = [utility.dimension_name(iDim) for iDim in range(pes.PHASEDIM)]
 		titles: list[str] = ["Position", "Momentum"]
 		for iDim in range(pes.PHASEDIM):
 			ax: matplotlib.axes.Axes = self.__axs[iDim % pes.DIM, iDim // pes.DIM]
-			ax.set_xlabel("{} / a.u.".format(labels[iDim]))
+			ax.set_xlabel(f"{labels[iDim]} / a.u.")
 			ax.set_ylabel("Population")
 			ax.set_xbound(self.__grids[iDim][0], self.__grids[iDim][-1])
 			max_y: float
@@ -992,7 +999,7 @@ class WavefunctionPlotter:
 			ax.set_ybound(0.0, 1.5 * max_y)
 			plot_title: str = "Marginal on "
 			if pes.DIM != 1:
-				plot_title += "Dimension {} of ".format(iDim % pes.DIM)
+				plot_title += f"Dimension {iDim % pes.DIM} of "
 			plot_title += titles[iDim // pes.DIM]
 			ax.set_title(plot_title)
 

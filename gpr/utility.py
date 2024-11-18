@@ -35,14 +35,14 @@ def get_RI_label(ElementIndex: int) -> str:
 	RowIndex: int = ElementIndex // pes.NUM_PES
 	ColIndex: int = ElementIndex % pes.NUM_PES
 	if RowIndex == ColIndex:
-		return "$\\rho_{{{},{}}}$".format(RowIndex, ColIndex)
+		return f"$\\rho_{{{RowIndex},{ColIndex}}}$"
 	elif RowIndex < ColIndex:
-		return "$\\Re\\rho_{{{},{}}}$".format(ColIndex, RowIndex)
+		return f"$\\Re\\rho_{{{ColIndex},{RowIndex}}}$"
 	else:
-		return "$\\Im\\rho_{{{},{}}}$".format(RowIndex, ColIndex)
+		return f"$\\Im\\rho_{{{RowIndex},{ColIndex}}}$"
 
 
-def format_array(arr_name : str | None, arr: typing.Any) -> str:
+def format_array(arr_name : str | None, arr: typing.Any, sep: str = " ") -> str:
 	"""
 	To print the flatten array as well as raw number
 
@@ -52,13 +52,15 @@ def format_array(arr_name : str | None, arr: typing.Any) -> str:
 		The name of the array or variable
 	arr : typing.Any
 		An array or a raw number
+	sep : str, optional
+		Separation for array elements, by default " "
 
 	Returns
 	-------
 	str
 		By default, result is simply `"arr_name = " + str(arr)`
 
-		Complex has the form of `"{} + {}i".format(arr.real, arr.imag)`
+		Complex has the form of `f"{arr.real} + {arr.imag}i"`
 
 		Torch tensor and numpy array are flattened and output one by one
 		without any other stuff (parenthesis, "array", "Tensor", etc)
@@ -67,11 +69,11 @@ def format_array(arr_name : str | None, arr: typing.Any) -> str:
 	"""
 	result: str = (arr_name + " = ") if arr_name else ""
 	if isinstance(arr, torch.Tensor) or isinstance(arr, np.ndarray):
-		result += " ".join(format_array(None, val.item()) for val in arr.ravel())
+		result += sep.join(format_array(None, val.item()) for val in arr.ravel())
 	elif isinstance(arr, collections.abc.Iterable):
-		result += " ".join(format_array(None, item) for item in arr)
+		result += sep.join(format_array(None, item) for item in arr)
 	elif isinstance(arr, complex):
-		result += "{} + {}i".format(arr.real, arr.imag)
+		result += f"{arr.real} + {arr.imag}i"
 	else:
 		result += str(arr)
 	return result
@@ -99,6 +101,6 @@ def dimension_name(DimIndex: int) -> str:
 			return "p"
 	else:
 		if DimIndex < pes.DIM:
-			return r"$x_{}$".format(DimIndex)
+			return f"$x_{DimIndex}$"
 		else:
-			return r"$p_{}$".format(DimIndex - pes.DIM)
+			return f"$p_{DimIndex - pes.DIM}$"

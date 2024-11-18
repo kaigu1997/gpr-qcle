@@ -3,10 +3,10 @@ evolve
 ======
 This module provides the adiabatic and non-adiabatic evolution scheme.
 """
+import collections.abc
 import enum
 import os
 import sys
-import typing
 
 import numpy as np
 import numpy.typing as npt
@@ -15,19 +15,20 @@ sys.path.append(os.path.dirname(__file__))
 
 import pes
 
+
 class Direction(enum.IntEnum):
 	"""
 	Enumerate of directions
 
 	Attributes
 	----------
-	Forward : typing.Literal[Direction.Forward]
+	FORWARD : typing.Literal[Direction.FORWARD]
 		Indicating evolving forward. Its value is 1
-	Backward : typing.Literal[Direction.Backward]
+	BACKWARD : typing.Literal[Direction.BACKWARD]
 		Indicating evolving backward. Its value is -1
 	"""
-	Forward = 1
-	Backward = -1
+	FORWARD = 1
+	BACKWARD = -1
 
 
 def evolve_coordinates_adiabatically(
@@ -156,7 +157,7 @@ def evolve_density_non_adiabatically(
 	p1: npt.NDArray[np.double] | None,
 	mass: npt.NDArray[np.double],
 	dt: float,
-	predictor: typing.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]],
+	predictor: collections.abc.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]],
 	RowIndex: int,
 	ColIndex: int
 ) -> npt.NDArray[np.cdouble]:
@@ -179,7 +180,7 @@ def evolve_density_non_adiabatically(
 		Mass of classical degree of freedom
 	dt : float
 		Time interval
-	predictor : typing.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
+	predictor : collections.abc.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
 		The function that gives the density matrix element at corresponding phase points
 	RowIndex : int
 		Index of row of the element in density matrix
@@ -196,7 +197,7 @@ def evolve_density_non_adiabatically(
 	NotImplementedError
 		In case the model is unknown
 	"""
-	evolve_density_non_adiabatically.drc = Direction.Backward
+	evolve_density_non_adiabatically.drc = Direction.BACKWARD
 	evolve_density_non_adiabatically.offdiagonal_branches = np.array([-1, 0, 1], np.int_)
 	evolve_density_non_adiabatically.offdiagonal_zero_branch_index = np.argwhere(evolve_density_non_adiabatically.offdiagonal_branches == 0)[0, 0]
 	match pes.NUM_PES:
@@ -229,7 +230,7 @@ def evolve_density_non_adiabatically(
 
 			# first step: (x0, p0) -> (x2, p1)
 			if x2 is None or p1 is None:
-				x2, p1 = evolve_coordinates_adiabatically(x0, p0, mass, dt / 2.0, Direction.Backward, RowIndex, ColIndex)
+				x2, p1 = evolve_coordinates_adiabatically(x0, p0, mass, dt / 2.0, Direction.BACKWARD, RowIndex, ColIndex)
 			# second step, off-diagonal branching to p2, and broadcast to x3
 			# (backward) direction is included. So when evolve forward, the branch correspondence remains the same
 			p2: npt.NDArray[np.double] = p1 + dt * evolve_density_non_adiabatically.offdiagonal_branches.reshape((-1,) + tuple(1 for _ in range(x0.ndim))) * pes.adiabatic_force(x2)[..., 0, 1] # 3 * ... * D
@@ -249,7 +250,7 @@ def evolve_density_non_adiabatically(
 				if branch_row_index == RowIndex and branch_col_index == ColIndex and density is not None:
 					rho_predict[index, evolve_density_non_adiabatically.offdiagonal_zero_branch_index] = density
 				# first half-step adiabatic evolve. (x4, p3) -> (x2, p2) with an adiabatic rotation
-				evolve_density_adiabatically(rho_predict[index], x2, x4[index], None, Direction.Forward, dt / 2.0, branch_row_index, branch_col_index)
+				evolve_density_adiabatically(rho_predict[index], x2, x4[index], None, Direction.FORWARD, dt / 2.0, branch_row_index, branch_col_index)
 			rho_combined_offdiag: npt.NDArray[np.cdouble] = np.zeros((pes.NUM_TRIG,) + rho_predict.shape[2:], np.cdouble) # NUM_TRIG * ...
 			for index, branch in enumerate(evolve_density_non_adiabatically.offdiagonal_branches):
 				# now they are at (x2, p2). A off-diagonal rotation is needed.
@@ -275,7 +276,7 @@ def evolve_density_non_adiabatically(
 			offdiagonal_rotation(rho_combined_offdiag, x2, p1, dt / 2.0)
 			# another adiabatic step, (x2, p1) -> (x0, p0)
 			trig_index: int = np.argwhere(pes.tril_element_indices == RowIndex * pes.NUM_PES + ColIndex)[0, 0]
-			evolve_density_adiabatically(rho_combined_offdiag[trig_index], x0, x2, None, Direction.Forward, dt / 2.0, RowIndex, ColIndex)
+			evolve_density_adiabatically(rho_combined_offdiag[trig_index], x0, x2, None, Direction.FORWARD, dt / 2.0, RowIndex, ColIndex)
 			return rho_combined_offdiag[trig_index]
 		case _:
 			raise NotImplementedError("Model NOT Implemented!")
@@ -286,7 +287,7 @@ def evolve(
 	densities: list[npt.NDArray[np.cdouble]],
 	mass: npt.NDArray[np.double],
 	dt: float,
-	predictor: typing.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
+	predictor: collections.abc.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
 ) -> None:
 	"""
 	To evolve the given points and density matrices
@@ -301,11 +302,11 @@ def evolve(
 		Mass of classical degree of freedom
 	dt : float
 		Time interval
-	predictor : typing.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
+	predictor : collections.abc.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
 		It predicts the density matrix element based on given coordinates and element index
 	"""
 	# lower triangular loop, evolve coordinates and density
-	evolve.drc = Direction.Forward
+	evolve.drc = Direction.FORWARD
 	for iPES in range(pes.NUM_PES):
 		for jPES in range(iPES + 1):
 			TrilIndex = pes.flatten_tril_index[iPES, jPES]

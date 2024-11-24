@@ -1,7 +1,6 @@
 """
-sample
-======
-
+point
+=====
 This module provides methods for sampling.
 """
 import collections.abc
@@ -12,15 +11,15 @@ import typing
 import numpy as np
 import numpy.typing as npt
 import sklearn.cluster
-import torch
 
 sys.path.append(os.path.dirname(__file__))
 
 import evolve
 import pes
+import utility
 
-np_rng: np.random.Generator = np.random.Generator(np.random.MT19937(0))
-torch.manual_seed(0)
+SEED: typing.Final = 0
+np_rng: np.random.Generator = np.random.Generator(np.random.MT19937(SEED))
 
 
 def normal_sample(
@@ -45,8 +44,7 @@ def normal_sample(
 	npt.NDArray[np.double], shape of (NUM_PTS, PHASEDIM)
 		Normally distributed point test
 	"""
-	return torch.randn((num_points, pes.PHASEDIM), dtype=torch.float).detach().numpy() * stddev + mean
-	# return np_rng.multivariate_normal(mean, np.diag(stddev ** 2), num_points, "raise", method="eigh")
+	return np_rng.multivariate_normal(mean, np.diag(stddev ** 2), num_points, "raise", method="eigh")
 
 
 class Points:
@@ -81,6 +79,10 @@ class Points:
 
 	Methods
 	-------
+	__print_coordinate_distribution(title, coordinates)
+		To print the average and standard deviation of the points
+	__sample_extra_points(all_points)
+		To create the extra point set
 	num_center()
 		To calculate the number of points in the center that corresponding to each element
 	center()
@@ -89,10 +91,6 @@ class Points:
 		To give the density matrix element
 	rescale_factor()
 		To give the rescale factor that makes `max|rho|==1`
-	__print_coordinate_distribution(title, coordinates)
-		To print the average and standard deviation of the points
-	__sample_extra_points(all_points)
-		To create the extra point set
 	print_belonging(belong_file)
 		To print the belonging index of the central points
 	evolve(mass, dt, predictor)
@@ -118,65 +116,74 @@ class Points:
 	__dest_idx: typing.Final[npt.NDArray[np.int_]] = __dest_row_idx * pes.NUM_PES + __dest_col_idx
 	__NUM_PTS: typing.Final = 256
 	__NUM_XTR_RATIO: typing.Final = 50
+	__slots__: tuple = ("__init_purity", "__num_all_centers", "__coordinate", "__index", "__density")
 
 	@staticmethod
-	def sample_central_points(num_points: int | npt.NDArray[np.int_], all_points: list[npt.NDArray[np.double]]) -> None:
+	def __print_coordinate_distribution(title: str, coordinates: npt.NDArray[np.double]) -> None:
 		"""
-		To resample the central points
+		To print the average and standard deviation of the points
 
 		Parameters
 		----------
-		num_points : int | npt.NDArray[np.int_]
-			The number of central points. They will be placed at first
-		all_points : list[npt.NDArray[np.double]], len of NUM_TRIG, each of shape (num_point * (1 + NUM_XTR_RATIO), PHASEDIM)
-			All the points of all elements and dimensions
+		title : str
+			What is the meaning of the given coordinates
+		coordinates : npt.NDArray[np.double], shape of (NUM_POINTS, PHASEDIM)
+			The phase space coordinates
 		"""
-		if isinstance(num_points, int):
-			num_points = np.full(pes.NUM_TRIG, num_points, np.int_)
-		for iPES in range(pes.NUM_PES):
-			for jPES in range(iPES + 1):
-				TrilIndex: int = pes.flatten_tril_index[iPES, jPES]
-				kmeans: sklearn.cluster.KMeans = sklearn.cluster.KMeans(num_points[TrilIndex], init="k-means++", n_init="auto", random_state=np.random.RandomState(np_rng.bit_generator), algorithm="lloyd").fit(all_points[TrilIndex])
-				all_points[TrilIndex][:num_points[TrilIndex]] = kmeans.cluster_centers_
-				print("rho({}, {}), <r> = {}, stddev = {}".format(iPES, jPES, np.average(all_points[TrilIndex][:num_points[TrilIndex]], 0), np.std(all_points[TrilIndex][:num_points[TrilIndex]], 0)), flush=True)
+		print(((title + ": ") if title != "" else "") + f"{utility.format_array("<r>", np.average(coordinates, 0))}, {utility.format_array("stddev", np.std(coordinates, 0))}")
 
 	@staticmethod
-	def sample_extra_points(num_points: int | npt.NDArray[np.int_], all_points: list[npt.NDArray[np.double]]) -> None:
+	def __sample_extra_points(central_points: npt.NDArray[np.double], extra_ratio: int) -> npt.NDArray[np.double]:
 		"""
 		To create the extra point set
 
-		First num_points points remain the same, and the rest of the points are resampled based on the mean of the first num_points points and variance from predictors
+		First `num_points` points remain the same, and the rest of the points are resampled based on the first `num_points` points and their variance
 
 		Parameters
 		----------
-		num_points : int | npt.NDArray[np.int_]
-			The number of central points. The rest of the points are resampled
-		all_points : list[npt.NDArray[np.double]], len of NUM_TRIG, each of shape (num_point * (1 + NUM_XTR_RATIO), PHASEDIM)
-			Points of all elements and dimensions
+		central_points : shape of (num_point, PHASEDIM)
+			Points who will be used as center of sampling
+		extra_ratio : int
+			The number of points around each central point
 		"""
-		if isinstance(num_points, int):
-			num_points = np.full(pes.NUM_TRIG, num_points, np.int_)
-		for iPES in range(pes.NUM_PES):
-			for jPES in range(iPES + 1):
-				TrilIndex: int = pes.flatten_tril_index[iPES, jPES]
-				assert all_points[TrilIndex].shape[-2] % num_points[TrilIndex] == 0
-				extra_point_ratio: int = all_points[TrilIndex].shape[-2] // num_points[TrilIndex] - 1
-				var: npt.NDArray[np.double] = np.var(all_points[TrilIndex][:num_points[TrilIndex]], 0)
-				var = np.diag(var)
-				all_points[TrilIndex][num_points[TrilIndex]:] = np.concatenate([np_rng.multivariate_normal(pt, var, extra_point_ratio, "raise", method="cholesky") for pt in all_points[TrilIndex][:num_points[TrilIndex]]])
+		stddev: typing.Final[npt.NDArray[np.double]] = np.std(central_points, 0)
+		result: typing.Final[npt.NDArray[np.double]] = np.concatenate([normal_sample(extra_ratio, pt, stddev) for pt in central_points])
+		__class__.__print_coordinate_distribution("Sample Extra Points", result)
+		return result
 
 	def __init__(self, init_dist: pes.InitialDistribution, num_pts: int = __NUM_PTS, extra_ratio: int = __NUM_XTR_RATIO) -> None:
-		self.extra_ratio = extra_ratio
-		self.gp_pts: list[npt.NDArray[np.double]] = [arr for arr in np.tile(normal_sample(num_pts, init_dist.r0, init_dist.sigma_r0)[np.newaxis], (pes.NUM_TRIG, 1 + extra_ratio, 1))]
-		self.num_points: npt.NDArray[np.int_] = np.full(pes.NUM_TRIG, num_pts)
-		__class__.sample_extra_points(self.num_points, self.gp_pts)
-		__class__.sample_central_points(self.num_points, self.gp_pts)
-		__class__.sample_extra_points(self.num_points, self.gp_pts)
-		self.gp_density: list[npt.NDArray[np.cdouble]] = [init_dist(pts, idx) for pts, idx in zip(self.gp_pts, pes.tril_element_indices)]
-		# prepare for surface-hopping part
-		self.sh_pts: npt.NDArray[np.double] = np.concatenate([arr[:num_pts] for arr in self.gp_pts], 0)
-		self.sh_belonging_idx: npt.NDArray[np.int_] = np.repeat(pes.tril_element_indices, num_pts, 0)
-		self.sh_density: npt.NDArray[np.cdouble] = np.concatenate([den[:num_pts] for den in self.gp_density], 0)
+		self.__init_purity: typing.Final[npt.NDArray[np.double]] = init_dist.weight ** 2
+		self.__num_all_centers: typing.Final[int] = pes.NUM_TRIG * num_pts
+		kmeans_center: sklearn.cluster.KMeans = sklearn.cluster.KMeans(num_pts, init="k-means++", n_init="auto", random_state=np.random.RandomState(np_rng.bit_generator), algorithm="lloyd")
+		kmeans_extra: sklearn.cluster.KMeans = sklearn.cluster.KMeans(num_pts * extra_ratio, init="k-means++", n_init="auto", random_state=np.random.RandomState(np_rng.bit_generator), algorithm="lloyd")
+		self.__coordinate: npt.NDArray[np.double] = np.tile(normal_sample(num_pts, init_dist.r0, init_dist.sigma_r0), (1 + extra_ratio, 1))
+		__class__.__print_coordinate_distribution("Sample Central Points", self.__coordinate[:num_pts])
+		self.__coordinate[num_pts:] = __class__.__sample_extra_points(self.__coordinate[:num_pts], extra_ratio)
+		kmeans_center.fit(self.__coordinate)
+		self.__coordinate[:num_pts] = kmeans_center.cluster_centers_
+		__class__.__print_coordinate_distribution("KMeans Central Points", kmeans_center.cluster_centers_)
+		kmeans_extra.fit(__class__.__sample_extra_points(kmeans_center.cluster_centers_, extra_ratio ** 2))
+		__class__.__print_coordinate_distribution("KMeans Extra Points", kmeans_extra.cluster_centers_)
+		self.__coordinate[num_pts:] = kmeans_extra.cluster_centers_
+		# kmeans_center.fit(self.__coordinate)
+		# __class__.__print_coordinate_distribution("KMeans Central Points", kmeans_center.cluster_centers_)
+		# self.__coordinate[:num_pts] = kmeans_center.cluster_centers_
+		# kmeans_extra.fit(__class__.__sample_extra_points(kmeans_center.cluster_centers_, extra_ratio ** 2))
+		# __class__.__print_coordinate_distribution("KMeans Extra Points", kmeans_extra.cluster_centers_)
+		# self.__coordinate[num_pts:] = kmeans_extra.fit(np.concatenate([self.__coordinate[num_pts:], kmeans_extra.cluster_centers_])).cluster_centers_
+		# __class__.__print_coordinate_distribution("KMeans Extra Points", kmeans_extra.cluster_centers_)
+		__class__.__print_coordinate_distribution("Overall", self.__coordinate)
+		self.__coordinate = np.concat([np.tile(self.__coordinate[:num_pts], (pes.NUM_TRIG, 1)), np.tile(self.__coordinate[num_pts:], (pes.NUM_TRIG, 1))]) # central pts of all elements, then extra pts of all elements
+		self.__index: npt.NDArray[np.int_] = np.concat([np.repeat(pes.tril_element_indices, num_pts), np.repeat(pes.tril_element_indices, num_pts * extra_ratio)])
+		self.__density: npt.NDArray[np.cdouble] = np.empty(self.__coordinate.shape[:-1], np.cdouble)
+		for iTrig, iElement in enumerate(pes.tril_element_indices):
+			central_start: int = iTrig * num_pts
+			central_end: int = (iTrig + 1) * num_pts
+			self.__density[central_start:central_end] = init_dist(self.__coordinate[central_start:central_end], iElement)
+			extra_start: int = self.__num_all_centers + iTrig * num_pts * extra_ratio
+			extra_end: int = self.__num_all_centers + (iTrig + 1) * num_pts * extra_ratio
+			self.__density[extra_start:extra_end] = init_dist(self.__coordinate[extra_start:extra_end], iElement)
+		print("", end="", flush=True)
 
 	@property
 	def num_center(self) -> npt.NDArray[np.int_]:
@@ -188,7 +195,7 @@ class Points:
 		npt.NDArray[np.int_]
 			Central points cooresponding to each element
 		"""
-		return self.num_points
+		return (self.__index[:self.__num_all_centers] == pes.tril_element_indices[:, np.newaxis]).astype(np.int_).sum(-1)
 
 	@property
 	def center(self) -> list[npt.NDArray[np.double]]:
@@ -200,7 +207,7 @@ class Points:
 		list[npt.NDArray[np.double]]
 			Coordinates of each density matrix element
 		"""
-		return self.gp_pts
+		return [self.__coordinate[self.__index == iElement] for iElement in pes.tril_element_indices]
 
 	@property
 	def density(self) -> list[npt.NDArray[np.cdouble]]:
@@ -212,7 +219,7 @@ class Points:
 		list[npt.NDArray[np.cdouble]]
 			Density matrix element, cooresponding to `center()`
 		"""
-		return self.gp_density
+		return [self.__density[self.__index == iElement] for iElement in pes.tril_element_indices]
 
 	@property
 	def rescale_factor(self) -> npt.NDArray[np.double]:
@@ -225,8 +232,8 @@ class Points:
 			Rescale factor that scale up to 1.0; if all samples are 0, return 0
 		"""
 		result: npt.NDArray[np.double] = np.empty((pes.NUM_PES, pes.NUM_PES), np.double)
-		for iPES, jPES, iTrig in zip(pes.tril_row_indices, pes.tril_col_indices, np.arange(pes.NUM_TRIG)):
-			element_density: npt.NDArray[np.cdouble] = self.gp_density[iTrig]
+		for iPES, jPES, iElement in zip(pes.tril_row_indices, pes.tril_col_indices, pes.tril_element_indices):
+			element_density: npt.NDArray[np.cdouble] = self.__density[self.__index == iElement]
 			if iPES == jPES:
 				result[iPES, jPES] = 0 if np.all(element_density == 0.0) else 1.0 / np.max(np.abs(element_density))
 			else:
@@ -248,111 +255,92 @@ class Points:
 		belong_file : io.TextIOWrapper
 			The file to save the belonging indices
 		"""
-		np.savetxt(belong_file, np.repeat(np.concat([[idx, idx + pes.NUM_ELM] for idx in pes.tril_element_indices]), np.concat([[n, pt.shape[0] - n] for n, pt in zip(self.num_points, self.gp_pts)]))[np.newaxis], footer='\n', comments="")
+		np.savetxt(
+			belong_file,
+			np.repeat(np.concat([[idx, idx + pes.NUM_ELM] for idx in pes.tril_element_indices]), np.concat([[m, n - m] for m, n in zip(self.num_center, (self.__index == pes.tril_element_indices[:, np.newaxis]).astype(np.int_).sum(-1))]))[np.newaxis],
+			footer="\n",
+			comments=""
+		)
 
-	@staticmethod
-	def sh_evolve(
-		points: npt.NDArray[np.double],
-		densities: npt.NDArray[np.cdouble],
-		belonging_idx: npt.NDArray[np.int_],
+	def evolve(
+		self,
 		mass: npt.NDArray[np.double],
 		dt: float,
 		predictor: collections.abc.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
 	) -> None:
 		"""
-		_summary_
+		Non-adiabatic dynamics with surface hopping
 
 		Parameters
 		----------
-		points : npt.NDArray[np.double], shape of (NUM_TRIG * NUM_PTS, PHASEDIM)
-			Phase space coordinates of selected points for each density matrix element
-		densities : npt.NDArray[np.cdouble], shape of (NUM_TRIG * NUM_PTS,)
-			Density matrix element of the points
-		belonging_idx : npt.NDArray[np.int_], shape of (NUM_TRIG * NUM_PTS,)
-
 		mass : npt.NDArray[np.double], shape of (DIM,)
 			Mass of classical degree of freedom
 		dt : float
 			Time interval
 		predictor : collections.abc.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
 			It predicts the density matrix element based on given coordinates and element index
+		purity : npt.NDArray[np.double], shape of (NUM_PES, NUM_PES)
+			The purity of each element, indicating the transition allowance to other elements
 		"""
 		# evolve coordinates and hopping
-		x0: npt.NDArray[np.double] = points[:, :pes.DIM] # N * D
-		p0: npt.NDArray[np.double] = points[:, pes.DIM:] # N * D
+		x0: npt.NDArray[np.double] = self.__coordinate[:, :pes.DIM] # N * D, slice of centers
+		p0: npt.NDArray[np.double] = self.__coordinate[:, pes.DIM:] # N * D, slice of centers
 		x2: npt.NDArray[np.double] = np.empty_like(x0) # N * D
 		p1: npt.NDArray[np.double] = np.empty_like(p0) # N * D
 		x4: npt.NDArray[np.double] = np.empty_like(x0) # N * D
 		p2: npt.NDArray[np.double] = np.empty_like(p0) # N * D
-		current_indices: npt.NDArray[np.bool_] = belonging_idx == pes.tril_element_indices[:, np.newaxis]
-		for iBelongPES in range(pes.NUM_PES):
-			for jBelongPES in range(iBelongPES + 1):
-				TrilIndex = pes.flatten_tril_index[iBelongPES, jBelongPES]
-				indices: npt.NDArray[np.int_] = np.flatnonzero(current_indices[TrilIndex]) # n
-				# get x and p, and 2 semi adiabatic steps
+		current_indices: npt.NDArray[np.bool_] = self.__index == pes.tril_element_indices[:, np.newaxis]
+		for iTrig, (iBelongPES, jBelongPES) in enumerate(zip(pes.tril_row_indices, pes.tril_col_indices)):
+			indices: npt.NDArray[np.int_] = np.flatnonzero(current_indices[iTrig]) # NUM_PTS
+			num_pts: int = indices.size
+			if num_pts > 0: # only have elements
+				# get x and p, and 2 semi adiabatic steps for all points
 				x2[indices], p1[indices] = evolve.evolve_coordinates_adiabatically(x0[indices], p0[indices], mass, dt / 2.0, evolve.Direction.FORWARD, iBelongPES, jBelongPES)
 				x4[indices], p2[indices] = evolve.evolve_coordinates_adiabatically(x2[indices], p1[indices], mass, dt / 2.0, evolve.Direction.FORWARD, iBelongPES, jBelongPES)
 				# surface hopping
 				# choose the one to jump to
-				num_pts: int = indices.size
 				idx_of_dest_idx: npt.NDArray[np.int_] = np_rng.integers(0, 2 * pes.NUM_PES - 2, size=num_pts, dtype=np.int_) # n
 				velocity: npt.NDArray[np.double] = p2[indices] / mass # n * D
-				coupling: npt.NDArray[np.double] = pes.adiabatic_coupling(x4[indices])[np.arange(num_pts), :, __class__.__coup_row_idx[TrilIndex, idx_of_dest_idx], __class__.__coup_col_idx[TrilIndex, idx_of_dest_idx]] # n * D
+				coupling: npt.NDArray[np.double] = pes.adiabatic_coupling(x4[indices])[np.arange(num_pts), :, __class__.__coup_row_idx[iTrig, idx_of_dest_idx], __class__.__coup_col_idx[iTrig, idx_of_dest_idx]] # n * D
 				transition_rate: npt.NDArray[np.double] = np.abs(np.sum(velocity * coupling, -1) * dt) # n
 				transition_prob: npt.NDArray[np.double] = transition_rate / (1.0 + transition_rate) # n
 				# energy conservation
 				potential: npt.NDArray[np.double] = pes.adiabatic_potential(x4[indices]) # n * N
 				momentum_rescale_factor_sq: npt.NDArray[np.double] = 1.0\
-					+ (potential[np.arange(num_pts), __class__.__coup_col_idx[TrilIndex, idx_of_dest_idx]] - potential[np.arange(num_pts), __class__.__coup_row_idx[TrilIndex, idx_of_dest_idx]]) / np.sum(p2[indices] ** 2 / mass, -1) # n
+					+ (potential[np.arange(num_pts), __class__.__coup_col_idx[iTrig, idx_of_dest_idx]] - potential[np.arange(num_pts), __class__.__coup_row_idx[iTrig, idx_of_dest_idx]]) / np.sum(p2[indices] ** 2 / mass, -1) # n
 				# judgment
 				transition: npt.NDArray[np.bool_] = np.logical_and(np_rng.random(num_pts) < transition_prob, momentum_rescale_factor_sq >= 0.0) # n
 				# change index, momentum, and the back propagation
 				if np.any(transition):
-					belonging_idx[indices[transition]] = __class__.__dest_idx[TrilIndex, idx_of_dest_idx[transition]] # indices[transition] equivalent to [current_indices[TrilIndex]][transition]
-					p2[indices[transition]] *= np.sqrt(momentum_rescale_factor_sq[transition])[:, np.newaxis]
+					transit_indices: npt.NDArray[np.int_] = indices[transition] # indices[transition] equivalent to [current_indices[iTrig]][transition]
+					transit_idx_of_dest_idx: npt.NDArray[np.int_] = idx_of_dest_idx[transition]
+					self.__index[transit_indices] = __class__.__dest_idx[iTrig, transit_idx_of_dest_idx]
+					p2[transit_indices] *= np.sqrt(momentum_rescale_factor_sq[transition]).reshape(-1, 1)
 					# change density
-					for iPredictPES in range(pes.NUM_PES):
-						for jPredictPES in range(iPredictPES + 1):
-							if iBelongPES == iPredictPES and jBelongPES == jPredictPES:
-								pass
-							PredictElementIndex: int = iPredictPES * pes.NUM_PES + jPredictPES
-							need_predict: npt.NDArray[np.bool_] = np.logical_and(transition, __class__.__dest_idx[TrilIndex, idx_of_dest_idx] == PredictElementIndex) # in case the transition happens to this element
-							if np.any(need_predict):
-								x2[indices[need_predict]], p1[indices[need_predict]] = evolve.evolve_coordinates_adiabatically(x4[indices[need_predict]], p2[indices[need_predict]], mass, dt / 2.0, evolve.Direction.BACKWARD, iPredictPES, jPredictPES)
-								x0[indices[need_predict]], p0[indices[need_predict]] = evolve.evolve_coordinates_adiabatically(x2[indices[need_predict]], p1[indices[need_predict]], mass, dt / 2.0, evolve.Direction.BACKWARD, iPredictPES, jPredictPES)
-								densities[indices[need_predict]] = predictor(points[indices[need_predict]], PredictElementIndex)
+					for iPredictPES, jPredictPES, iPredictElement in zip(pes.tril_row_indices, pes.tril_col_indices, pes.tril_element_indices):
+						if iBelongPES == iPredictPES and jBelongPES == jPredictPES:
+							pass
+						need_predict_idx: npt.NDArray[np.int_] = transit_indices[__class__.__dest_idx[iTrig, transit_idx_of_dest_idx] == iPredictElement] # in case the transition happens to this element
+						if need_predict_idx.size > 0:
+							x2[need_predict_idx], p1[need_predict_idx] = evolve.evolve_coordinates_adiabatically(x4[need_predict_idx], p2[need_predict_idx], mass, dt / 2.0, evolve.Direction.BACKWARD, iPredictPES, jPredictPES)
+							x0[need_predict_idx], p0[need_predict_idx] = evolve.evolve_coordinates_adiabatically(x2[need_predict_idx], p1[need_predict_idx], mass, dt / 2.0, evolve.Direction.BACKWARD, iPredictPES, jPredictPES)
+							self.__density[need_predict_idx] = predictor(self.__coordinate[need_predict_idx], iPredictElement)
 		# evolve density
-		current_indices: npt.NDArray[np.bool_] = belonging_idx == pes.tril_element_indices[:, np.newaxis]
-		for iPES in range(pes.NUM_PES):
-			for jPES in range(iPES + 1):
-				TrilIndex = pes.flatten_tril_index[iPES, jPES]
-				densities[current_indices[TrilIndex]] = evolve.evolve_density_non_adiabatically(
-					densities[current_indices[TrilIndex]],
-					x4[current_indices[TrilIndex]],
-					p2[current_indices[TrilIndex]],
-					x2[current_indices[TrilIndex]],
-					p1[current_indices[TrilIndex]],
+		for iPES, jPES, iElement in zip(pes.tril_row_indices, pes.tril_col_indices, pes.tril_element_indices):
+			filters: npt.NDArray[np.bool_] = self.__index == iElement
+			if np.count_nonzero(filters) > 0:
+				self.__density[filters] = evolve.evolve_density_non_adiabatically(
+					self.__density[filters],
+					x4[filters],
+					p2[filters],
+					x2[filters],
+					p1[filters],
 					mass,
 					dt,
 					predictor,
 					iPES,
 					jPES
 				)
-				# finally set up the point coordinates
-				points[current_indices[TrilIndex], :pes.DIM] = x4[current_indices[TrilIndex]]
-				points[current_indices[TrilIndex], pes.DIM:] = p2[current_indices[TrilIndex]]
-
-	def evolve(self, mass: npt.NDArray[np.double], dt: float, predictor: collections.abc.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]) -> None:
-		evolve.evolve(self.gp_pts, self.gp_density, mass, dt, predictor)
-		__class__.sh_evolve(self.sh_pts, self.sh_density, self.sh_belonging_idx, mass, dt, predictor)
-
-	def exchange_and_resample(self, predictor: collections.abc.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]) -> None:
-		self.num_points = np.unique(self.sh_belonging_idx, return_counts=True)[1]
-		self.gp_pts = [np.tile(self.sh_pts[self.sh_belonging_idx == iTril], (1 + self.extra_ratio, 1)) for iTril in pes.tril_element_indices]
-		self.gp_density = [np.tile(self.sh_density[self.sh_belonging_idx == iTril], 1 + self.extra_ratio) for iTril in pes.tril_element_indices]
-		# point extra points and predict them
-		__class__.sample_extra_points(self.num_points, self.gp_pts)
-		for iPES in range(pes.NUM_PES):
-			for jPES in range(iPES + 1):
-				TrilIndex: int = pes.flatten_tril_index[iPES, jPES]
-				self.gp_density[TrilIndex][self.num_points[TrilIndex]:] = predictor(self.gp_pts[TrilIndex][self.num_points[TrilIndex]:], iPES * pes.NUM_PES + jPES)
+		# finally change coordinates
+		self.__coordinate[:, :pes.DIM] = x4
+		self.__coordinate[:, pes.DIM:] = p2

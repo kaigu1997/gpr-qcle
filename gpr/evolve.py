@@ -231,7 +231,7 @@ def evolve_density_non_adiabatically(
 
 			# first step: (x0, p0) -> (x2, p1)
 			if x2 is None or p1 is None:
-				x2, p1 = evolve_coordinates_adiabatically(x0, p0, mass, dt / 2.0, Direction.BACKWARD, RowIndex, ColIndex)
+				x2, p1 = evolve_coordinates_adiabatically(x0, p0, mass, dt / 2.0, evolve_density_non_adiabatically.drc, RowIndex, ColIndex)
 			# second step, off-diagonal branching to p2, and broadcast to x3
 			# (backward) direction is included. So when evolve forward, the branch correspondence remains the same
 			p2: typing.Final[npt.NDArray[np.double]] = p1 + dt * evolve_density_non_adiabatically.offdiagonal_branches.reshape((-1,) + tuple(1 for _ in range(x0.ndim))) * pes.adiabatic_force(x2)[..., 0, 1] # 3 * ... * D

@@ -305,10 +305,6 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 					print_parameter_scale_loss(scale)
 				# update and predict
 				train_pred_draw(iTick)
-				# exchange with SH
-				pts.exchange_and_resample(predictors.predict)
-				predictors.update(pts.center, pts.density, pts.num_center, pts.rescale_factor)
-				predictors.train()
 				print_parameter_scale_loss(pts.rescale_factor)
 				# check stopping criteria, when grid solution is not given
 				# use predictors (aia) with old points

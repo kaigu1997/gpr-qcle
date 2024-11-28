@@ -193,7 +193,7 @@ def each_local_parameter_trial(
 		x_nn: torch.Tensor,
 		y_nn: torch.Tensor
 	) -> torch.Tensor:
-		return local.normalize_generator(gp.default_predict)(cov, x_nn, y_nn, x_test)
+		return gp.default_predict(cov, x_nn, y_nn, x_test)
 
 	print("\nOptimize single point error for each point")
 	for loss_func, param in zip([se.looph_generator(), se.looph_generator(coeff=1.0), se.lool_generator(), se.lool_generator(coeff=1.0), se.loocv_generator(), se.loocv_generator(True), se.loosvl_generator(), se.loosvl_generator(1.0)], [{}, {"coeff": 1.0}, {}, {"coeff": 1.0}, {}, {"over_var": True}, {}, {"coeff": 1.0}]):
@@ -225,8 +225,8 @@ def each_local_parameter_trial(
 				)
 			)
 			loss[idx, 0] = loss_func(model.cov, x_idx, y_idx).item()
-			loss[idx, 1] = torch.abs(local.normalize_generator(gp.default_predict)(model.cov, pts.x_t[pts_neighbor_ind[idx]], pts.y_t[pts_neighbor_ind[idx]], pts.x_t[idx].reshape(1, sample.distribution.DIM)) - pts.y_t[idx].reshape(1)).item()
-			loss[idx, 2] = torch.abs(local.normalize_generator(gp.default_predict)(model.cov, x_idx, y_idx, pts.x_t[idx].reshape(1, sample.distribution.DIM)) - pts.y_t[idx].reshape(1)).item()
+			loss[idx, 1] = torch.abs(gp.default_predict(model.cov, pts.x_t[pts_neighbor_ind[idx]], pts.y_t[pts_neighbor_ind[idx]], pts.x_t[idx].reshape(1, sample.distribution.DIM)) - pts.y_t[idx].reshape(1)).item()
+			loss[idx, 2] = torch.abs(gp.default_predict(model.cov, x_idx, y_idx, pts.x_t[idx].reshape(1, sample.distribution.DIM)) - pts.y_t[idx].reshape(1)).item()
 			loss[idx, 3] = torch.abs(preds[idx](covs[idx], pts.x_t, pts.y_t, pts.x_t[idx].reshape(1, -1)) - pts.y_t[idx].reshape(1)).item()
 			loss[idx, 4] = torch.dist(gp.square_solver(model.cov(x_idx).to_dense(), torch.eye(y_idx.numel())) @ model.cov(x_idx).to_dense(), torch.eye(y_idx.numel()))
 			loss[idx, 5] = torch.dist(model.cov(x_idx).to_dense() @ gp.square_solver(model.cov(x_idx).to_dense(), torch.eye(y_idx.numel())), torch.eye(y_idx.numel()))
@@ -281,3 +281,9 @@ def each_local_parameter_trial(
 				pts,
 				f"local_mix_{lv}_with_{func_name}"
 			)
+			pred: npt.NDArray[np.double] = gp.gpytorch_gpr(covs, pts, predictor=model_mix_pred_generator(lv, preds, pts.x_t, best_method_idx))
+			diff: npt.NDArray[np.double] = pred - pc.label
+			max_ind: tuple = np.unravel_index(np.argmax(np.abs(diff)), diff.shape)
+			print(f"Max diff at f({sample.distribution.x1[max_ind]}, {sample.distribution.x2[max_ind]}) = {pc.label[max_ind]} vs {pred[max_ind]} and a diff of {diff[max_ind]}")
+			idx: int = int(local.get_neighbor_ind(pts.x_t, torch.tensor([sample.distribution.x1[max_ind], sample.distribution.x2[max_ind]]).reshape(1, -1), 1).item())
+			print(f"NN at {sample.format_array(None, pts.x_t[idx].reshape(1, sample.distribution.DIM))} with lengthscale {sample.format_array(None, covs[idx].lengthscale)}")

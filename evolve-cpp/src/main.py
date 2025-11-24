@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-import evolve
+import evolve # pyright: ignore[reportMissingImports]
 
 import collections.abc
-import matplotlib.animation
 import matplotlib.axes
 import matplotlib.colors
 import matplotlib.cm
@@ -78,7 +77,7 @@ if __name__ == "__main__":
 	NUM_PLOTS: int = len(titles)
 	COLORBAR_LB: float = 1e-16
 	fig: matplotlib.figure.Figure
-	axs: np.ndarray[collections.abc.Sequence[collections.abc.Sequence[matplotlib.axes.Axes]], np.dtype[np.object_]]
+	axs: np.ndarray
 	fig, axs = plt.subplots(NUM_PLOTS, evolve.NUM_ELM, figsize=(FIGSIZE[0] * evolve.NUM_ELM, FIGSIZE[1] * NUM_PLOTS))
 	for iPlot in range(NUM_PLOTS):
 		diff: npt.NDArray[np.double]

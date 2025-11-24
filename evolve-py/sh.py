@@ -1,21 +1,19 @@
-"""
-_summary_
+r"""sh
+==
+The main routine for surface hopping
 """
 import collections.abc
 import datetime
 import io
 import os
 import tarfile
-import typing
 
 import matplotlib.animation
 import matplotlib.artist
 import matplotlib.axes
 import matplotlib.cm
-import matplotlib.colors
 import matplotlib.figure
 import matplotlib.pyplot as plt
-import matplotlib.ticker
 import numpy as np
 import numpy.typing as npt
 
@@ -25,9 +23,8 @@ import pes
 import sample
 
 
-def main_func() -> None:
-	"""
-	The main routine
+def main_sh() -> None:
+	r"""The main routine for surface hopping
 	"""
 	mass: npt.NDArray[np.double]
 	r0: npt.NDArray[np.double]
@@ -77,7 +74,7 @@ def main_func() -> None:
 				current_indices: npt.NDArray[np.bool_] = belonging_idx == pes.tril_element_indices[:, np.newaxis]
 				for iTrig in range(pes.NUM_TRIG):
 					ElementIndex: int = pes.tril_element_indices[iTrig]
-					num_pts: int = np.count_nonzero(current_indices[iTrig])
+					num_pts: int = int(np.count_nonzero(current_indices[iTrig]))
 					if num_pts > 0: # only have elements
 						# evolve
 						pts[current_indices[iTrig], :pes.DIM], pts[current_indices[iTrig], pes.DIM:] = evolve.evolve_coordinates_adiabatically(
@@ -117,7 +114,7 @@ def main_func() -> None:
 
 	# drawer
 	fig: matplotlib.figure.Figure
-	axs: np.ndarray[collections.abc.Sequence[collections.abc.Sequence[matplotlib.axes.Axes]], np.dtype[np.object_]]
+	axs: np.ndarray
 	fig, axs = plt.subplots(2, pes.NUM_ELM, figsize=(main.FIGSIZE[0] * pes.NUM_ELM, main.FIGSIZE[1] * 2))
 	for iElement in range(pes.NUM_ELM):
 		for iPlot in range(2):
@@ -130,7 +127,7 @@ def main_func() -> None:
 	all_pts: npt.NDArray[np.double] = np.loadtxt("sh-points.txt").reshape(total_ticks, pes.PHASEDIM, main.NUM_PTS * pes.NUM_TRIG)
 	all_belonging: npt.NDArray[np.int_] = np.loadtxt("sh-belonging.txt").astype(np.int_)
 
-	def draw(iTick: int) -> typing.Iterable[matplotlib.artist.Artist | typing.Iterable[matplotlib.artist.Artist]]:
+	def draw(iTick: int) -> collections.abc.Iterable[matplotlib.artist.Artist | collections.abc.Iterable[matplotlib.artist.Artist]]:
 		print("{}/{}".format(iTick, total_ticks), datetime.datetime.now())
 		ct_data: npt.NDArray[np.double] = main.real_part(data[iTick])
 		ct_data *= main.get_scale(ct_data)[:, np.newaxis, np.newaxis]
@@ -159,7 +156,7 @@ def main_func() -> None:
 		return fig, axs
 
 	# draw animation
-	matplotlib.animation.FuncAnimation(fig, draw, total_ticks).save('gpr.gif', 'imagemagick')
+	matplotlib.animation.FuncAnimation(fig, draw, total_ticks).save('gpr.gif', 'imagemagick') # pyright: ignore[reportArgumentType]
 
 	with tarfile.open('ticks.tar.gz', 'w:gz') as tf:
 		for iTick in range(total_ticks):
@@ -169,4 +166,4 @@ def main_func() -> None:
 
 
 if __name__ == "__main__":
-	main_func()
+	main_sh()

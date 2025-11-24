@@ -1,12 +1,11 @@
+r"""backtrace
+=========
+To trace back where the maximum weighted points start
 """
-_summary_
-"""
-import collections.abc
 import typing
 
 import matplotlib.axes
 import matplotlib.colors
-import matplotlib.cm
 import matplotlib.figure
 import matplotlib.patches
 import matplotlib.pyplot as plt
@@ -19,7 +18,7 @@ import pes
 
 
 def main_func() -> None:
-	"""
+	r"""
 	The main routine
 	"""
 	FIGSIZE: tuple[float, float] = (6.4, 4.8)
@@ -68,7 +67,7 @@ def main_func() -> None:
 			print('\n', file=f)
 	# plot
 	fig: matplotlib.figure.Figure
-	axs: np.ndarray[collections.abc.Sequence[collections.abc.Sequence[matplotlib.axes.Axes]], np.dtype[np.object_]]
+	axs: np.ndarray
 	fig, axs = plt.subplots(2, 4, figsize=(FIGSIZE[0] * pes.NUM_ELM, FIGSIZE[1] * 2))
 	for iPlot in range(2):
 		for iElement in range(pes.NUM_ELM):

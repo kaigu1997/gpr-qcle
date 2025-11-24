@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
-"""
-main
+r"""main
 ====
-
 The main module
 """
 import collections.abc
@@ -35,8 +33,7 @@ NUM_MC_PTS: typing.Literal[1_000_000] = 1_000_000
 
 
 def read_input() -> tuple[npt.NDArray[np.double], npt.NDArray[np.double], npt.NDArray[np.double], float, float]:
-	"""
-	To read input
+	r"""To read input
 
 	Returns
 	-------
@@ -63,8 +60,7 @@ def read_input() -> tuple[npt.NDArray[np.double], npt.NDArray[np.double], npt.ND
 
 
 def read_data() -> npt.NDArray[np.cdouble]:
-	"""
-	To read input data
+	r"""To read input data
 
 	Returns
 	-------
@@ -82,8 +78,7 @@ def read_data() -> npt.NDArray[np.cdouble]:
 
 
 def get_RI_label(row: int, col: int) -> str:
-	"""
-	To get the label of the element
+	r"""To get the label of the element
 
 	Parameters
 	----------
@@ -106,8 +101,7 @@ def get_RI_label(row: int, col: int) -> str:
 
 
 def real_part(arr: npt.NDArray[np.cdouble]) -> npt.NDArray[np.double]:
-	"""
-	To extract the independent components of density supervector
+	r"""To extract the independent components of density supervector
 
 	It takes the real part of upper triangular (including diagonal), and imaginary part of strictly-lower triangular
 
@@ -125,8 +119,7 @@ def real_part(arr: npt.NDArray[np.cdouble]) -> npt.NDArray[np.double]:
 
 
 def get_scale(data: npt.NDArray[np.double]) -> npt.NDArray[np.double]:
-	"""
-	To calculate the scale factor from the given data.
+	r"""To calculate the scale factor from the given data.
 
 	The scale would be 1 / max() in general, or 0 if all are 0
 
@@ -145,8 +138,7 @@ def get_scale(data: npt.NDArray[np.double]) -> npt.NDArray[np.double]:
 
 
 def plot_region(arr: npt.NDArray[np.double]) -> npt.NDArray[np.double]:
-	"""
-	To extract the region to plot.
+	r"""To extract the region to plot.
 
 	To draw the contour more efficiently, only 1/4 of the grids are used.
 
@@ -164,8 +156,7 @@ def plot_region(arr: npt.NDArray[np.double]) -> npt.NDArray[np.double]:
 
 
 def main() -> None:
-	"""
-	The main driver
+	r"""The main driver
 
 	Raises
 	------
@@ -208,12 +199,11 @@ def main() -> None:
 	NORM: matplotlib.colors.Normalize = matplotlib.colors.LogNorm(COLORBAR_LB, 1e4, True)
 	LOCATOR: matplotlib.ticker.Locator = matplotlib.ticker.LogLocator(numticks=21)
 	fig: matplotlib.figure.Figure
-	axs: np.ndarray[collections.abc.Sequence[collections.abc.Sequence[matplotlib.axes.Axes]], np.dtype[np.object_]]
+	axs: np.ndarray
 	fig, axs = plt.subplots(NUM_PLOTS, pes.NUM_ELM, figsize=(FIGSIZE[0] * pes.NUM_ELM, FIGSIZE[1] * NUM_PLOTS))
 
 	def pred(r: npt.NDArray[np.double], i: int) -> npt.NDArray[np.cdouble]:
-		"""
-		To predict
+		r"""To predict
 
 		Parameters
 		----------
@@ -235,8 +225,7 @@ def main() -> None:
 	with open('density.txt', 'w', encoding='UTF-8') as den_f,\
 		open('error.txt', 'w', encoding='UTF-8') as err_f:
 		def pred_draw(iTick: int) -> None:
-			"""
-			To train the parameter, doing prediction on all grids, and draw it
+			r"""To train the parameter, doing prediction on all grids, and draw it
 
 			Parameters
 			----------
@@ -289,13 +278,12 @@ def main() -> None:
 			np.savetxt(err_f, (original_errors[iTick], rescaled_errors[iTick]), footer='\n', comments='')
 			print(iTick, time.asctime(), flush=True)
 
-		def init() -> typing.Iterable[matplotlib.artist.Artist | typing.Iterable[matplotlib.artist.Artist]]:
-			"""
-			Initializer of the animation
+		def init() -> collections.abc.Iterable[matplotlib.artist.Artist | collections.abc.Iterable[matplotlib.artist.Artist]]:
+			r"""Initializer of the animation
 
 			Returns
 			-------
-			typing.Iterable[matplotlib.artist.Artist | typing.Iterable[matplotlib.artist.Artist]]
+			collections.abc.Iterable[matplotlib.artist.Artist | collections.abc.Iterable[matplotlib.artist.Artist]]
 				figure and axes
 			"""
 			for iPES in range(pes.NUM_PES):
@@ -310,9 +298,8 @@ def main() -> None:
 			pred_draw(0)
 			return fig, axs
 
-		def draw(iTick: int) -> typing.Iterable[matplotlib.artist.Artist | typing.Iterable[matplotlib.artist.Artist]]:
-			"""
-			Implementation of each frame
+		def draw(iTick: int) -> collections.abc.Iterable[matplotlib.artist.Artist | collections.abc.Iterable[matplotlib.artist.Artist]]:
+			r"""Implementation of each frame
 
 			Parameters
 			----------
@@ -321,7 +308,7 @@ def main() -> None:
 
 			Returns
 			-------
-			typing.Iterable[matplotlib.artist.Artist | typing.Iterable[matplotlib.artist.Artist]]
+			collections.abc.Iterable[matplotlib.artist.Artist | collections.abc.Iterable[matplotlib.artist.Artist]]
 				figure and axes
 			"""
 			# evolve
@@ -356,7 +343,7 @@ def main() -> None:
 			return fig, axs
 
 		# draw animation
-		matplotlib.animation.FuncAnimation(fig, draw, range(1, total_ticks), init).save('diff.gif', 'imagemagick')
+		matplotlib.animation.FuncAnimation(fig, draw, range(1, total_ticks), init).save('diff.gif', 'imagemagick') # pyright: ignore[reportArgumentType]
 
 
 if __name__ == "__main__":

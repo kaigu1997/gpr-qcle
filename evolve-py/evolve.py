@@ -1,7 +1,5 @@
-"""
-evolve
+r"""evolve
 ======
-
 This module provides the adiabatic and non-adiabatic evolution scheme.
 """
 import enum
@@ -14,8 +12,7 @@ import pes
 
 
 class Direction(enum.IntEnum):
-	"""
-	Enumerate of directions
+	r"""Enumerate of directions
 
 	Attributes
 	----------
@@ -29,8 +26,7 @@ class Direction(enum.IntEnum):
 
 
 def is_coupling(x: npt.NDArray[np.double], p: npt.NDArray[np.double], mass: npt.NDArray[np.double], dt: float) -> npt.NDArray[np.bool_]:
-	"""
-	To judge if there is strong enough non-adiabatic coupling at given phase coordinates
+	r"""To judge if there is strong enough non-adiabatic coupling at given phase coordinates
 
 	Parameters
 	----------
@@ -64,8 +60,7 @@ def evolve_coordinates_adiabatically(
 	RowIndex: int,
 	ColIndex: int
 ) -> tuple[npt.NDArray[np.double], npt.NDArray[np.double]]:
-	"""
-	To evolve the phase space coordinates adiabatically of given element for given interval along given direction
+	r"""To evolve the phase space coordinates adiabatically of given element for given interval along given direction
 
 	Parameters
 	----------
@@ -90,8 +85,7 @@ def evolve_coordinates_adiabatically(
 		The destination positions and momenta
 	"""
 	def position_evolve(x: npt.NDArray[np.double], p: npt.NDArray[np.double]) -> npt.NDArray[np.double]:
-		"""
-		To evolve positions for half step
+		r"""To evolve positions for half step
 
 		Parameters
 		----------
@@ -108,8 +102,7 @@ def evolve_coordinates_adiabatically(
 		return x + drc.value * dt / 2.0 * p / mass
 
 	def momentum_diagonal_nonbranch_evolve(x: npt.NDArray[np.double], p: npt.NDArray[np.double]) -> npt.NDArray[np.double]:
-		"""
-		To evolve momenta
+		r"""To evolve momenta
 
 		Parameters
 		----------
@@ -132,8 +125,7 @@ def evolve_coordinates_adiabatically(
 
 
 def get_points(condition: npt.NDArray[np.bool_], *args: npt.NDArray) -> tuple[npt.NDArray, ...]:
-	"""
-	To get the quantities that satisfies given condition
+	r"""To get the quantities that satisfies given condition
 
 	Parameters
 	----------
@@ -160,8 +152,7 @@ def evolve_density_adiabatically(
 	RowIndex: int,
 	ColIndex: int
 ) -> None:
-	"""
-	To evolve the given density matrix element adiabatically
+	r"""To evolve the given density matrix element adiabatically
 
 	Parameters
 	----------
@@ -197,8 +188,7 @@ def evolve_density_non_adiabatically(
 	RowIndex: int,
 	ColIndex: int
 ) -> npt.NDArray[np.cdouble]:
-	"""
-	To predict the density matrix element at the given phase space coordinates according to non-adiabatic dynamics
+	r"""To predict the density matrix element at the given phase space coordinates according to non-adiabatic dynamics
 
 	Parameters
 	----------
@@ -237,8 +227,7 @@ def evolve_density_non_adiabatically(
 	match pes.NUM_PES:
 		case 2:
 			def offdiagonal_rotation(rho_part: npt.NDArray[np.cdouble], x_part: npt.NDArray[np.double], p_part: npt.NDArray[np.double], dt_offdiag: float) -> None:
-				"""
-				To have a off-diagonal rotation on the given density matrices
+				r"""To have a off-diagonal rotation on the given density matrices
 
 				Parameters
 				----------
@@ -323,8 +312,7 @@ def evolve(
 	dt: float,
 	predictor: typing.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
 ) -> None:
-	"""
-	To evolve the given points and density matrices
+	r"""To evolve the given points and density matrices
 
 	Parameters
 	----------

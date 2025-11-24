@@ -1,11 +1,7 @@
-"""
-sample
+r"""sample
 ======
-
 This module provides methods for sampling.
 """
-import typing
-
 import numpy as np
 import numpy.typing as npt
 import sklearn.cluster
@@ -23,8 +19,7 @@ def normal_sample(
 	mean: npt.NDArray[np.double],
 	stddev: npt.NDArray[np.double]
 ) -> npt.NDArray[np.double]:
-	"""
-	To create normally distributed point set based on given mean and variance
+	r"""To create normally distributed point set based on given mean and variance
 
 	Parameters
 	----------
@@ -44,8 +39,7 @@ def normal_sample(
 
 
 def sample_central_points(num_points: int, all_points: npt.NDArray[np.double]) -> None:
-	"""
-	To resample the central points
+	r"""To resample the central points
 
 	Parameters
 	----------
@@ -66,8 +60,7 @@ def sample_central_points(num_points: int, all_points: npt.NDArray[np.double]) -
 
 
 def sample_extra_points(num_points: int, all_points: npt.NDArray[np.double]) -> None:
-	"""
-	To create the extra point set
+	r"""To create the extra point set
 
 	First num_points points remain the same, and the rest of the points are resampled based on the mean of the first num_points points and variance from predictors
 

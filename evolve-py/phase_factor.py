@@ -1,13 +1,14 @@
-import collections.abc
+r"""phase_factor
+============
+To show the accumulated adiabatic phase factor of coherence during evolution
+"""
 import os
 import tarfile
 import typing
 
 import matplotlib.axes
-import matplotlib.colors
 import matplotlib.cm
 import matplotlib.figure
-import matplotlib.ticker
 import matplotlib.pyplot as plt
 import numpy as np
 import numpy.typing as npt
@@ -49,7 +50,7 @@ def main_func() -> None:
 	adiabatic_phase_factor_10: npt.NDArray[np.double] = np.zeros(grids.shape[:-1])
 	# for plot
 	fig: matplotlib.figure.Figure
-	axs: np.ndarray[collections.abc.Sequence[collections.abc.Sequence[matplotlib.axes.Axes]], np.dtype[np.object_]]
+	axs: np.ndarray
 	fig, axs = plt.subplots(NUM_ROWS, NUM_COLS, figsize=(main.FIGSIZE[0] * NUM_COLS, main.FIGSIZE[1] * NUM_ROWS))
 	for iPlot in range(NUM_ROWS):
 		for jPlot in range(NUM_COLS):

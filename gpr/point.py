@@ -1,9 +1,7 @@
-"""
-point
+r"""point
 =====
 This module provides methods for sampling.
 """
-import collections.abc
 import os
 import sys
 import typing
@@ -27,8 +25,7 @@ def normal_sample(
 	mean: npt.NDArray[np.double],
 	stddev: npt.NDArray[np.double]
 ) -> npt.NDArray[np.double]:
-	"""
-	To create normally distributed point set based on given mean and variance
+	r"""To create normally distributed point set based on given mean and variance
 
 	Parameters
 	----------
@@ -48,8 +45,7 @@ def normal_sample(
 
 
 class Points:
-	"""
-	The class to evolve and sample points used to construct GPR
+	r"""The class to evolve and sample points used to construct GPR
 
 	Parameters
 	----------
@@ -120,8 +116,7 @@ class Points:
 
 	@staticmethod
 	def __print_coordinate_distribution(title: str, coordinates: npt.NDArray[np.double]) -> None:
-		"""
-		To print the average and standard deviation of the points
+		r"""To print the average and standard deviation of the points
 
 		Parameters
 		----------
@@ -134,8 +129,7 @@ class Points:
 
 	@staticmethod
 	def __sample_extra_points(central_points: npt.NDArray[np.double], extra_ratio: int) -> npt.NDArray[np.double]:
-		"""
-		To create the extra point set
+		r"""To create the extra point set
 
 		First `num_points` points remain the same, and the rest of the points are resampled based on the first `num_points` points and their variance
 
@@ -151,7 +145,12 @@ class Points:
 		__class__.__print_coordinate_distribution("Sample Extra Points", result)
 		return result
 
-	def __init__(self, init_dist: pes.InitialDistribution, num_pts: int = __NUM_PTS, extra_ratio: int = __NUM_XTR_RATIO) -> None:
+	def __init__(
+		self,
+		init_dist: pes.InitialDistribution,
+		num_pts: int = __NUM_PTS,
+		extra_ratio: int = __NUM_XTR_RATIO
+	) -> None:
 		self.__init_purity: typing.Final[npt.NDArray[np.double]] = init_dist.weight ** 2
 		self.__num_all_centers: typing.Final[int] = pes.NUM_TRIG * num_pts
 		kmeans_center: sklearn.cluster.KMeans = sklearn.cluster.KMeans(num_pts, init="k-means++", n_init="auto", random_state=np.random.RandomState(np_rng.bit_generator), algorithm="lloyd")
@@ -187,8 +186,7 @@ class Points:
 
 	@property
 	def num_center(self) -> npt.NDArray[np.int_]:
-		"""
-		To calculate the number of points in the center that corresponding to each element
+		r"""To calculate the number of points in the center that corresponding to each element
 
 		Returns
 		-------
@@ -199,8 +197,7 @@ class Points:
 
 	@property
 	def center(self) -> list[npt.NDArray[np.double]]:
-		"""
-		To give the phase space coordinates of each density matrix element
+		r"""To give the phase space coordinates of each density matrix element
 
 		Returns
 		-------
@@ -211,8 +208,7 @@ class Points:
 
 	@property
 	def density(self) -> list[npt.NDArray[np.cdouble]]:
-		"""
-		To give the density matrix element
+		r"""To give the density matrix element
 
 		Returns
 		-------
@@ -223,8 +219,7 @@ class Points:
 
 	@property
 	def rescale_factor(self) -> npt.NDArray[np.double]:
-		"""
-		To give the rescale factor that makes `max|rho|==1`
+		r"""To give the rescale factor that makes `max|rho|==1`
 
 		Returns
 		-------
@@ -242,8 +237,7 @@ class Points:
 		return result.reshape(-1)
 
 	def print_belonging(self, belong_file: typing.IO) -> None:
-		"""
-		To print the belonging index of the central points
+		r"""To print the belonging index of the central points
 
 		Notice the belonging index is in its original order (central -> extra, keep SH points at original place),
 		while the points / density are sorted by their corresponding density matrix element.
@@ -266,10 +260,9 @@ class Points:
 		self,
 		mass: npt.NDArray[np.double],
 		dt: float,
-		predictor: collections.abc.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
+		predictor: pes.Predictor
 	) -> None:
-		"""
-		Non-adiabatic dynamics with surface hopping
+		r"""Non-adiabatic dynamics with surface hopping
 
 		Parameters
 		----------
@@ -277,7 +270,7 @@ class Points:
 			Mass of classical degree of freedom
 		dt : float
 			Time interval
-		predictor : collections.abc.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
+		predictor : pes.Predictor
 			It predicts the density matrix element based on given coordinates and element index
 		purity : npt.NDArray[np.double], shape of (NUM_PES, NUM_PES)
 			The purity of each element, indicating the transition allowance to other elements

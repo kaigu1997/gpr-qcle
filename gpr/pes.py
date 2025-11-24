@@ -1,9 +1,9 @@
-"""
-pes
+r"""pes
 ===
 This module provides methods for the model, including adiabatic potential energy surfaces,
 corresponding Hellmann-Feynmann forces, and non-adiabatic coupling.
 """
+import collections.abc
 import enum
 import math
 import typing
@@ -14,10 +14,11 @@ import torch
 
 torch.set_default_dtype(torch.double)
 
+type Predictor = collections.abc.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
+
 
 class Model(enum.IntEnum):
-	"""
-	Enumerate of known models
+	r"""Enumerate of known models
 
 	Attributes
 	----------
@@ -47,8 +48,7 @@ tril_element_indices: typing.Final[npt.NDArray[np.int_]] = tril_row_indices * NU
 
 
 def lower_triangular_to_full(tril_part: np.ndarray) -> np.ndarray:
-	"""
-	To turn the lower triangular part of the matrix into the full matrix
+	r"""To turn the lower triangular part of the matrix into the full matrix
 
 	Parameters
 	----------
@@ -79,8 +79,7 @@ flatten_tril_index: typing.Final[npt.NDArray[np.int_]] = lower_triangular_to_ful
 
 
 class InitialDistribution:
-	"""
-	To generate the initial partial Wigner-transformed density matrix
+	r"""To generate the initial partial Wigner-transformed density matrix
 
 	Parameters
 	----------
@@ -130,8 +129,7 @@ class InitialDistribution:
 		return np.abs(self.__weight_phase)
 
 	def __call__(self, r: npt.NDArray[np.double], ElementIndex: int) -> npt.NDArray[np.cdouble]:
-		"""
-		To calculate the initial density of the given element at the given phase point
+		r"""To calculate the initial density of the given element at the given phase point
 
 		Parameters
 		----------
@@ -164,8 +162,7 @@ class potential:
 	ECR_C: typing.Final = 0.90
 
 	def __new__(cls, x: torch.Tensor) -> torch.Tensor:
-		"""
-		To get the potential at give positions
+		r"""To get the potential at give positions
 
 		Parameters
 		----------
@@ -214,8 +211,7 @@ match MODEL:
 
 
 def force(x: torch.Tensor) -> torch.Tensor:
-	"""
-	To get the forces corresponding to the potential at give positions
+	r"""To get the forces corresponding to the potential at give positions
 
 	Parameters
 	----------
@@ -234,8 +230,7 @@ def force(x: torch.Tensor) -> torch.Tensor:
 
 
 def diabatic_potential(x: npt.NDArray[np.double]) -> npt.NDArray:
-	"""
-	To get the diabatic potential at give positions
+	r"""To get the diabatic potential at give positions
 
 	Parameters
 	----------
@@ -255,8 +250,7 @@ def diabatic_potential(x: npt.NDArray[np.double]) -> npt.NDArray:
 
 
 def diabatic_force(x: npt.NDArray[np.double]) -> npt.NDArray[np.double]:
-	"""
-	To get the diabatic force at give positions
+	r"""To get the diabatic force at give positions
 
 	Parameters
 	----------
@@ -276,8 +270,7 @@ def diabatic_force(x: npt.NDArray[np.double]) -> npt.NDArray[np.double]:
 
 
 def adiabatic_potential(x: npt.NDArray[np.double]) -> npt.NDArray[np.double]:
-	"""
-	To get the adiabatic potential at give positions by diagonalization
+	r"""To get the adiabatic potential at give positions by diagonalization
 
 	Parameters
 	----------
@@ -307,8 +300,7 @@ def adiabatic_potential(x: npt.NDArray[np.double]) -> npt.NDArray[np.double]:
 
 
 def diabatic_to_adiabatic_matrices(x: npt.NDArray[np.double]) -> npt.NDArray[np.double]:
-	"""
-	To get the basis transformation matrices at given positions
+	r"""To get the basis transformation matrices at given positions
 
 	Parameters
 	----------
@@ -342,8 +334,7 @@ def diabatic_to_adiabatic_matrices(x: npt.NDArray[np.double]) -> npt.NDArray[np.
 
 
 def adiabatic_force(x: npt.NDArray[np.double]) -> npt.NDArray[np.double]:
-	"""
-	To get the adiabatic force at give positions
+	r"""To get the adiabatic force at give positions
 
 	Parameters
 	----------
@@ -362,8 +353,7 @@ def adiabatic_force(x: npt.NDArray[np.double]) -> npt.NDArray[np.double]:
 
 
 def adiabatic_coupling(x: npt.NDArray[np.double]) -> npt.NDArray[np.double]:
-	"""
-	To get the non-adiabatic coupling at give positions
+	r"""To get the non-adiabatic coupling at give positions
 
 	Parameters
 	----------
@@ -396,8 +386,7 @@ def tensor_slice(
 	row_index: int,
 	col_index: int
 ) -> npt.NDArray[np.double]:
-	"""
-	To slice a tensor based on the given dimension
+	r"""To slice a tensor based on the given dimension
 
 	Parameters
 	----------
@@ -422,8 +411,7 @@ def tensor_slice(
 
 
 def force_basis_force(x: npt.NDArray[np.double], dim: int | None = None) -> npt.NDArray[np.double]:
-	"""
-	To give the (diagonalized) force under the "force basis"
+	r"""To give the (diagonalized) force under the "force basis"
 
 	Parameters
 	----------
@@ -457,8 +445,7 @@ def force_basis_force(x: npt.NDArray[np.double], dim: int | None = None) -> npt.
 
 
 def diabatic_to_force_basis(x: npt.NDArray[np.double], dim: int | None = None) -> npt.NDArray[np.double]:
-	"""
-	To get the basis transformation matrices at given positions of given dimensions
+	r"""To get the basis transformation matrices at given positions of given dimensions
 
 	Parameters
 	----------
@@ -496,8 +483,7 @@ def diabatic_to_force_basis(x: npt.NDArray[np.double], dim: int | None = None) -
 
 
 def force_basis_potential(x: npt.NDArray[np.double], dim: int | None = None) -> npt.NDArray[np.double]:
-	"""
-	To get the potential under force basis at give positions of given dimensions
+	r"""To get the potential under force basis at give positions of given dimensions
 
 	Parameters
 	----------

@@ -1,5 +1,4 @@
-"""
-plot
+r"""plot
 ====
 This module plots all results
 """
@@ -14,14 +13,11 @@ import tarfile
 import typing
 
 import matplotlib
-import matplotlib.animation
-import matplotlib.artist
 import matplotlib.axes
 import matplotlib.cm
 import matplotlib.colors
 import matplotlib.figure
 import matplotlib.pyplot as plt
-import matplotlib.ticker
 import matplotlib.transforms
 import matplotlib.typing
 import numpy as np
@@ -51,8 +47,7 @@ TAR_EXTENSION: typing.Final = ".tgz"
 
 
 def read_input() -> tuple[npt.NDArray[np.double], npt.NDArray[np.double], npt.NDArray[np.double], npt.NDArray[np.double], npt.NDArray[np.double], npt.NDArray[np.double], int, int, float]:
-	"""
-	To read input
+	r"""To read input
 
 	Returns
 	-------
@@ -60,8 +55,7 @@ def read_input() -> tuple[npt.NDArray[np.double], npt.NDArray[np.double], npt.ND
 		mass, centers, standard deviation, grid spacing, initial population, initial phase factor, output/dt ratio, reoptimization/output ratio, and time step (dt)
 	"""
 	def cutoff(x: float) -> float:
-		"""
-		To calculate the cutoff of the input
+		r"""To calculate the cutoff of the input
 
 		Parameters
 		----------
@@ -123,8 +117,7 @@ def read_input() -> tuple[npt.NDArray[np.double], npt.NDArray[np.double], npt.ND
 
 
 def read_data(filename: str) -> npt.NDArray[np.double]:
-	"""
-	To read input data
+	r"""To read input data
 
 	Parameters
 	----------
@@ -143,8 +136,7 @@ def read_data(filename: str) -> npt.NDArray[np.double]:
 
 
 def get_grids(r0: npt.NDArray[np.double], n_grids: int) -> list[npt.NDArray[np.double]]:
-	"""
-	To construct grids for x and p
+	r"""To construct grids for x and p
 
 	Parameters
 	----------
@@ -221,8 +213,7 @@ def plot_average() -> None:
 
 
 def plot_error(output_interval: float) -> None:
-	"""
-	To plot the errors: squared error on all grids, its rescaled, and on all sample points
+	r"""To plot the errors: squared error on all grids, its rescaled, and on all sample points
 
 	Parameters
 	----------
@@ -248,8 +239,7 @@ def plot_error(output_interval: float) -> None:
 
 
 def plot_parameters(ticks: npt.NDArray[np.double]) -> None:
-	"""
-	To plot parameters
+	r"""To plot parameters
 
 	Parameters
 	----------
@@ -275,8 +265,7 @@ def plot_parameters(ticks: npt.NDArray[np.double]) -> None:
 
 
 def plot_loss_and_rescale_factors(ticks: npt.NDArray[np.double]) -> None:
-	"""
-	To plot the difference between prediction and evolution, and the rescale factors of each element
+	r"""To plot the difference between prediction and evolution, and the rescale factors of each element
 
 	Parameters
 	----------
@@ -309,8 +298,7 @@ def plot_loss_and_rescale_factors(ticks: npt.NDArray[np.double]) -> None:
 
 
 class PNLogNorm(matplotlib.colors.Normalize):
-	"""
-	Log scale for positive/negative values, e.g. (-1, -0.1, -0.01, 0, 0.01, 0.1, 1.0)
+	r"""Log scale for positive/negative values, e.g. (-1, -0.1, -0.01, 0, 0.01, 0.1, 1.0)
 
 	Parameters
 	----------
@@ -339,8 +327,7 @@ class PNLogNorm(matplotlib.colors.Normalize):
 
 	@property
 	def abs_min(self) -> float:
-		"""
-		The absolute value minimum that has color on the colorbar
+		r"""The absolute value minimum that has color on the colorbar
 
 		Returns
 		-------
@@ -351,8 +338,7 @@ class PNLogNorm(matplotlib.colors.Normalize):
 
 	@property
 	def abs_max(self) -> float:
-		"""
-		The absolute value maxmimum that has color on the colorbar
+		r"""The absolute value maxmimum that has color on the colorbar
 
 		Returns
 		-------
@@ -362,8 +348,7 @@ class PNLogNorm(matplotlib.colors.Normalize):
 		return self.__abs_max
 
 	def __repr__(self) -> str:
-		"""
-		The official string representation of an object
+		r"""The official string representation of an object
 
 		Returns
 		-------
@@ -373,8 +358,7 @@ class PNLogNorm(matplotlib.colors.Normalize):
 		return f"{__class__.__name__}({self.__abs_min}, {self.__abs_max})"
 
 	def __call__(self, value: typing.Any, clip: bool | None = None) -> float | npt.NDArray[np.double]:
-		"""
-		Mapping the given values within [`-abs_max`, `abs_max`] to [0, 1]
+		r"""Mapping the given values within [`-abs_max`, `abs_max`] to [0, 1]
 
 		Values outside may map outside of [0, 1] based on `clip` parameter
 
@@ -391,8 +375,7 @@ class PNLogNorm(matplotlib.colors.Normalize):
 			Mapping result corresponding to value
 		"""
 		def process_single_value(value: float, clip: bool) -> float:
-			"""
-			To map a single value.
+			r"""To map a single value.
 
 			`value` > `abs_min` will be mapped to (0.5, `inf`) or (0.5, 1] if clipped
 
@@ -429,8 +412,7 @@ class PNLogNorm(matplotlib.colors.Normalize):
 			return np.ma.array(np.vectorize(process_single_value, otypes=[float])(result.data, clip), mask=result.mask)
 
 	def inverse(self, value: typing.Any) -> float | npt.NDArray[np.double]:
-		"""
-		To map a value generally in [0, 1] back to [`-abs_max`, `abs_max`]
+		r"""To map a value generally in [0, 1] back to [`-abs_max`, `abs_max`]
 
 		Parameters
 		----------
@@ -443,8 +425,7 @@ class PNLogNorm(matplotlib.colors.Normalize):
 			Mapping back result corresponding to value
 		"""
 		def process_single_value(value: float) -> float:
-			"""
-			Maps a single value back
+			r"""Maps a single value back
 
 			`value` == 0.5 will be mapped back to 0
 
@@ -474,8 +455,7 @@ class PNLogNorm(matplotlib.colors.Normalize):
 
 
 def get_centered(abs_max: float, cmap: str | matplotlib.colors.Colormap) -> tuple[matplotlib.colors.CenteredNorm, npt.NDArray[np.double], npt.NDArray[np.double]]:
-	"""
-	To get the `CenteredNorm` from given input, and its corresponding levels and colorbar ticks
+	r"""To get the `CenteredNorm` from given input, and its corresponding levels and colorbar ticks
 
 	Parameters
 	----------
@@ -499,8 +479,7 @@ def get_centered(abs_max: float, cmap: str | matplotlib.colors.Colormap) -> tupl
 
 
 def get_posneg_log(abs_min: float, abs_max: float, cmap: str | matplotlib.colors.Colormap) -> tuple[PNLogNorm, npt.NDArray[np.double], npt.NDArray[np.double]]:
-	"""
-	To get the `PNLogNorm` from given input, and its corresponding levels and colorbar ticks
+	r"""To get the `PNLogNorm` from given input, and its corresponding levels and colorbar ticks
 
 	Parameters
 	----------
@@ -538,8 +517,7 @@ def get_posneg_log(abs_min: float, abs_max: float, cmap: str | matplotlib.colors
 
 
 class DensityMatrixDrawer:
-	"""
-	To draw the density matrix.
+	r"""To draw the density matrix.
 	`max_outputs`, `init_dist`, `x_grids` and `p_grids` should be used together.
 	`r0` and `dm_data` should be used together.
 	`grid_data` is used independently.
@@ -598,8 +576,7 @@ class DensityMatrixDrawer:
 		ax: matplotlib.axes.Axes,
 		array_shape: tuple[int, ...]
 	) -> tuple[int, int]:
-		"""
-		To get the omitting factors in plotting
+		r"""To get the omitting factors in plotting
 
 		Parameters
 		----------
@@ -616,8 +593,7 @@ class DensityMatrixDrawer:
 			The divisor of row and column of the array
 		"""
 		def get_single_divisor(dpi: float, size: int) -> int:
-			"""
-			To get the divisor of row or column
+			r"""To get the divisor of row or column
 
 			Parameters
 			----------
@@ -724,7 +700,7 @@ class DensityMatrixDrawer:
 			self.__title.append(self.__title[0] + "Difference of ")
 		nrows: int = len(self.__title)
 		self.__fig: matplotlib.figure.Figure = plt.figure(figsize=(FIGSIZE[0] * pes.NUM_ELM, FIGSIZE[1] * nrows))
-		self.__axs: np.ndarray = self.__fig.subplots(nrows, pes.NUM_ELM, squeeze=False)
+		self.__axs: np.ndarray[tuple[int, int], np.dtype[np.object_]] = self.__fig.subplots(nrows, pes.NUM_ELM, squeeze=False)
 		for iRow in range(nrows):
 			for iElement in range(pes.NUM_ELM):
 				ax: matplotlib.axes.Axes = self.__axs[iRow, iElement]
@@ -765,8 +741,7 @@ class DensityMatrixDrawer:
 		num_points: int | npt.NDArray[np.int_] | None = None,
 		scale: npt.NDArray[np.double] | None = None
 	) -> None:
-		"""
-		To draw a frame and save the picture
+		r"""To draw a frame and save the picture
 
 		Parameters
 		----------
@@ -792,8 +767,7 @@ class DensityMatrixDrawer:
 			central_points: npt.NDArray[np.double] | None = None,
 			extra_points: npt.NDArray[np.double] | None = None
 		) -> None:
-			"""
-			To draw the contourf of an Axes and add title if applicable
+			r"""To draw the contourf of an Axes and add title if applicable
 
 			Parameters
 			----------
@@ -921,8 +895,7 @@ class DensityMatrixDrawer:
 
 
 class WavefunctionPlotter:
-	"""
-	To plot wavefunctions.
+	r"""To plot wavefunctions.
 	`max_outputs`, `init_dist`, `x_grids` and `p_grids` should be used together.
 	`r0` and `wfn_data` should be used with together.
 
@@ -1024,8 +997,7 @@ class WavefunctionPlotter:
 		frame_index: int,
 		marginal: npt.NDArray[np.double] | None = None
 	) -> None:
-		"""
-		To draw a frame and save as png
+		r"""To draw a frame and save as png
 
 		Parameters
 		----------

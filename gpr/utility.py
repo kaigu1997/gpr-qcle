@@ -1,5 +1,4 @@
-"""
-utility
+r"""utility
 =======
 The module for some utility functions, such as array parsing.
 """
@@ -17,8 +16,7 @@ import pes
 
 
 def get_RI_label(ElementIndex: int) -> str:
-	"""
-	To have the real/imaginary part name of the given input row and column.
+	r"""To have the real/imaginary part name of the given input row and column.
 
 	Strictly-upper triangular is real, strictly-lower triangular is imaginary, and diagonal elements are as they are.
 
@@ -43,8 +41,7 @@ def get_RI_label(ElementIndex: int) -> str:
 
 
 def format_array(arr_name : str | None, arr: typing.Any, sep: str = " ") -> str:
-	"""
-	To print the flatten array as well as raw number
+	r"""To print the flatten array as well as raw number
 
 	Parameters
 	----------
@@ -80,8 +77,7 @@ def format_array(arr_name : str | None, arr: typing.Any, sep: str = " ") -> str:
 
 
 def dimension_name(DimIndex: int) -> str:
-	"""
-	Name corresponding to the dimension in phase space
+	r"""Name corresponding to the dimension in phase space
 
 	Parameters
 	----------

@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
-
-"""
-main
+r"""main
 ====
-
 The main module.
 """
 import argparse
@@ -37,8 +34,7 @@ NUM_MC_PTS: typing.Final = 1_000_000
 NUM_EVL_MC_PTS: typing.Final = 10_000
 
 def parse_argument() -> tuple[bool, str]:
-	"""
-	To parse arguments
+	r"""To parse arguments
 
 	Returns
 	-------
@@ -53,8 +49,7 @@ def parse_argument() -> tuple[bool, str]:
 
 
 def main(to_draw: bool, grid_solution_file: str) -> None:
-	"""
-	The main routine
+	r"""The main routine
 
 	Parameters
 	----------
@@ -166,8 +161,7 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 		open(plot.SCALE_FILENAME + plot.DATA_EXTENSION, "w", encoding="UTF-8") as scl_f,\
 		open(plot.LOSS_FILENAME + plot.DATA_EXTENSION, "w", encoding="UTF-8") as lss_f:
 		def train_pred_draw(iTick: int, to_train: bool = True) -> None:
-			"""
-			To train the parameter, doing prediction on all grids, and draw it
+			r"""To train the parameter, doing prediction on all grids, and draw it
 
 			Parameters
 			----------
@@ -270,8 +264,7 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 				wfn_plotter(iTick, marginal.diagonal(axis1=1, axis2=2).swapaxes(-1, -2)) # .diagonal will move axis to end
 
 		def print_parameter_scale_loss(scale: npt.NDArray[np.double]) -> None:
-			"""
-			To print parameters, rescale factor, and loss on point points to file
+			r"""To print parameters, rescale factor, and loss on point points to file
 
 			Parameters
 			----------

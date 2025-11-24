@@ -1,5 +1,4 @@
-"""
-gp
+r"""gp
 ==
 This module provides support for gaussian process (gp) regression.
 """
@@ -28,8 +27,7 @@ DEBUG_MODE: bool = True
 
 
 class GP(gpytorch.models.ExactGP):
-	"""
-	Gaussian process regression
+	r"""Gaussian process regression
 
 	Parameters
 	----------
@@ -57,15 +55,20 @@ class GP(gpytorch.models.ExactGP):
 	COV_NAME: typing.Final = "cov"
 	__slots__: tuple = ("__mean", "__cov")
 
-	def __init__(self, x: torch.Tensor, y: torch.Tensor, likelihood: gpytorch.likelihoods.Likelihood, kernel: gpytorch.kernels.Kernel):
+	def __init__(
+		self,
+		x: torch.Tensor,
+		y: torch.Tensor,
+		likelihood: gpytorch.likelihoods.GaussianLikelihood | gpytorch.likelihoods.FixedNoiseGaussianLikelihood,
+		kernel: gpytorch.kernels.Kernel
+	):
 		super().__init__(x, y, likelihood)
 		self.__mean: gpytorch.means.Mean = gpytorch.means.ZeroMean()
 		self.__cov: gpytorch.kernels.Kernel = kernel
 
 	@property
 	def cov(self) -> gpytorch.kernels.Kernel:
-		"""
-		The kernel function
+		r"""The kernel function
 
 		Returns
 		-------
@@ -75,8 +78,7 @@ class GP(gpytorch.models.ExactGP):
 		return self.__cov
 
 	def forward(self, x: torch.Tensor) -> gpytorch.distributions.MultivariateNormal:
-		"""
-		The implementation of GPR
+		r"""The implementation of GPR
 
 		Parameters
 		----------
@@ -94,8 +96,7 @@ class GP(gpytorch.models.ExactGP):
 
 
 class NoConstraint(gpytorch.constraints.Interval):
-	"""
-	No constraint on the parameter, the value could be any float value
+	r"""No constraint on the parameter, the value could be any float value
 
 	Parameters
 	----------
@@ -119,8 +120,7 @@ class NoConstraint(gpytorch.constraints.Interval):
 		)
 
 	def __repr__(self) -> str:
-		"""
-		The official string representation of an object
+		r"""The official string representation of an object
 
 		Returns
 		-------
@@ -130,8 +130,7 @@ class NoConstraint(gpytorch.constraints.Interval):
 		return __class__.__name__ + "()"
 
 	def transform(self, tensor: torch.Tensor) -> torch.Tensor:
-		"""
-		To transform the raw value to the actual value
+		r"""To transform the raw value to the actual value
 
 		Parameters
 		----------
@@ -146,8 +145,7 @@ class NoConstraint(gpytorch.constraints.Interval):
 		return tensor
 
 	def inverse_transform(self, transformed_tensor: torch.Tensor) -> torch.Tensor:
-		"""
-		To transform the actual value to the raw value
+		r"""To transform the actual value to the raw value
 
 		Parameters
 		----------
@@ -163,8 +161,7 @@ class NoConstraint(gpytorch.constraints.Interval):
 
 
 class SinglePredictor:
-	"""
-	The instantiation of gaussian process predictor
+	r"""The instantiation of gaussian process predictor
 
 	Parameters
 	----------
@@ -186,6 +183,8 @@ class SinglePredictor:
 	-------
 	model()
 		The exact GPR model
+	x_all()
+		All features for approximate method
 	get_training_features()
 		To get the training features of the core subset
 	update_weights()
@@ -218,11 +217,28 @@ class SinglePredictor:
 
 	@property
 	def model(self) -> GP:
+		r"""The exact GPR model
+
+		Returns
+		-------
+		GP
+			The model
+		"""
 		return self.__model
 
-	def get_training_features(self) -> torch.Tensor:
+	@property
+	def x_all(self) -> torch.Tensor:
+		r"""All features for approximate method
+
+		Returns
+		-------
+		torch.Tensor, dtype of `torch.double`, shape of (N, PHASEDIM)
+			Features
 		"""
-		To get the training features of the core subset
+		return self.__x_all
+
+	def get_training_features(self) -> torch.Tensor:
+		r"""To get the training features of the core subset
 
 		Returns
 		-------
@@ -230,11 +246,10 @@ class SinglePredictor:
 			The training features
 		"""
 		assert self.__model.train_inputs is not None
-		return self.__model.train_inputs[0].detach()
+		return self.__model.train_inputs[0]
 
 	def __update_weights(self) -> None:
-		"""
-		To update the weights, :math:`K^{-1}y`
+		r"""To update the weights, :math:`K^{-1}y`
 		"""
 		if not self.__weights_updated:
 			self.__k_inv_y = (linear_operator.utils.stable_pinverse(self.__model.cov(self.__x_all, self.get_training_features()).to_dense()) @ self.__y_all).to_dense()
@@ -242,8 +257,7 @@ class SinglePredictor:
 
 	@property
 	def k_inv_y(self) -> torch.Tensor:
-		"""
-		To get the weights, :math:`K^{-1}y`
+		r"""To get the weights, :math:`K^{-1}y`
 
 		Returns
 		-------
@@ -254,8 +268,7 @@ class SinglePredictor:
 		return self.__k_inv_y
 
 	def predict(self, x_test: torch.Tensor) -> torch.Tensor:
-		"""
-		Instance of prediction of subset of regressor (SR) / projected process (PP)
+		r"""Instance of prediction of subset of regressor (SR) / projected process (PP)
 
 		Parameters
 		----------
@@ -270,8 +283,7 @@ class SinglePredictor:
 		return (self.__model.cov(x_test, self.get_training_features()) @ self.k_inv_y).to_dense()
 
 	def error(self, use_weight: bool = True) -> torch.Tensor:
-		"""
-		Error function of subset of regressor (SR) / projected process (PP)
+		r"""Error function of subset of regressor (SR) / projected process (PP)
 
 		This function gives the sum of squared error
 
@@ -293,8 +305,7 @@ class SinglePredictor:
 		scale: float,
 		num_points: int
 	) -> None:
-		"""
-		To update the training features and labels of the model
+		r"""To update the training features and labels of the model
 
 		Parameters
 		----------
@@ -315,12 +326,10 @@ class SinglePredictor:
 		self.__weights_updated = False
 
 	def train(self) -> None:
-		"""
-		To train the parameters
+		r"""To train the parameters
 		"""
 		def print_model(model: gpytorch.models.ExactGP, print_grad: bool = False) -> None:
-			"""
-			To print the parameters of the model
+			r"""To print the parameters of the model
 
 			Parameters
 			----------
@@ -330,8 +339,7 @@ class SinglePredictor:
 				Whether to print the gradient or not, by default False
 			"""
 			def make_tensor_printable(t: torch.Tensor) -> float | npt.NDArray[np.double]:
-				"""
-				To transform a torch Tensor to read-friendly form
+				r"""To transform a torch Tensor to read-friendly form
 
 				If the tensor contains only 1 element, return the element;
 				otherwise, return the flattened numpy array
@@ -360,8 +368,7 @@ class SinglePredictor:
 					print(fmt.format("".join(param_name.split("raw_")), make_tensor_printable(constraint.transform(param) if isinstance(constraint, gpytorch.constraints.Interval) else param)))
 
 		def get_lr(optimizer: torch.optim.Optimizer) -> float:
-			"""
-			To get the learning rate of the optimizer
+			r"""To get the learning rate of the optimizer
 
 			Parameters
 			----------
@@ -375,9 +382,14 @@ class SinglePredictor:
 			"""
 			return optimizer.param_groups[0]["lr"]
 
-		def print_stuff(loss: torch.Tensor, optimizer: torch.optim.Optimizer, model: gpytorch.models.ExactGP, print_grad: bool = False, extra_str="\t") -> None:
-			"""
-			To print all stuffs needed
+		def print_stuff(
+			loss: torch.Tensor,
+			optimizer: torch.optim.Optimizer,
+			model: gpytorch.models.ExactGP,
+			print_grad: bool = False,
+			extra_str="\t"
+		) -> None:
+			r"""To print all stuffs needed
 
 			Parameters
 			----------
@@ -463,8 +475,7 @@ class SinglePredictor:
 		self.__model_param = copy.deepcopy(self.__model.state_dict())
 
 	def get_marginal(self, dimensions: collections.abc.Sequence[int], x_test: torch.Tensor) -> torch.Tensor:
-		"""
-		To get the marginal distribution of current gaussian process regression
+		r"""To get the marginal distribution of current gaussian process regression
 
 		Parameters
 		----------
@@ -484,8 +495,7 @@ class SinglePredictor:
 
 
 class GPRPredictors:
-	"""
-	Combination of single predictors
+	r"""Combination of single predictors
 
 	Parameters
 	----------
@@ -507,8 +517,7 @@ class GPRPredictors:
 	"""
 	@staticmethod
 	def __check_predictor(predictor: SinglePredictor) -> bool:
-		"""
-		To check if the predictor could be used for training / predicting
+		r"""To check if the predictor could be used for training / predicting
 
 		If no label is given, or all the labels are 0, training / predicting is not needed.
 
@@ -522,7 +531,7 @@ class GPRPredictors:
 		bool
 			Availability of training / predicting
 		"""
-		return isinstance(predictor.model.train_targets, torch.Tensor) and not torch.all(predictor.model.train_targets == 0)
+		return isinstance(predictor.model.train_targets, torch.Tensor) and not torch.all(predictor.model.train_targets == 0).item() # pyright: ignore[reportArgumentType, reportCallIssue]
 
 	__slots__: tuple = ("__predictors", "__initial_train")
 
@@ -530,8 +539,7 @@ class GPRPredictors:
 		self.__predictors: list[SinglePredictor] = [SinglePredictor(kernel) for _ in range(pes.NUM_ELM)]
 
 	def __getitem__(self, ElementIndex: int) -> SinglePredictor:
-		"""
-		To get corresponding predictor
+		r"""To get corresponding predictor
 
 		Parameters
 		----------
@@ -553,8 +561,7 @@ class GPRPredictors:
 		num_points: int | npt.NDArray[np.int_],
 		scale: npt.NDArray[np.double]
 	) -> None:
-		"""
-		To update the training inputs and targets, as well as the rescale factor
+		r"""To update the training inputs and targets, as well as the rescale factor
 
 		Parameters
 		----------
@@ -581,8 +588,7 @@ class GPRPredictors:
 			)
 
 	def train(self, print_log: bool = DEBUG_MODE) -> None:
-		"""
-		To train each predictor
+		r"""To train each predictor
 
 		Parameters
 		----------
@@ -595,8 +601,7 @@ class GPRPredictors:
 				self.__predictors[iElement].train()
 
 	def predict(self, x_input: npt.NDArray[np.double], ElementIndex: int) -> npt.NDArray[np.cdouble]:
-		"""
-		To predict test targets based on input and corresponding density matrix element
+		r"""To predict test targets based on input and corresponding density matrix element
 
 		Parameters
 		----------
@@ -611,8 +616,7 @@ class GPRPredictors:
 			Density of the element of all test inputs
 		"""
 		def call_single_predictor(pred: SinglePredictor, x_test: torch.Tensor) -> npt.NDArray[np.double]:
-			"""
-			To do prediction of a single predictor
+			r"""To do prediction of a single predictor
 
 			Parameters
 			----------
@@ -653,8 +657,7 @@ class GPRPredictors:
 		x_input: npt.NDArray[np.double],
 		ElementIndex: int
 	) -> npt.NDArray[np.cdouble]:
-		"""
-		To get the marginal distribution of current gaussian process regressions
+		r"""To get the marginal distribution of current gaussian process regressions
 
 		Parameters
 		----------
@@ -671,8 +674,7 @@ class GPRPredictors:
 			Marginal distribution on the inputs
 		"""
 		def call_single_predictor(pred: SinglePredictor, dims: collections.abc.Sequence[int], x_test: torch.Tensor) -> npt.NDArray[np.double]:
-			"""
-			To do prediction of a single predictor
+			r"""To do prediction of a single predictor
 
 			Parameters
 			----------
@@ -715,8 +717,7 @@ class GPRPredictors:
 		return result.reshape(x_input.shape[:-1])
 
 	def print(self, f: typing.IO) -> None:
-		"""
-		To print the parameters to file
+		r"""To print the parameters to file
 
 		Parameters
 		----------

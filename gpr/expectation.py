@@ -1,10 +1,8 @@
-"""
-expectation
+r"""expectation
 ===========
 This module evaluates the expectation values (population, <x> and <p>, energy, etc)
 """
 import abc
-import collections.abc
 import copy
 import os
 import math
@@ -26,8 +24,7 @@ PURITY_FACTOR: typing.Final = (2.0 * math.pi * pes.HBAR) ** pes.DIM
 
 
 class Averager(abc.ABC):
-	"""
-	To calculate averages
+	r"""To calculate averages
 
 	Methods
 	----------
@@ -44,8 +41,7 @@ class Averager(abc.ABC):
 	"""
 	@abc.abstractmethod
 	def population(self) -> npt.NDArray[np.double]:
-		"""
-		To calculate the population on each potential energy surfaces
+		r"""To calculate the population on each potential energy surfaces
 
 		Returns
 		-------
@@ -55,8 +51,7 @@ class Averager(abc.ABC):
 
 	@abc.abstractmethod
 	def coordinates(self) -> npt.NDArray[np.double]:
-		"""
-		To calculate the average of phase space coordinates
+		r"""To calculate the average of phase space coordinates
 
 		Returns
 		-------
@@ -66,8 +61,7 @@ class Averager(abc.ABC):
 
 	@abc.abstractmethod
 	def square_coordinates(self) -> npt.NDArray[np.double]:
-		"""
-		To calculate averages of product of phase space coordinates
+		r"""To calculate averages of product of phase space coordinates
 
 		Returns
 		-------
@@ -76,8 +70,7 @@ class Averager(abc.ABC):
 		"""
 
 	def covariance(self) -> npt.NDArray[np.double]:
-		"""
-		To calculate the covariance between phase space coordinates
+		r"""To calculate the covariance between phase space coordinates
 
 		Returns
 		-------
@@ -88,8 +81,7 @@ class Averager(abc.ABC):
 		return self.square_coordinates() + (self.population().sum() - 2.0) * coord_ave[:, np.newaxis] * coord_ave[np.newaxis, :]
 
 	def standard_deviation(self) -> npt.NDArray[np.double]:
-		"""
-		To calculate the standard deviation of each phase space dimension
+		r"""To calculate the standard deviation of each phase space dimension
 
 		Returns
 		-------
@@ -100,8 +92,7 @@ class Averager(abc.ABC):
 
 	@abc.abstractmethod
 	def potential(self) -> float:
-		"""
-		To calculate the average potential energy
+		r"""To calculate the average potential energy
 
 		Returns
 		-------
@@ -110,8 +101,7 @@ class Averager(abc.ABC):
 		"""
 
 	def kinetic(self, mass: npt.NDArray[np.double]) -> float:
-		"""
-		To calculate the average kinetic energy
+		r"""To calculate the average kinetic energy
 
 		Parameters
 		----------
@@ -127,8 +117,7 @@ class Averager(abc.ABC):
 
 	@abc.abstractmethod
 	def purity(self) -> npt.NDArray[np.double]:
-		"""
-		To calculate contribution to purity of each element
+		r"""To calculate contribution to purity of each element
 
 		Returns
 		-------
@@ -137,19 +126,12 @@ class Averager(abc.ABC):
 		"""
 
 class MonteCarloAverage(Averager):
-	"""
-	Using Monte Carlo to estimate averages
+	r"""Using Monte Carlo to estimate averages
 
 	Parameters
 	----------
 	num_pts : int
 		The number of points
-	center : npt.NDArray[np.double]
-		The center of the points
-	stddev : npt.NDArray[np.double]
-		The standard deviation of the points
-	predictor : collections.abc.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
-		The function that gives the density matrix element at corresponding phase points
 
 	Attributes
 	----------
@@ -172,16 +154,15 @@ class MonteCarloAverage(Averager):
 	def update_pts(
 		self,
 		ref_pts: list[npt.NDArray[np.double]],
-		predictor: collections.abc.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
-	):
-		"""
-		To update the point set used
+		predictor: pes.Predictor
+	) -> None:
+		r"""To update the point set used
 
 		Parameters
 		----------
 		ref_pts : list[npt.NDArray[np.double]], len of NUM_TRIG, each of shape (NUM_PTS, PHASEDIM)
 			Current points, used to estimate average and variance
-		predictor : collections.abc.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
+		predictor : pes.Predictor
 			Used to predict the density of the points
 		"""
 		for iPES, jPES, iTrig in zip(pes.tril_row_indices, pes.tril_col_indices, np.arange(pes.NUM_TRIG)):
@@ -230,8 +211,7 @@ class MonteCarloAverage(Averager):
 
 
 class EvolvingPointsMCAverage(MonteCarloAverage):
-	"""
-	To calculate average by Monte Carlo estimate too,
+	r"""To calculate average by Monte Carlo estimate too,
 	but using points evolving forward with same weights
 
 	Parameters
@@ -264,10 +244,9 @@ class EvolvingPointsMCAverage(MonteCarloAverage):
 		self,
 		mass: npt.NDArray[np.double],
 		dt: float,
-		predictor: collections.abc.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
+		predictor: pes.Predictor
 	) -> None:
-		"""
-		To evolve the coordinates, and density if applicable
+		r"""To evolve the coordinates, and density if applicable
 
 		Parameters
 		----------
@@ -275,7 +254,7 @@ class EvolvingPointsMCAverage(MonteCarloAverage):
 			Mass of classical degree of freedom
 		dt : float
 			Time interval
-		predictor : collections.abc.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]
+		predictor : pes.Predictor
 			It predicts the density matrix element based on given coordinates and element index
 		"""
 		if self.__evolve_coordinates_only:
@@ -292,13 +271,12 @@ class EvolvingPointsMCAverage(MonteCarloAverage):
 		else:
 			evolve.evolve([ps for ps in self.point_set], [den for den in self.density], mass, dt, predictor)
 
-	def update_density(self, predictor: collections.abc.Callable[[npt.NDArray[np.double], int], npt.NDArray[np.cdouble]]) -> None:
-		"""
-		To update the density using the predictor if the density is not evolved
+	def update_density(self, predictor: pes.Predictor) -> None:
+		r"""To update the density using the predictor if the density is not evolved
 
 		Parameters
 		----------
-		predictor : collections.abc.Callable[[npt.NDArray[np.double], int, bool], npt.NDArray[np.cdouble]]
+		predictor : pes.Predictor
 			It predicts the density matrix element based on given coordinates and element index
 		"""
 		if self.__evolve_coordinates_only:
@@ -307,8 +285,7 @@ class EvolvingPointsMCAverage(MonteCarloAverage):
 
 
 class AnalyticalAverager(Averager):
-	"""
-	Using analytical integral of GPR to estimate averages
+	r"""Using analytical integral of GPR to estimate averages
 
 	Attributes
 	----------

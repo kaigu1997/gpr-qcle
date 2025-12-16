@@ -294,6 +294,7 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 					pts.evolve(mass, dt, predictors.predict)
 					epmca.evolve(mass, dt, predictors.predict)
 					scale: npt.NDArray[np.double] = pts.rescale_factor
+					predictors.evolve_parameter(mass, dt)
 					predictors.update(pts.center, pts.density, pts.num_center, scale)
 					print_parameter_scale_loss(scale)
 				# update and predict

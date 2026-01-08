@@ -1,26 +1,26 @@
 r"""point
-=====
-This module provides methods for sampling.
+======
+Implementation for sampling.
 """
-import os
-import sys
 import typing
 
 import numpy as np
 import numpy.typing as npt
 import sklearn.cluster
+import torch
 
-sys.path.append(os.path.dirname(__file__))
-
+import constant
 import evolve
 import pes
-import utility
+import plot
 
 SEED: typing.Final = 0
-np_rng: np.random.Generator = np.random.Generator(np.random.MT19937(SEED))
+_np_rng: np.random.Generator = np.random.Generator(np.random.MT19937(SEED))
+torch.set_default_dtype(constant.DTYPE)
+torch.set_default_device(constant.DEVICE)
 
 
-def normal_sample(
+def _normal_sample(
 	num_points: int,
 	mean: npt.NDArray[np.double],
 	stddev: npt.NDArray[np.double]
@@ -41,9 +41,34 @@ def normal_sample(
 	npt.NDArray[np.double], shape of (NUM_PTS, PHASEDIM)
 		Normally distributed point test
 	"""
-	return np_rng.multivariate_normal(mean, np.diag(stddev ** 2), num_points, "raise", method="eigh")
+	return _np_rng.multivariate_normal(mean, np.diag(stddev ** 2), num_points, "raise", method="eigh")
 
 
+def normal_sample(
+	num_points: int,
+	mean: torch.Tensor,
+	stddev: torch.Tensor
+) -> torch.Tensor:
+	r"""To create normally distributed point set based on given mean and variance
+
+	Parameters
+	----------
+	num_points : int
+		The number of points needed
+	mean : torch.Tensor, shape of (PHASEDIM,)
+		The center of the points
+	stddev : torch.Tensor, shape of (PHASEDIM,)
+		The standard deviation of the points
+
+	Returns
+	-------
+	torch.Tensor, shape of (NUM_PTS, PHASEDIM)
+		Normally distributed point test
+	"""
+	return torch.from_numpy(_normal_sample(num_points, mean.detach().numpy(), stddev.detach().numpy()))
+
+
+@typing.final
 class Points:
 	r"""The class to evolve and sample points used to construct GPR
 
@@ -56,29 +81,8 @@ class Points:
 	extra_ratio : int, optional
 		The ratio of extra points vs central points, by default __NUM_XTR_RATIO
 
-	Attributes
-	----------
-	__dest_row_idx : npt.NDArray[np.int_]
-		Possible indices of the row of the destinations from the starting lower-triangular element. It must be no less than corresponding `__dest_col_idx`
-	__dest_col_idx : npt.NDArray[np.int_]
-		Possible indices of the column of the destinations from the starting lower-triangular element. It must be no greater than corresponding `__dest_row_idx`
-	__dest_idx : npt.NDArray[np.int_]
-		Possible row-major element indices of the destinations from  the starting lower-triangular element.
-	__coup_row_idx : npt.NDArray[np.int_]
-		Row indices of the coupling element between the starting element and the destination. This is the different row/column index of the destination.
-	__coup_col_idx : npt.NDArray[np.int_]
-		Column indices of the coupling element between the starting element and the destination. This is the different row/column index of the source.
-	__NUM_PTS : typing.Literal[256]
-		The number of central points
-	__NUM_XTR_RATIO : typing.Literal[50]
-		The ratio of the number of extra points over the number of central points
-
 	Methods
 	-------
-	__print_coordinate_distribution(title, coordinates)
-		To print the average and standard deviation of the points
-	__sample_extra_points(all_points)
-		To create the extra point set
 	num_center()
 		To calculate the number of points in the center that corresponding to each element
 	center()
@@ -92,58 +96,92 @@ class Points:
 	evolve(mass, dt, predictor)
 		Non-adiabatic dynamics with surface hopping
 	"""
-	__dest_row_idx: npt.NDArray[np.int_]
-	__dest_col_idx: npt.NDArray[np.int_]
-	# k = np.arange(n).reshape(n, 1), l = np.arange(n).reshape(1, n)
-	# mask_diff_col = (k == i[:, None, None] and l != j[:, None, None])
-	# mask_diff_row (k != i[:, None, None] and l == j[:, None, None])
-	# all_values = np.tile(np.stack(np.meshgrid(np.arange(n), np.arange(n)), 0).reshape(2, 1, n, n), (1, 10, 1, 1))
-	# np.concat((all_values[:, mask_diff_row].reshape(2, len(i), n - 1), all_values[:, mask_diff_col].reshape(2, len(i), n - 1)), -1)
-	__dest_row_idx, __dest_col_idx = np.concatenate(
-		(
-			np.tile(np.stack(np.meshgrid(np.arange(pes.NUM_PES), np.arange(pes.NUM_PES), indexing='ij'), axis=0)[:, np.newaxis], (1, pes.NUM_TRIG, 1, 1))[:, np.logical_and((np.arange(pes.NUM_PES) == pes.tril_row_indices[:, np.newaxis])[..., np.newaxis], np.arange(pes.NUM_PES) != pes.tril_col_indices[:, np.newaxis, np.newaxis])].reshape(2, pes.NUM_TRIG, pes.NUM_PES - 1),
-			np.tile(np.stack(np.meshgrid(np.arange(pes.NUM_PES), np.arange(pes.NUM_PES), indexing='ij'), axis=0)[:, np.newaxis], (1, pes.NUM_TRIG, 1, 1))[:, np.logical_and((np.arange(pes.NUM_PES) != pes.tril_row_indices[:, np.newaxis])[..., np.newaxis], np.arange(pes.NUM_PES) == pes.tril_col_indices[:, np.newaxis, np.newaxis])].reshape(2, pes.NUM_TRIG, pes.NUM_PES - 1)
-		),
-		-1
-	)
-	__coup_row_idx: typing.Final[npt.NDArray[np.int_]] = np.concatenate((__dest_col_idx[:, :pes.NUM_PES - 1], __dest_row_idx[:, pes.NUM_PES - 1:]), -1) # also the diff index of destination
-	__coup_col_idx: typing.Final[npt.NDArray[np.int_]] = np.repeat(np.concatenate((pes.tril_col_indices[:, np.newaxis], pes.tril_row_indices[:, np.newaxis]), -1), pes.NUM_PES - 1, -1) # also the diff index of source
-	__dest_row_idx, __dest_col_idx = np.maximum(__dest_row_idx, __dest_col_idx), np.minimum(__dest_row_idx, __dest_col_idx)
-	__dest_idx: typing.Final[npt.NDArray[np.int_]] = __dest_row_idx * pes.NUM_PES + __dest_col_idx
 	__NUM_PTS: typing.Final = 256
 	__NUM_XTR_RATIO: typing.Final = 50
-	__slots__: tuple = ("__init_purity", "__num_all_centers", "__coordinate", "__index", "__density")
-
+	__config: typing.Final[pes.ModelConfig]
+	__dest_row_idx: typing.Final[torch.Tensor]
+	__dest_col_idx: typing.Final[torch.Tensor]
+	__coup_row_idx: typing.Final[torch.Tensor]
+	__coup_col_idx: typing.Final[torch.Tensor]
+	__dest_idx: typing.Final[torch.Tensor]
+	__num_all_centers: typing.Final[int]
+	__coordinate: torch.Tensor
+	__density: torch.Tensor
+	__index: torch.Tensor
+	__tril_element_indices: typing.Final[torch.Tensor]
+	__slots__: typing.Final[tuple] = ("__config", "__dest_row_idx", "__dest_col_idx", "__coup_row_idx", "__coup_col_idx", "__dest_idx", "__num_all_centers", "__coordinate", "__density", "__index", "__tril_element_indices")
+	
 	@staticmethod
-	def __print_coordinate_distribution(title: str, coordinates: npt.NDArray[np.double]) -> None:
-		r"""To print the average and standard deviation of the points
+	def __init_sampling(center: npt.NDArray[np.double], stddev: npt.NDArray[np.double], num_pts: int, extra_ratio: int) -> torch.Tensor:
+		r"""To sample the initial points by k-means
 
 		Parameters
 		----------
-		title : str
-			What is the meaning of the given coordinates
-		coordinates : npt.NDArray[np.double], shape of (NUM_POINTS, PHASEDIM)
-			The phase space coordinates
-		"""
-		print(((title + ": ") if title != "" else "") + f"{utility.format_array("<r>", np.average(coordinates, 0))}, {utility.format_array("stddev", np.std(coordinates, 0))}")
-
-	@staticmethod
-	def __sample_extra_points(central_points: npt.NDArray[np.double], extra_ratio: int) -> npt.NDArray[np.double]:
-		r"""To create the extra point set
-
-		First `num_points` points remain the same, and the rest of the points are resampled based on the first `num_points` points and their variance
-
-		Parameters
-		----------
-		central_points : shape of (num_point, PHASEDIM)
-			Points who will be used as center of sampling
+		center : npt.NDArray[np.double]
+			Center of the initial distribution
+		stddev : npt.NDArray[np.double]
+			Standard deviation of the initial distribution
+		num_pts : int
+			The number of central (inducing) points
 		extra_ratio : int
-			The number of points around each central point
+			Ratio of extra points over central points
+
+		Returns
+		-------
+		torch.Tensor, shape of (`num_pts` * (1 + `extra_ratio`), PHASEDIM)
+			All points, first `num_pts` points are the central points, and the rest are the extra points
 		"""
-		stddev: typing.Final[npt.NDArray[np.double]] = np.std(central_points, 0)
-		result: typing.Final[npt.NDArray[np.double]] = np.concatenate([normal_sample(extra_ratio, pt, stddev) for pt in central_points])
-		__class__.__print_coordinate_distribution("Sample Extra Points", result)
-		return result
+		def print_coordinate_distribution(title: str, coordinates: npt.NDArray[np.double]) -> None:
+			r"""To print the average and standard deviation of the points
+
+			Parameters
+			----------
+			title : str
+				What is the meaning of the given coordinates
+			coordinates : npt.NDArray[np.double], shape of (NUM_POINTS, PHASEDIM)
+				The phase space coordinates
+			"""
+			print(((title + ": ") if title != "" else "") + f"{plot.format_array(np.mean(coordinates, 0), "<r>")}, {plot.format_array(np.std(coordinates, 0), "stddev")}")
+
+		def sample_extra_points(central_points: npt.NDArray[np.double], extra_ratio: int) -> npt.NDArray[np.double]:
+			r"""To create the extra point set
+
+			First `num_points` points remain the same, and the rest of the points are resampled based on the first `num_points` points and their variance
+
+			Parameters
+			----------
+			central_points : shape of (num_point, PHASEDIM)
+				Points who will be used as center of sampling
+			extra_ratio : int
+				The number of points around each central point
+			"""
+			stddev: typing.Final[npt.NDArray[np.double]] = np.std(central_points, 0)
+			result: typing.Final[npt.NDArray[np.double]] = np.concatenate([_normal_sample(extra_ratio, pt, stddev) for pt in central_points])
+			print_coordinate_distribution("Sample Extra Points", result)
+			return result
+		
+		kmeans_center: typing.Final[sklearn.cluster.KMeans] = sklearn.cluster.KMeans(num_pts, init="k-means++", n_init="auto", random_state=np.random.RandomState(_np_rng.bit_generator), algorithm="lloyd")
+		kmeans_extra: typing.Final[sklearn.cluster.KMeans] = sklearn.cluster.KMeans(num_pts * extra_ratio, init="k-means++", n_init="auto", random_state=np.random.RandomState(_np_rng.bit_generator), algorithm="lloyd")
+		coordinate: npt.NDArray[np.double] = np.tile(_normal_sample(num_pts, center, stddev), (1 + extra_ratio, 1))
+		print_coordinate_distribution("Sample Central Points", coordinate[:num_pts])
+		coordinate[num_pts:] = sample_extra_points(coordinate[:num_pts], extra_ratio)
+		kmeans_center.fit(coordinate)
+		coordinate[:num_pts] = kmeans_center.cluster_centers_
+		print_coordinate_distribution("KMeans Central Points", kmeans_center.cluster_centers_)
+		kmeans_extra.fit(sample_extra_points(kmeans_center.cluster_centers_, extra_ratio ** 2))
+		print_coordinate_distribution("KMeans Extra Points", kmeans_extra.cluster_centers_)
+		coordinate[num_pts:] = kmeans_extra.cluster_centers_
+		# kmeans_center.fit(coordinate)
+		# rint_coordinate_distribution("KMeans Central Points", kmeans_center.cluster_centers_)
+		# coordinate[:num_pts] = kmeans_center.cluster_centers_
+		# kmeans_extra.fit(sample_extra_points(kmeans_center.cluster_centers_, extra_ratio ** 2))
+		# print_coordinate_distribution("KMeans Extra Points", kmeans_extra.cluster_centers_)
+		# coordinate[num_pts:] = kmeans_extra.fit(np.concatenate([coordinate[num_pts:], kmeans_extra.cluster_centers_])).cluster_centers_
+		# print_coordinate_distribution("KMeans Extra Points", kmeans_extra.cluster_centers_)
+		print_coordinate_distribution("Overall", coordinate)
+		print("", end="", flush=True)
+		return torch.from_numpy(coordinate)
+
 
 	def __init__(
 		self,
@@ -151,89 +189,83 @@ class Points:
 		num_pts: int = __NUM_PTS,
 		extra_ratio: int = __NUM_XTR_RATIO
 	) -> None:
-		self.__init_purity: typing.Final[npt.NDArray[np.double]] = init_dist.weight ** 2
-		self.__num_all_centers: typing.Final[int] = pes.NUM_TRIG * num_pts
-		kmeans_center: sklearn.cluster.KMeans = sklearn.cluster.KMeans(num_pts, init="k-means++", n_init="auto", random_state=np.random.RandomState(np_rng.bit_generator), algorithm="lloyd")
-		kmeans_extra: sklearn.cluster.KMeans = sklearn.cluster.KMeans(num_pts * extra_ratio, init="k-means++", n_init="auto", random_state=np.random.RandomState(np_rng.bit_generator), algorithm="lloyd")
-		self.__coordinate: npt.NDArray[np.double] = np.tile(normal_sample(num_pts, init_dist.r0, init_dist.sigma_r0), (1 + extra_ratio, 1))
-		__class__.__print_coordinate_distribution("Sample Central Points", self.__coordinate[:num_pts])
-		self.__coordinate[num_pts:] = __class__.__sample_extra_points(self.__coordinate[:num_pts], extra_ratio)
-		kmeans_center.fit(self.__coordinate)
-		self.__coordinate[:num_pts] = kmeans_center.cluster_centers_
-		__class__.__print_coordinate_distribution("KMeans Central Points", kmeans_center.cluster_centers_)
-		kmeans_extra.fit(__class__.__sample_extra_points(kmeans_center.cluster_centers_, extra_ratio ** 2))
-		__class__.__print_coordinate_distribution("KMeans Extra Points", kmeans_extra.cluster_centers_)
-		self.__coordinate[num_pts:] = kmeans_extra.cluster_centers_
-		# kmeans_center.fit(self.__coordinate)
-		# __class__.__print_coordinate_distribution("KMeans Central Points", kmeans_center.cluster_centers_)
-		# self.__coordinate[:num_pts] = kmeans_center.cluster_centers_
-		# kmeans_extra.fit(__class__.__sample_extra_points(kmeans_center.cluster_centers_, extra_ratio ** 2))
-		# __class__.__print_coordinate_distribution("KMeans Extra Points", kmeans_extra.cluster_centers_)
-		# self.__coordinate[num_pts:] = kmeans_extra.fit(np.concatenate([self.__coordinate[num_pts:], kmeans_extra.cluster_centers_])).cluster_centers_
-		# __class__.__print_coordinate_distribution("KMeans Extra Points", kmeans_extra.cluster_centers_)
-		__class__.__print_coordinate_distribution("Overall", self.__coordinate)
-		self.__coordinate = np.concat([np.tile(self.__coordinate[:num_pts], (pes.NUM_TRIG, 1)), np.tile(self.__coordinate[num_pts:], (pes.NUM_TRIG, 1))]) # central pts of all elements, then extra pts of all elements
-		self.__index: npt.NDArray[np.int_] = np.concat([np.repeat(pes.tril_element_indices, num_pts), np.repeat(pes.tril_element_indices, num_pts * extra_ratio)])
-		self.__density: npt.NDArray[np.cdouble] = np.empty(self.__coordinate.shape[:-1], np.cdouble)
-		for iTrig, iElement in enumerate(pes.tril_element_indices):
-			central_start: int = iTrig * num_pts
-			central_end: int = (iTrig + 1) * num_pts
-			self.__density[central_start:central_end] = init_dist(self.__coordinate[central_start:central_end], iElement)
-			extra_start: int = self.__num_all_centers + iTrig * num_pts * extra_ratio
-			extra_end: int = self.__num_all_centers + (iTrig + 1) * num_pts * extra_ratio
-			self.__density[extra_start:extra_end] = init_dist(self.__coordinate[extra_start:extra_end], iElement)
-		print("", end="", flush=True)
+		# k = np.arange(n).reshape(n, 1), l = np.arange(n).reshape(1, n)
+		# mask_diff_col = (k == i[:, None, None] and l != j[:, None, None])
+		# mask_diff_row (k != i[:, None, None] and l == j[:, None, None])
+		# all_values = np.tile(np.stack(np.meshgrid(np.arange(n), np.arange(n)), 0).reshape(2, 1, n, n), (1, 10, 1, 1))
+		# np.concatenate((all_values[:, mask_diff_row].reshape(2, len(i), n - 1), all_values[:, mask_diff_col].reshape(2, len(i), n - 1)), -1)
+		self.__config = init_dist.config
+		pes_range: typing.Final[torch.Tensor] = torch.tensor(init_dist.config.PES_RANGE)
+		tril_row_indices: typing.Final[torch.Tensor] = torch.tensor(init_dist.config.TRIL_ROW_INDICES)
+		tril_col_indices: typing.Final[torch.Tensor] = torch.tensor(init_dist.config.TRIL_COL_INDICES)
+		self.__dest_row_idx, self.__dest_col_idx = torch.cat(
+			(
+				torch.tile(torch.stack(torch.meshgrid(pes_range, pes_range, indexing='ij'), 0)[:, torch.newaxis], (1, init_dist.config.NUM_TRIG, 1, 1))[:, torch.logical_and((pes_range == tril_row_indices[:, torch.newaxis])[..., torch.newaxis], pes_range != tril_col_indices[:, torch.newaxis, torch.newaxis])].reshape(2, init_dist.config.NUM_TRIG, init_dist.config.NUM_PES - 1),
+				torch.tile(torch.stack(torch.meshgrid(pes_range, pes_range, indexing='ij'), 0)[:, torch.newaxis], (1, init_dist.config.NUM_TRIG, 1, 1))[:, torch.logical_and((pes_range != tril_row_indices[:, torch.newaxis])[..., torch.newaxis], pes_range == tril_col_indices[:, torch.newaxis, torch.newaxis])].reshape(2, init_dist.config.NUM_TRIG, init_dist.config.NUM_PES - 1)
+			),
+			-1
+		)
+		self.__coup_row_idx = torch.cat((self.__dest_col_idx[:, :init_dist.config.NUM_PES - 1], self.__dest_row_idx[:, init_dist.config.NUM_PES - 1:]), -1) # also the diff index of destination
+		self.__coup_col_idx = torch.repeat_interleave(torch.cat((tril_col_indices[:, torch.newaxis], tril_row_indices[:, torch.newaxis]), -1), init_dist.config.NUM_PES - 1, -1) # also the diff index of source
+		self.__dest_row_idx, self.__dest_col_idx = torch.maximum(self.__dest_row_idx, self.__dest_col_idx), torch.minimum(self.__dest_row_idx, self.__dest_col_idx)
+		self.__dest_idx = self.__dest_row_idx * init_dist.config.NUM_PES + self.__dest_col_idx
+		self.__num_all_centers = init_dist.config.NUM_TRIG * num_pts
+		self.__coordinate = Points.__init_sampling(init_dist.r0.detach().numpy(), init_dist.sigma_r0.detach().numpy(), num_pts, extra_ratio)
+		self.__density = torch.cat((init_dist(self.__coordinate[:num_pts])[..., init_dist.config.TRIL_ROW_INDICES, init_dist.config.TRIL_COL_INDICES].T.reshape(-1), init_dist(self.__coordinate[num_pts:])[..., init_dist.config.TRIL_ROW_INDICES, init_dist.config.TRIL_COL_INDICES].T.reshape(-1)))
+		self.__coordinate = torch.cat([torch.tile(self.__coordinate[:num_pts], (init_dist.config.NUM_TRIG, 1)), torch.tile(self.__coordinate[num_pts:], (init_dist.config.NUM_TRIG, 1))]) # central pts of all elements, then extra pts of all elements
+		self.__tril_element_indices = torch.tensor(init_dist.config.TRIL_ELEMENT_INDICES)
+		self.__index = torch.cat([torch.repeat_interleave(self.__tril_element_indices, num_pts), torch.repeat_interleave(self.__tril_element_indices, num_pts * extra_ratio)])
 
 	@property
-	def num_center(self) -> npt.NDArray[np.int_]:
+	def num_center(self) -> torch.Tensor:
 		r"""To calculate the number of points in the center that corresponding to each element
 
 		Returns
 		-------
-		npt.NDArray[np.int_]
+		torch.Tensor
 			Central points cooresponding to each element
 		"""
-		return (self.__index[:self.__num_all_centers] == pes.tril_element_indices[:, np.newaxis]).astype(np.int_).sum(-1)
+		return (self.__index[:self.__num_all_centers] == self.__tril_element_indices[:, torch.newaxis]).to(torch.int).sum(-1)
 
 	@property
-	def center(self) -> list[npt.NDArray[np.double]]:
+	def center(self) -> list[torch.Tensor]:
 		r"""To give the phase space coordinates of each density matrix element
 
 		Returns
 		-------
-		list[npt.NDArray[np.double]]
+		list[torch.Tensor]
 			Coordinates of each density matrix element
 		"""
-		return [self.__coordinate[self.__index == iElement] for iElement in pes.tril_element_indices]
+		return [self.__coordinate[self.__index == iElement] for iElement in self.__config.TRIL_ELEMENT_INDICES]
 
 	@property
-	def density(self) -> list[npt.NDArray[np.cdouble]]:
+	def density(self) -> list[torch.Tensor]:
 		r"""To give the density matrix element
 
 		Returns
 		-------
-		list[npt.NDArray[np.cdouble]]
+		list[torch.Tensor]
 			Density matrix element, cooresponding to `center()`
 		"""
-		return [self.__density[self.__index == iElement] for iElement in pes.tril_element_indices]
+		return [self.__density[self.__index == iElement] for iElement in self.__config.TRIL_ELEMENT_INDICES]
 
 	@property
-	def rescale_factor(self) -> npt.NDArray[np.double]:
+	def rescale_factor(self) -> torch.Tensor:
 		r"""To give the rescale factor that makes `max|rho|==1`
 
 		Returns
 		-------
-		npt.NDArray[np.double]
+		torch.Tensor, dtype of `torch.double, shape of (NUM_ELM,)
 			Rescale factor that scale up to 1.0; if all samples are 0, return 0
 		"""
-		result: npt.NDArray[np.double] = np.empty((pes.NUM_PES, pes.NUM_PES), np.double)
-		for iPES, jPES, iElement in zip(pes.tril_row_indices, pes.tril_col_indices, pes.tril_element_indices):
-			element_density: npt.NDArray[np.cdouble] = self.__density[self.__index == iElement]
+		result: torch.Tensor = torch.empty((self.__config.NUM_PES, self.__config.NUM_PES))
+		for iPES, jPES, iElement in zip(self.__config.TRIL_ROW_INDICES, self.__config.TRIL_COL_INDICES, self.__config.TRIL_ELEMENT_INDICES):
+			element_density: torch.Tensor = self.__density[self.__index == iElement]
 			if iPES == jPES:
-				result[iPES, jPES] = 0 if np.all(element_density == 0.0) else 1.0 / np.max(np.abs(element_density))
+				result[iPES, jPES] = 0 if torch.all(element_density == 0.0) else 1.0 / torch.max(torch.abs(element_density))
 			else:
-				result[iPES, jPES] = 0 if np.all(element_density.imag == 0.0) else 1.0 / np.max(np.abs(element_density.imag))
-				result[jPES, iPES] = 0 if np.all(element_density.real == 0.0) else 1.0 / np.max(np.abs(element_density.real))
+				result[iPES, jPES] = 0 if torch.all(element_density.imag == 0.0) else 1.0 / torch.max(torch.abs(element_density.imag))
+				result[jPES, iPES] = 0 if torch.all(element_density.real == 0.0) else 1.0 / torch.max(torch.abs(element_density.real))
 		return result.reshape(-1)
 
 	def print_belonging(self, belong_file: typing.IO) -> None:
@@ -251,78 +283,84 @@ class Points:
 		"""
 		np.savetxt(
 			belong_file,
-			np.repeat(np.concat([[idx, idx + pes.NUM_ELM] for idx in pes.tril_element_indices]), np.concat([[m, n - m] for m, n in zip(self.num_center, (self.__index == pes.tril_element_indices[:, np.newaxis]).astype(np.int_).sum(-1))]))[np.newaxis],
+			np.repeat(np.concatenate([[idx, idx + self.__config.NUM_ELM] for idx in self.__config.TRIL_ELEMENT_INDICES]), np.concatenate([[m, n - m] for m, n in zip(self.num_center, (self.__index == self.__tril_element_indices[:, np.newaxis]).detach().numpy().astype(np.int_).sum(-1))]))[np.newaxis],
 			footer="\n",
-			comments=""
+			comments="",
+			encoding=constant.ENC
 		)
 
 	def evolve(
 		self,
-		mass: npt.NDArray[np.double],
+		model: pes.Potential,
+		mass: torch.Tensor,
 		dt: float,
-		predictor: pes.Predictor
+		predictor: constant.Predictor
 	) -> None:
 		r"""Non-adiabatic dynamics with surface hopping
 
 		Parameters
 		----------
-		mass : npt.NDArray[np.double], shape of (DIM,)
+		model : pes.Potential
+			Quantities derived from potential
+		mass : torch.Tensor, shape of (DIM,)
 			Mass of classical degree of freedom
 		dt : float
 			Time interval
 		predictor : pes.Predictor
 			It predicts the density matrix element based on given coordinates and element index
-		purity : npt.NDArray[np.double], shape of (NUM_PES, NUM_PES)
+		purity : torch.Tensor, shape of (NUM_PES, NUM_PES)
 			The purity of each element, indicating the transition allowance to other elements
 		"""
 		# evolve coordinates and hopping
-		x0: npt.NDArray[np.double] = self.__coordinate[:, :pes.DIM] # N * D, slice of centers
-		p0: npt.NDArray[np.double] = self.__coordinate[:, pes.DIM:] # N * D, slice of centers
-		x2: npt.NDArray[np.double] = np.empty_like(x0) # N * D
-		p1: npt.NDArray[np.double] = np.empty_like(p0) # N * D
-		x4: npt.NDArray[np.double] = np.empty_like(x0) # N * D
-		p2: npt.NDArray[np.double] = np.empty_like(p0) # N * D
-		current_indices: npt.NDArray[np.bool_] = self.__index == pes.tril_element_indices[:, np.newaxis]
-		for iTrig, (iBelongPES, jBelongPES) in enumerate(zip(pes.tril_row_indices, pes.tril_col_indices)):
-			indices: npt.NDArray[np.int_] = np.flatnonzero(current_indices[iTrig]) # NUM_PTS
-			num_pts: int = indices.size
+		x0: typing.Final[torch.Tensor] = self.__coordinate[:, :self.__config.DIM] # N * D, slice of centers
+		p0: typing.Final[torch.Tensor] = self.__coordinate[:, self.__config.DIM:] # N * D, slice of centers
+		x2: typing.Final[torch.Tensor] = torch.empty_like(x0) # N * D
+		p1: typing.Final[torch.Tensor] = torch.empty_like(p0) # N * D
+		x4: typing.Final[torch.Tensor] = torch.empty_like(x0) # N * D
+		p2: typing.Final[torch.Tensor] = torch.empty_like(p0) # N * D
+		current_indices: typing.Final[torch.Tensor] = self.__index == self.__tril_element_indices[:, torch.newaxis]
+		for iTrig, (iBelongPES, jBelongPES) in enumerate(zip(self.__config.TRIL_ROW_INDICES, self.__config.TRIL_COL_INDICES)):
+			indices: torch.Tensor = torch.where(current_indices[iTrig])[0] # NUM_PTS
+			num_pts: int = indices.numel()
 			if num_pts > 0: # only have elements
 				# get x and p, and 2 semi adiabatic steps for all points
-				x2[indices], p1[indices] = evolve.evolve_coordinates_adiabatically(x0[indices], p0[indices], mass, dt / 2.0, evolve.Direction.FORWARD, iBelongPES, jBelongPES)
-				x4[indices], p2[indices] = evolve.evolve_coordinates_adiabatically(x2[indices], p1[indices], mass, dt / 2.0, evolve.Direction.FORWARD, iBelongPES, jBelongPES)
+				x2[indices, :], p1[indices, :] = evolve.evolve_coordinates_adiabatically(model, x0[indices, :], p0[indices, :], mass, dt / 2.0, evolve.Direction.FORWARD, iBelongPES, jBelongPES)
+				x4[indices, :], p2[indices, :] = evolve.evolve_coordinates_adiabatically(model, x2[indices, :], p1[indices, :], mass, dt / 2.0, evolve.Direction.FORWARD, iBelongPES, jBelongPES)
 				# surface hopping
 				# choose the one to jump to
-				idx_of_dest_idx: npt.NDArray[np.int_] = np_rng.integers(0, 2 * pes.NUM_PES - 2, size=num_pts, dtype=np.int_) # n
-				velocity: npt.NDArray[np.double] = p2[indices] / mass # n * D
-				coupling: npt.NDArray[np.double] = pes.adiabatic_coupling(x4[indices])[np.arange(num_pts), :, __class__.__coup_row_idx[iTrig, idx_of_dest_idx], __class__.__coup_col_idx[iTrig, idx_of_dest_idx]] # n * D
-				transition_rate: npt.NDArray[np.double] = np.abs(np.sum(velocity * coupling, -1) * dt) # n
-				transition_prob: npt.NDArray[np.double] = transition_rate / (1.0 + transition_rate) # n
+				idx_of_dest_idx: torch.Tensor = torch.from_numpy(_np_rng.integers(0, 2 * self.__config.NUM_PES - 2, size=num_pts, dtype=np.int_)) # n
+				velocity: torch.Tensor = p2[indices, :] / mass # n * D
+				eng_coup: dict[str, torch.Tensor] = model(x4[indices, :], adiabatic_potential=True, coupling=True)
+				coupling: torch.Tensor = eng_coup["coupling"][torch.arange(num_pts), :, self.__coup_row_idx[iTrig, idx_of_dest_idx], self.__coup_col_idx[iTrig, idx_of_dest_idx]] # n * D
+				transition_rate: torch.Tensor = torch.abs(torch.sum(velocity * coupling, -1) * dt) # n
+				transition_prob: torch.Tensor = transition_rate / (1.0 + transition_rate) # n
 				# energy conservation
-				potential: npt.NDArray[np.double] = pes.adiabatic_potential(x4[indices]) # n * N
-				momentum_rescale_factor_sq: npt.NDArray[np.double] = 1.0\
-					+ (potential[np.arange(num_pts), __class__.__coup_col_idx[iTrig, idx_of_dest_idx]] - potential[np.arange(num_pts), __class__.__coup_row_idx[iTrig, idx_of_dest_idx]]) / np.sum(p2[indices] ** 2 / mass, -1) # n
+				potential: torch.Tensor = eng_coup["adiabatic_potential"] # n * N
+				momentum_rescale_factor_sq: torch.Tensor = 1.0\
+					+ (potential[torch.arange(num_pts), self.__coup_col_idx[iTrig, idx_of_dest_idx]] - potential[torch.arange(num_pts), self.__coup_row_idx[iTrig, idx_of_dest_idx]]) / torch.sum(p2[indices, :] ** 2 / mass, -1) # n
 				# judgment
-				transition: npt.NDArray[np.bool_] = np.logical_and(np_rng.random(num_pts) < transition_prob, momentum_rescale_factor_sq >= 0.0) # n
+				transition: torch.Tensor = torch.logical_and(torch.from_numpy(_np_rng.random(num_pts)) < transition_prob, momentum_rescale_factor_sq >= 0.0) # n
 				# change index, momentum, and the back propagation
-				if np.any(transition):
-					transit_indices: npt.NDArray[np.int_] = indices[transition] # indices[transition] equivalent to [current_indices[iTrig]][transition]
-					transit_idx_of_dest_idx: npt.NDArray[np.int_] = idx_of_dest_idx[transition]
-					self.__index[transit_indices] = __class__.__dest_idx[iTrig, transit_idx_of_dest_idx]
-					p2[transit_indices] *= np.sqrt(momentum_rescale_factor_sq[transition]).reshape(-1, 1)
+				if torch.any(transition).item():
+					transit_indices: torch.Tensor = indices[transition] # indices[transition] equivalent to [current_indices[iTrig]][transition]
+					transit_idx_of_dest_idx: torch.Tensor = idx_of_dest_idx[transition]
+					self.__index[transit_indices] = self.__dest_idx[iTrig, transit_idx_of_dest_idx]
+					p2[transit_indices, :] *= torch.sqrt(momentum_rescale_factor_sq[transition]).reshape(-1, 1)
 					# change density
-					for iPredictPES, jPredictPES, iPredictElement in zip(pes.tril_row_indices, pes.tril_col_indices, pes.tril_element_indices):
+					for iPredictPES, jPredictPES, iPredictElement in zip(self.__config.TRIL_ROW_INDICES, self.__config.TRIL_COL_INDICES, self.__config.TRIL_ELEMENT_INDICES):
 						if iBelongPES == iPredictPES and jBelongPES == jPredictPES:
 							pass
-						need_predict_idx: npt.NDArray[np.int_] = transit_indices[__class__.__dest_idx[iTrig, transit_idx_of_dest_idx] == iPredictElement] # in case the transition happens to this element
-						if need_predict_idx.size > 0:
-							x2[need_predict_idx], p1[need_predict_idx] = evolve.evolve_coordinates_adiabatically(x4[need_predict_idx], p2[need_predict_idx], mass, dt / 2.0, evolve.Direction.BACKWARD, iPredictPES, jPredictPES)
-							x0[need_predict_idx], p0[need_predict_idx] = evolve.evolve_coordinates_adiabatically(x2[need_predict_idx], p1[need_predict_idx], mass, dt / 2.0, evolve.Direction.BACKWARD, iPredictPES, jPredictPES)
-							self.__density[need_predict_idx] = predictor(self.__coordinate[need_predict_idx], iPredictElement)
+						need_predict_idx: torch.Tensor = transit_indices[self.__dest_idx[iTrig, transit_idx_of_dest_idx] == iPredictElement] # in case the transition happens to this element
+						if need_predict_idx.numel() > 0:
+							x2[need_predict_idx, :], p1[need_predict_idx, :] = evolve.evolve_coordinates_adiabatically(model, x4[need_predict_idx, :], p2[need_predict_idx, :], mass, dt / 2.0, evolve.Direction.BACKWARD, iPredictPES, jPredictPES)
+							x0[need_predict_idx, :], p0[need_predict_idx, :] = evolve.evolve_coordinates_adiabatically(model, x2[need_predict_idx, :], p1[need_predict_idx, :], mass, dt / 2.0, evolve.Direction.BACKWARD, iPredictPES, jPredictPES)
+							self.__density[need_predict_idx] = predictor(self.__coordinate[need_predict_idx, :], iPredictElement)
 		# evolve density
-		for iPES, jPES, iElement in zip(pes.tril_row_indices, pes.tril_col_indices, pes.tril_element_indices):
-			filters: npt.NDArray[np.bool_] = self.__index == iElement
-			if np.count_nonzero(filters) > 0:
+		for iPES, jPES, iElement in zip(self.__config.TRIL_ROW_INDICES, self.__config.TRIL_COL_INDICES, self.__config.TRIL_ELEMENT_INDICES):
+			filters: torch.Tensor = self.__index == iElement
+			if torch.count_nonzero(filters) > 0:
 				self.__density[filters] = evolve.evolve_density_non_adiabatically(
+					model,
 					self.__density[filters],
 					x4[filters],
 					p2[filters],
@@ -335,5 +373,5 @@ class Points:
 					jPES
 				)
 		# finally change coordinates
-		self.__coordinate[:, :pes.DIM] = x4
-		self.__coordinate[:, pes.DIM:] = p2
+		self.__coordinate[:, :self.__config.DIM] = x4
+		self.__coordinate[:, self.__config.DIM:] = p2

@@ -4,7 +4,9 @@ r"""main
 The main module.
 """
 import argparse
+import collections.abc
 import datetime
+import gc
 import io
 import math
 import os
@@ -17,21 +19,404 @@ import typing
 
 import numpy as np
 import numpy.typing as npt
+import torch
 import scipy.interpolate
 
-sys.path.append(os.path.dirname(__file__))
-
+import constant
 import expectation
 import gp
+import param
 import pes
 import plot
 import point
-import utility
 
+torch.set_default_dtype(constant.DTYPE)
+torch.set_default_device(constant.DEVICE)
 NUM_PTS: typing.Final = 256
 NUM_XTR_RATIO: typing.Final = 50
 NUM_MC_PTS: typing.Final = 1_000_000
 NUM_EVL_MC_PTS: typing.Final = 10_000
+
+
+@typing.final
+class Main:
+	r"""All the quantities that could be used in further calculation
+
+	Parameters
+	----------
+	to_draw : bool
+		Whether to draw it or not
+	grid_solution_file : str
+		The file name for grid solution. If empty string, grid solution will not be read
+
+	Methods
+	-------
+	total_ticks()
+		The estimated total output times
+	"""
+	@staticmethod
+	def __separate_central_extra(points: collections.abc.Sequence[torch.Tensor], num_center: torch.Tensor) -> list[npt.NDArray[np.double]]:
+		r"""To separate the central points and extra points
+
+		Parameters
+		----------
+		points : collections.abc.Sequence[torch.Tensor], len of NUM_TRIG, each of shape (NUM_PT_ALL, PHASEDIM)
+			Central and extra sample points of all elements
+		num_center : torch.Tensor
+			The number of central sample points
+
+		Returns
+		-------
+		list[npt.NDArray[np.double]], len of 2 * NUM_TRIG, each of shape (NUM_PT_ALL, PHASEDIM)
+			Central sample points of all elements first, then extra sample points of all elements
+		"""
+		return [pt[:int(n.item())].detach().numpy() for pt, n in zip(points, num_center)] + [pt[int(n.item()):].detach().numpy() for pt, n in zip(points, num_center)]
+
+	__quantity: typing.Final[param.Quantity]
+	__grid_file: typing.Final[plot.FromFile | None]
+	__grid_data: torch.Tensor | None
+	__grid_coord: typing.Final[torch.Tensor | None]
+	__pred_all_grids: typing.Final[torch.Tensor | None]
+	__pred_marginal: typing.Final[tuple[torch.Tensor, ...]]
+	__init_dist: typing.Final[pes.InitialDistribution]
+	__pts: typing.Final[point.Points]
+	__scale: torch.Tensor
+	__predictors: typing.Final[gp.GPRPredictors]
+	__mca: typing.Final[expectation.MonteCarloAverage]
+	__aia: typing.Final[expectation.AnalyticalAverager]
+	__epmca: typing.Final[expectation.EvolvingPointsMCAverage]
+	__dm_drawer: typing.Final[plot.DensityMatrixDrawer | None]
+	__wfn_plotter: typing.Final[plot.DensityMatrixMarginalPlotter | None]
+	__pts_f: typing.Final[io.TextIOWrapper]
+	__bln_f: typing.Final[io.TextIOWrapper]
+	__all_f: typing.Final[io.TextIOWrapper]
+	__mgn_f: typing.Final[io.TextIOWrapper]
+	__ave_f: typing.Final[io.TextIOWrapper]
+	__den_f: typing.Final[io.TextIOWrapper]
+	__err_f: typing.Final[io.TextIOWrapper]
+	__prm_f: typing.Final[io.TextIOWrapper]
+	__scl_f: typing.Final[io.TextIOWrapper]
+	__lss_f: typing.Final[io.TextIOWrapper]
+	__start_time: typing.Final[int]
+	__end_time: typing.Final[int | None]
+
+	def __init__(
+		self,
+		to_draw: bool,
+		grid_filename: str = ""
+	) -> None:
+		# get quantity and potential
+		total_grids: int | None = None
+		if grid_filename != "":
+			try:
+				total_grids = np.loadtxt(grid_filename, max_rows=1).size
+			finally:
+				pass
+		self.__quantity = param.Quantity(total_grids=total_grids)
+		self.__potential = pes.Potential(self.__quantity.model, self.__quantity.config)
+		# compare with grid solution
+		self.__grid_file = None
+		self.__grid_data = None
+		self.__grid_coord = None
+		self.__pred_all_grids = None
+		try:
+			self.__pred_all_grids = torch.empty((self.__quantity.config.NUM_PES, self.__quantity.config.NUM_PES) + tuple(int(n.item()) for n in self.__quantity.num_grids_on_each_dimension) * 2)
+			if grid_filename != "":
+				self.__grid_file = plot.FromFile(grid_filename, self.__quantity.config.NUM_ELM)
+				self.__grid_coord = torch.stack(torch.meshgrid(self.__quantity.r_grids_each_dim, indexing="xy"), 0).reshape(self.__quantity.config.PHASEDIM, -1).T
+				self.__grid_data = torch.empty((self.__quantity.config.NUM_PES, self.__quantity.config.NUM_PES) + tuple(int(n.item()) for n in self.__quantity.num_grids_on_each_dimension) * 2)
+		finally: # in case the memory requirement is too big
+			if self.__pred_all_grids is None:
+				self.__grid_file = None
+			if self.__grid_file is None:
+				self.__grid_coord = None
+			if self.__grid_coord is None:
+				self.__grid_data = None
+		self.__pred_marginal = tuple(torch.empty(self.__quantity.config.NUM_PES, self.__quantity.config.NUM_PES, int(n.item())) for n in self.__quantity.num_grids_on_each_dimension) + tuple(torch.empty(self.__quantity.config.NUM_PES, self.__quantity.config.NUM_PES, int(n.item())) for n in self.__quantity.num_grids_on_each_dimension)
+		# sampling. Initial point from gaussian directly
+		self.__init_dist = pes.InitialDistribution(self.__potential, self.__quantity.r0, self.__quantity.sigma_r0, self.__quantity.init_ppl_and_phase)
+		self.__pts = point.Points(self.__init_dist)
+		self.__scale = torch.empty((self.__quantity.config.NUM_ELM,))
+		# the regressor
+		self.__predictors = gp.GPRPredictors(self.__quantity.config, self.__quantity.sigma_r0)
+		# average evaluators
+		self.__mca = expectation.MonteCarloAverage(self.__quantity.config, NUM_MC_PTS)
+		self.__aia = expectation.AnalyticalAverager(self.__quantity.config, self.__predictors)
+		self.__epmca = expectation.EvolvingPointsMCAverage(self.__quantity.config, NUM_EVL_MC_PTS, self.__init_dist)
+		# drawer
+		self.__dm_drawer = None
+		self.__wfn_plotter = None
+		# files for output
+		self.__pts_f = open(constant.POINTS_FILENAME + constant.DATA_EXTENSION, "w", encoding=constant.ENC)
+		self.__bln_f = open(constant.BELONGING_FILENAME + constant.DATA_EXTENSION, "w", encoding=constant.ENC)
+		self.__all_f = open(constant.ALL_GRIDS_FILENAME + constant.DATA_EXTENSION, "w", encoding=constant.ENC)
+		self.__mgn_f = open(constant.MARGINAL_FILENAME + constant.DATA_EXTENSION, "w", encoding=constant.ENC)
+		self.__ave_f = open(constant.AVERAGE_FILENAME + constant.DATA_EXTENSION, "w", encoding=constant.ENC)
+		self.__den_f = open("density" + constant.DATA_EXTENSION, "w", encoding=constant.ENC)
+		self.__err_f = open(constant.ERROR_FILENAME + constant.DATA_EXTENSION, "w", encoding=constant.ENC)
+		self.__prm_f = open(constant.PARAMETER_FILENAME + constant.DATA_EXTENSION, "w", encoding=constant.ENC)
+		self.__scl_f = open(constant.SCALE_FILENAME + constant.DATA_EXTENSION, "w", encoding=constant.ENC)
+		self.__lss_f = open(constant.LOSS_FILENAME + constant.DATA_EXTENSION, "w", encoding=constant.ENC)
+		gc.collect()
+		self.__update_and_train(0, True)
+		self.__predict_and_save_to_file(0)
+		if to_draw:
+			if self.__quantity.config.PHASEDIM == plot.DIM_PLOT_DM and self.__pred_all_grids is not None: # None prediction means nothing provided for drawing
+				self.__dm_drawer = plot.DensityMatrixDrawer(
+					self.__quantity,
+					True,
+					True,
+					True,
+					self.__quantity.total_ticks,
+					self.__pred_all_grids,
+					self.__grid_data,
+					Main.__separate_central_extra(self.__pts.center, self.__pts.num_center),
+					self.__scale.detach().numpy()
+				)
+			self.__wfn_plotter = plot.DensityMatrixMarginalPlotter(
+				self.__quantity,
+				False,
+				self.__quantity.total_ticks,
+				[m.detach().numpy() for m in self.__pred_marginal],
+				self.__grid_data
+			)
+		self.__draw(0)
+		self.__print_parameter_scale_loss()
+		self.__start_time = int(time.time())
+		self.__end_time = int(end_time) if (end_time := os.environ.get("SLURM_JOB_END_TIME")) is not None else None
+
+	@property
+	def total_ticks(self) -> int:
+		r"""The estimated total output times
+
+		Returns
+		-------
+		int
+			The estimated total output times
+		"""
+		if self.__grid_file is not None and (gftt := self.__grid_file.total_ticks) != -1:
+			return min(gftt, self.__quantity.total_ticks)
+		else:
+			return self.__quantity.total_ticks
+
+	def __update_and_train(self, iTick: int, to_train: bool = True) -> None:
+		r"""To update the training set and train the parameter
+
+		Parameters
+		----------
+		iTick : int
+			Current time tick, to access grid data and for plotting
+		to_train : bool, optional
+			Whether to adjust parameters or not, by default True
+
+		Raises
+		------
+		NotImplementedError
+			In case an unimplemented branch is reached
+		"""
+		# get scale
+		self.__scale = self.__pts.rescale_factor
+		print(f"Tick {iTick}, {plot.format_array(self.__scale, "scales")}, {datetime.datetime.now()}", flush=True)
+		# save points
+		np.savetxt(self.__pts_f, torch.cat(self.__pts.center).T.detach().numpy(), constant.FMT, footer='\n', comments="", encoding=constant.ENC)
+		self.__pts.print_belonging(self.__bln_f)
+		# fit
+		self.__predictors.update(self.__pts.center, self.__pts.density, self.__pts.num_center, self.__scale)
+		if to_train:
+			self.__predictors.train()
+
+	def __predict_and_save_to_file(self, iTick: int) -> None:
+		r"""To make predictions on marginal/grids
+
+		Parameters
+		----------
+		iTick : int
+			Current time tick, to access grid data and for plotting
+		to_train : bool, optional
+			Whether to adjust parameters or not, by default True
+
+		Raises
+		------
+		NotImplementedError
+			In case an unimplemented branch is reached
+		"""
+		# read from grid
+		if self.__grid_file is not None and self.__grid_data is not None and self.__grid_file.have_content:
+			try:
+				self.__grid_data = plot.file_data_to_dm(self.__grid_file, self.__quantity.config, [int(n.item()) for n in self.__quantity.num_grids_on_each_dimension])
+				self.__grid_data = self.__grid_data.reshape(self.__quantity.config.NUM_ELM, *self.__grid_data.shape[:-2])
+			except EOFError:
+				self.__grid_data = None
+		# predict and marginal distribution
+		success_pred_all: bool = self.__pred_all_grids is not None
+		for iPES, jPES, iElement in zip(self.__quantity.config.TRIL_ROW_INDICES, self.__quantity.config.TRIL_COL_INDICES, self.__quantity.config.TRIL_ELEMENT_INDICES):
+			pred_element: torch.Tensor | None = None
+			if self.__grid_coord is not None and self.__pred_all_grids is not None and success_pred_all:
+				try:
+					pred_element = self.__predictors.predict(self.__grid_coord, iElement).reshape(self.__pred_all_grids.shape[2:])
+				finally:
+					success_pred_all = success_pred_all and pred_element is not None
+			if iPES == jPES:
+				if self.__pred_all_grids is not None and pred_element is not None:
+					self.__pred_all_grids[iPES, jPES] = pred_element.real
+				for iDim in self.__quantity.config.PHASEDIM_RANGE:
+					self.__pred_marginal[iDim][iPES, jPES, :] = self.__predictors.get_marginal(iDim, self.__quantity.r_grids_each_dim[iDim].reshape(-1, 1), iElement).real
+			else:
+				if self.__pred_all_grids is not None and pred_element is not None:
+					self.__pred_all_grids[jPES, iPES] = pred_element.real
+					self.__pred_all_grids[iPES, jPES] = pred_element.imag
+				for iDim in self.__quantity.config.PHASEDIM_RANGE:
+					marginal_pred_element: torch.Tensor = self.__predictors.get_marginal(iDim, self.__quantity.r_grids_each_dim[iDim].reshape(-1, 1), iElement)
+					self.__pred_marginal[iDim][jPES, iPES, :] = marginal_pred_element.real
+					self.__pred_marginal[iDim][iPES, jPES, :] = marginal_pred_element.imag
+		if self.__pred_all_grids is not None and success_pred_all:
+			np.savetxt(self.__all_f, self.__pred_all_grids.reshape(self.__quantity.config.NUM_ELM, -1).detach().numpy(), constant.FMT, footer="\n", encoding=constant.ENC)
+		for iDim in self.__quantity.config.PHASEDIM_RANGE:
+			np.savetxt(self.__mgn_f, self.__pred_marginal[iDim].reshape(self.__quantity.config.NUM_ELM, -1).detach().numpy(), constant.FMT, encoding=constant.ENC)
+		# calculate averages
+		print(iTick * self.__quantity.output_interval, end=" ", file=self.__ave_f)
+		self.__mca.update_pts(self.__pts.center, self.__predictors.predict)
+		self.__epmca.update_density(self.__predictors.predict)
+		aver: expectation.Averager
+		for aver in [self.__mca, self.__aia, self.__epmca]:
+			print(
+				*aver.population().detach().numpy(),
+				*aver.coordinates().detach().numpy(),
+				*aver.covariance()[np.tril_indices(self.__quantity.config.PHASEDIM)].detach().numpy(),
+				aver.potential(self.__potential),
+				aver.kinetic(self.__quantity.mass),
+				*aver.purity().reshape(-1).detach().numpy(),
+				end=" ",
+				file=self.__ave_f
+			)
+		print("", file=self.__ave_f, flush=True)
+		# calculate error, and predict density
+		evolving_density: typing.Final[list[torch.Tensor]] = self.__pts.density
+		if self.__grid_data is not None: # interpolate the data
+			grid_interpolate: list[npt.NDArray[np.cdouble]] = [np.array([], dtype=np.cdouble) for _ in self.__quantity.config.TRIG_RANGE]
+			evolving_errors: npt.NDArray[np.double] = np.empty((self.__quantity.config.NUM_PES, self.__quantity.config.NUM_PES), np.double)
+			for iTrig, (iPES, jPES) in enumerate(zip(self.__quantity.config.TRIL_ROW_INDICES, self.__quantity.config.TRIL_COL_INDICES)):
+				interpolator_re: scipy.interpolate.RegularGridInterpolator = scipy.interpolate.RegularGridInterpolator(
+					tuple(grid.detach().numpy() for grid in self.__quantity.r_grids_each_dim),
+					self.__grid_data[jPES * self.__quantity.config.NUM_PES + iPES].detach().numpy(), # upper part
+					"cubic",
+					False,
+					0.0
+				)
+				grid_interpolate[iTrig] = interpolator_re(self.__pts.center[iTrig].detach().numpy()).astype(np.cdouble)
+				if iPES == jPES:
+					evolving_errors[iPES, jPES] = np.sum((grid_interpolate[iTrig].real - evolving_density[iTrig].real.detach().numpy()) ** 2) / evolving_density[iTrig].numel()
+				else:
+					interpolator_im: scipy.interpolate.RegularGridInterpolator = scipy.interpolate.RegularGridInterpolator(
+						tuple(grid.detach().numpy() for grid in self.__quantity.r_grids_each_dim),
+						self.__grid_data[iPES * self.__quantity.config.NUM_PES + jPES].detach().numpy(), # strictly lower part
+						"cubic",
+						False,
+						0.0
+					)
+					grid_interpolate[iTrig].imag = interpolator_im(self.__pts.center[iTrig].detach().numpy())
+					evolving_errors[jPES, iPES] = np.sum((grid_interpolate[iTrig].real - evolving_density[iTrig].real.detach().numpy()) ** 2) / evolving_density[iTrig].numel()
+					evolving_errors[iPES, jPES] = np.sum((grid_interpolate[iTrig].imag - evolving_density[iTrig].imag.detach().numpy()) ** 2) / evolving_density[iTrig].numel()
+			evolving_errors = evolving_errors.reshape(-1)
+			assert self.__pred_all_grids is not None # grid data will only be read when already enough space for prediction
+			diff: typing.Final[torch.Tensor] = (self.__pred_all_grids.reshape(self.__quantity.config.NUM_ELM, *self.__pred_all_grids.shape[2:]) - self.__grid_data).moveaxis(0, -1)
+			original_errors: typing.Final[torch.Tensor] = torch.sum(diff ** 2, self.__quantity.config.PHASEDIM_RANGE)
+			rescaled_errors: typing.Final[torch.Tensor] = original_errors * self.__scale ** 2
+			np.savetxt(self.__err_f, (original_errors.detach().numpy(), rescaled_errors.detach().numpy(), evolving_errors), footer="\n", encoding=constant.ENC)
+			np.savetxt(self.__den_f, np.concatenate(grid_interpolate).view(np.double).reshape(-1, 2).T) # 2 stands for real and imag
+		else:
+			np.savetxt(self.__den_f, torch.cat(evolving_density).detach().numpy().view(np.double).reshape(-1, 2).T, constant.FMT, encoding=constant.ENC)
+		np.savetxt(self.__den_f, torch.cat(evolving_density).detach().numpy().view(np.double).reshape(-1, 2).T, constant.FMT, encoding=constant.ENC)
+		np.savetxt(self.__den_f, torch.cat([self.__predictors.predict(pt, idx) for pt, idx in zip(self.__pts.center, self.__quantity.config.TRIL_ELEMENT_INDICES)]).detach().numpy().view(np.double).reshape(-1, 2).T, constant.FMT, footer="\n", encoding=constant.ENC)
+
+	def __draw(self, iTick: int) -> None:
+		r"""To draw the PWTDM and marginals if required
+
+		Parameters
+		----------
+		iTick : int
+			Current time tick, to access grid data and for plotting
+		"""
+		if self.__dm_drawer is not None and self.__pred_all_grids is not None:
+			self.__dm_drawer.__call__(iTick, self.__pred_all_grids, self.__grid_data, Main.__separate_central_extra(self.__pts.center, self.__pts.num_center), self.__scale.detach().numpy())
+		if self.__wfn_plotter is not None:
+			self.__wfn_plotter(iTick, [m.detach().numpy() for m in self.__pred_marginal], self.__grid_data)
+
+	def __print_parameter_scale_loss(self) -> None:
+		r"""To print parameters, rescale factor, and loss on point points to file
+		"""
+		self.__predictors.print(self.__prm_f)
+		print("\n", file=self.__prm_f)
+		np.savetxt(self.__scl_f, self.__scale.detach().numpy(), constant.FMT, footer="\n", encoding=constant.ENC)
+		for i in self.__quantity.config.ELEMENT_RANGE:
+			print(self.__predictors[i].error().item(), file=self.__lss_f)
+		print("\n", file=self.__lss_f)
+
+	def __call__(self, iTick: int) -> bool:
+		r"""To do evolution, train parameters, and output
+
+		Parameters
+		----------
+		iTick : int
+			Current time tick, to access grid data and for plotting
+
+		Returns
+		-------
+		bool
+			Whether to stop evolution or not
+		"""
+		# evolve
+		for _ in range(self.__quantity.output_ticks):
+			self.__pts.evolve(self.__potential, self.__quantity.mass, self.__quantity.dt, self.__predictors.predict)
+			self.__epmca.evolve(self.__potential, self.__quantity.mass, self.__quantity.dt, self.__predictors.predict)
+			self.__scale = self.__pts.rescale_factor
+			self.__predictors.update(self.__pts.center, self.__pts.density, self.__pts.num_center, self.__scale)
+			self.__print_parameter_scale_loss()
+		# update and predict
+		self.__update_and_train(iTick)
+		self.__predict_and_save_to_file(iTick)
+		self.__draw(iTick)
+		self.__print_parameter_scale_loss()
+		# check stopping criteria, when grid solution is not given
+		# use predictors (aia) with old points
+		if self.__grid_data is None and torch.any(self.__epmca.coordinates()[:self.__quantity.config.DIM] > torch.abs(self.__quantity.x0)).item():
+			return True
+		if self.__end_time is not None:
+			current_time: int = int(time.time())
+			time_pass: int = current_time - self.__start_time
+			time_left: int = self.__end_time - current_time
+			if time_left < time_pass // iTick:
+				# time left is not enough for next output, kill and rerun the job
+				print(f"Time left is {time_left} seconds, not enough for another iteration. Stop evolving after {time_pass} seconds, {iTick} iterations")
+				return True
+		return False
+
+	def finalize(self, total_ticks: int) -> None:
+		r"""To close files, draw time-dependent changes, and generate animation and tar files
+
+		Parameters
+		----------
+		total_ticks : int
+			The number of total outputs
+		"""
+		# close files
+		for f in (self.__pts_f, self.__bln_f, self.__all_f, self.__mgn_f, self.__ave_f, self.__den_f, self.__err_f, self.__prm_f, self.__scl_f, self.__lss_f):
+			f.close()
+		# plot
+		ticks: typing.Final[npt.NDArray[np.double]] = plot.plot_average(self.__quantity.config) # averages
+		if self.__grid_data is not None: # error
+			plot.plot_error(self.__quantity.config, ticks)
+		# parameters, loss and rescale factor
+		param_loss_scale_ticks: typing.Final[npt.NDArray[np.double]] = np.concatenate([np.arange(i * self.__quantity.output_ticks, (i + 1) * self.__quantity.output_ticks + 1) for i in range(total_ticks)]) * self.__quantity.dt # This should be size of (total_ticks - 1) * (output_steps + 1)
+		plot.plot_parameters(self.__quantity.config, param_loss_scale_ticks)
+		plot.plot_loss_and_rescale_factors(self.__quantity.config, param_loss_scale_ticks)
+		# tar figures
+		if self.__dm_drawer is not None:
+			# draw frame by frame and combine into a tarfile, removing the pics after tarfile successfully constructed
+			plot.tar_files(self.__dm_drawer.picname, total_ticks)
+		if self.__wfn_plotter is not None:
+			plot.tar_files(self.__wfn_plotter.picname, total_ticks)
+
 
 def parse_argument() -> tuple[bool, str]:
 	r"""To parse arguments
@@ -63,286 +448,15 @@ def main(to_draw: bool, grid_solution_file: str) -> None:
 	NotImplementedError
 		In case an unimplemented branch is reached
 	"""
-	mass: npt.NDArray[np.double]
-	r0: npt.NDArray[np.double]
-	sigma_r0: npt.NDArray[np.double]
-	dx: npt.NDArray[np.double]
-	initial_population: npt.NDArray[np.double]
-	initial_phase_factor: npt.NDArray[np.double]
-	output_steps: int
-	reopt_steps: int
-	dt: float
-	mass, r0, sigma_r0, dx, initial_population, initial_phase_factor, output_steps, reopt_steps, dt = plot.read_input()
-	print(
-		utility.format_array("Mass", mass),
-		utility.format_array("Initial center", r0),
-		utility.format_array("Initial deviation", sigma_r0),
-		utility.format_array("Initial population", initial_population),
-		utility.format_array("Initial phase_factor", initial_phase_factor),
-		utility.format_array("Time step", dt),
-		utility.format_array("Steps between output", output_steps),
-		utility.format_array("Outputs between optimization", reopt_steps),
-		sep="\n"
-	)
-	initial_phase_factor = initial_phase_factor / 180.0 * math.pi # deg to arc
-	n_grids: int = 4 * int(np.max(np.abs(r0[:pes.DIM] / dx))) + 1
-	total_ticks: int = int(np.floor(np.max(2.0 * np.abs(r0[:pes.DIM]) / (np.abs(r0[pes.DIM:]) / mass)))) * 2 + 1
-	# read input
-	grid_data: npt.NDArray[np.double] | None = None
-	if grid_solution_file != "":
-		try:
-			grid_data = plot.read_data(grid_solution_file) # shape of (N_TICKS * NUM_ELM * N_GRIDS...)
-			n_grids = grid_data.shape[-1]
-			total_ticks = grid_data.shape[0]
-		finally: # in case the memory requirement is too big
-			pass
-	grids_each_dim: typing.Final[list[npt.NDArray[np.double]]] = plot.get_grids(r0, n_grids)
-	grid_coord: npt.NDArray[np.double] | None = None
+	exe: typing.Final = Main(to_draw, grid_solution_file)
 	try:
-		grid_coord = np.array(np.meshgrid(*grids_each_dim), dtype=np.double).reshape(pes.PHASEDIM, -1).T # shape of pes.PHASEDIM * (N_GRIDS ** pes.PHASEDIM)
-	finally: # in case the memory requirement is too big
-		pass
-	pred: npt.NDArray[np.double] | None = None
-	if grid_coord is not None:
-		try:
-			pred = np.empty((pes.NUM_PES, pes.NUM_PES) + (n_grids,) * pes.PHASEDIM, np.double)
-		finally: # in case the memory requirement is too big
-			pass
-	# sampling. Initial point from gaussian directly
-	init_dist: pes.InitialDistribution = pes.InitialDistribution(r0, sigma_r0, initial_population, initial_phase_factor)
-	pts: point.Points = point.Points(init_dist)
-	# the regressor
-	predictors: gp.GPRPredictors = gp.GPRPredictors()
-	# average evaluators
-	mca: expectation.MonteCarloAverage = expectation.MonteCarloAverage(NUM_MC_PTS)
-	aia: expectation.AnalyticalAverager = expectation.AnalyticalAverager(predictors)
-	epmca: expectation.EvolvingPointsMCAverage = expectation.EvolvingPointsMCAverage(NUM_EVL_MC_PTS, init_dist)
-	# drawer
-	dm_drawer: plot.DensityMatrixDrawer | None = None
-	wfn_plotter: plot.WavefunctionPlotter | None = None
-	if to_draw:
-		if pes.PHASEDIM == 2 and pred is not None: # None prediction means nothing provided for drawing
-			dm_drawer = plot.DensityMatrixDrawer(
-				output_steps * dt,
-				total_ticks,
-				init_dist,
-				grids_each_dim[0],
-				grids_each_dim[1],
-				grid_data=grid_data,
-				draw_scattered=True,
-				draw_rescaled=True
-			)
-		wfn_plotter = plot.WavefunctionPlotter(
-			output_steps * dt,
-			total_ticks,
-			init_dist,
-			grids_each_dim,
-			draw_rescaled=False
-		)
-	# files for output
-	pts_f: io.TextIOWrapper
-	bln_f: io.TextIOWrapper
-	all_f: io.TextIOWrapper
-	mgn_f: io.TextIOWrapper
-	ave_f: io.TextIOWrapper
-	den_f: io.TextIOWrapper
-	err_f: io.TextIOWrapper
-	prm_f: io.TextIOWrapper
-	scl_f: io.TextIOWrapper
-	lss_f: io.TextIOWrapper
-	with open(plot.POINTS_FILENAME + plot.DATA_EXTENSION, "w", encoding="UTF-8") as pts_f,\
-		open(plot.BELONGING_FILENAME + plot.DATA_EXTENSION, "w", encoding="UTF-8") as bln_f,\
-		open(plot.ALL_GRIDS_FILENAME + plot.DATA_EXTENSION, "w", encoding="UTF-8") as all_f,\
-		open(plot.MARGINAL_FILENAME + plot.DATA_EXTENSION, "w", encoding="UTF-8") as mgn_f,\
-		open(plot.AVERAGE_FILENAME + plot.DATA_EXTENSION, "w", encoding="UTF-8") as ave_f,\
-		open("density" + plot.DATA_EXTENSION, "w", encoding="UTF-8") as den_f,\
-		open(plot.ERROR_FILENAME + plot.DATA_EXTENSION, "w", encoding="UTF-8") as err_f,\
-		open(plot.PARAMETER_FILENAME + plot.DATA_EXTENSION, "w", encoding="UTF-8") as prm_f,\
-		open(plot.SCALE_FILENAME + plot.DATA_EXTENSION, "w", encoding="UTF-8") as scl_f,\
-		open(plot.LOSS_FILENAME + plot.DATA_EXTENSION, "w", encoding="UTF-8") as lss_f:
-		def train_pred_draw(iTick: int, to_train: bool = True) -> None:
-			r"""To train the parameter, doing prediction on all grids, and draw it
-
-			Parameters
-			----------
-			iTick : int
-				Current time tick, to access grid data and for plotting
-			to_train : bool, optional
-				Whether to adjust parameters or not, by default True
-
-			Raises
-			------
-			NotImplementedError
-				In case an unimplemented branch is reached
-			"""
-			# get scale
-			scale: typing.Final[npt.NDArray[np.double]] = pts.rescale_factor
-			print(f"Tick {iTick}, {utility.format_array("scales", scale)}, {datetime.datetime.now()}", flush=True)
-			# save points
-			np.savetxt(pts_f, np.concatenate(pts.center).T, footer='\n', comments="")
-			pts.print_belonging(bln_f)
-			# fit
-			predictors.update(pts.center, pts.density, pts.num_center, scale)
-			if to_train:
-				predictors.train()
-			# predict and marginal distribution
-			marginal: npt.NDArray[np.double] = np.empty((pes.PHASEDIM, pes.NUM_PES, pes.NUM_PES, n_grids), np.double)
-			success_pred_all: bool = pred is not None
-			for iPES, jPES, iElement in zip(pes.tril_row_indices, pes.tril_col_indices, pes.tril_element_indices):
-				pred_element: npt.NDArray[np.cdouble] | None = None
-				if grid_coord is not None and pred is not None and success_pred_all:
-					try:
-						pred_element = predictors.predict(grid_coord, iElement).reshape((n_grids,) * pes.PHASEDIM)
-					finally:
-						success_pred_all = success_pred_all and pred_element is not None
-				marginal_pred_element: npt.NDArray[np.cdouble] = np.array([predictors.get_marginal(iDim, grids_each_dim[iDim].reshape(-1, 1), iElement) for iDim in range(pes.PHASEDIM)]) # shape of (PHASEDIM, N_GRIDS)
-				if iPES == jPES:
-					if pred is not None and pred_element is not None:
-						pred[iPES, jPES] = pred_element.real
-					marginal[:, iPES, jPES, :] = marginal_pred_element.real
-				else:
-					if pred is not None and pred_element is not None:
-						pred[jPES, iPES] = pred_element.real
-						pred[iPES, jPES] = pred_element.imag
-					marginal[:, jPES, iPES, :] = marginal_pred_element.real
-					marginal[:, iPES, jPES, :] = marginal_pred_element.imag
-			if pred is not None and success_pred_all:
-				np.savetxt(all_f, pred.reshape(pes.NUM_ELM, n_grids ** pes.PHASEDIM), footer="\n", comments="")
-			np.savetxt(mgn_f, marginal.reshape(pes.PHASEDIM * pes.NUM_ELM, n_grids), footer="\n", comments="")
-			# calculate averages
-			print(iTick * output_steps * dt, end=" ", file=ave_f)
-			mca.update_pts(pts.center, predictors.predict)
-			epmca.update_density(predictors.predict)
-			aver: expectation.Averager
-			for aver in [mca, aia, epmca]:
-				print(*aver.population(), *aver.coordinates(), *aver.covariance()[np.tril_indices(pes.PHASEDIM)], aver.potential(), aver.kinetic(mass), *aver.purity().reshape(-1), end=" ", file=ave_f)
-			print("", file=ave_f, flush=True)
-			# calculate error, and predict density
-			evolving_density: typing.Final[list[npt.NDArray[np.cdouble]]] = pts.density
-			if grid_data is not None: # interpolate the data
-				grid_interpolate: list[npt.NDArray[np.cdouble]] = [np.array([], dtype=np.cdouble) for _ in range(pes.NUM_TRIG)]
-				evolving_errors: npt.NDArray[np.double] = np.empty((pes.NUM_PES, pes.NUM_PES), np.double)
-				for iTrig, (iPES, jPES) in enumerate(zip(pes.tril_row_indices, pes.tril_col_indices)):
-					interpolator_re: scipy.interpolate.RegularGridInterpolator = scipy.interpolate.RegularGridInterpolator(
-						tuple(grids_each_dim),
-						grid_data[iTick, jPES * pes.NUM_PES + iPES], # upper part
-						"cubic",
-						False,
-						0.0
-					)
-					grid_interpolate[iTrig] = interpolator_re(pts.center[iTrig]).astype(np.cdouble)
-					if iPES == jPES:
-						evolving_errors[iPES, jPES] = np.sum((grid_interpolate[iTrig].real - evolving_density[iTrig].real) ** 2) / evolving_density[iTrig].size
-					else:
-						interpolator_im: scipy.interpolate.RegularGridInterpolator = scipy.interpolate.RegularGridInterpolator(
-							tuple(grids_each_dim),
-							grid_data[iTick, iPES * pes.NUM_PES + jPES], # strictly lower part
-							"cubic",
-							False,
-							0.0
-						)
-						grid_interpolate[iTrig].imag = interpolator_im(pts.center[iTrig])
-						evolving_errors[jPES, iPES] = np.sum((grid_interpolate[iTrig].real - evolving_density[iTrig].real) ** 2) / evolving_density[iTrig].size
-						evolving_errors[iPES, jPES] = np.sum((grid_interpolate[iTrig].imag - evolving_density[iTrig].imag) ** 2) / evolving_density[iTrig].size
-				evolving_errors = evolving_errors.reshape(-1)
-				assert pred is not None # grid data will only be read when already enough space for prediction
-				diff: typing.Final[npt.NDArray[np.double]] = pred.reshape((pes.NUM_ELM,) + pred.shape[2:]) - grid_data
-				original_errors: typing.Final[npt.NDArray[np.double]] = np.sum(diff ** 2, (-2, -1))
-				rescaled_errors: typing.Final[npt.NDArray[np.double]] = original_errors * scale ** 2
-				np.savetxt(err_f, (original_errors, rescaled_errors, evolving_errors), footer="\n", comments="")
-				np.savetxt(den_f, np.concatenate(grid_interpolate).view(np.double).reshape(-1, 2).T) # 2 stands for real and imag
-			else:
-				np.savetxt(den_f, np.concatenate(evolving_density).view(np.double).reshape(-1, 2).T)
-			np.savetxt(den_f, np.concatenate(evolving_density).view(np.double).reshape(-1, 2).T)
-			np.savetxt(den_f, np.concatenate([predictors.predict(pt, idx) for pt, idx in zip(pts.center, pes.tril_element_indices)]).view(np.double).reshape(-1, 2).T, footer="\n", comments="")
-			print("\n", end="\n", file=den_f)
-			if to_draw: # plots used whether grid solution is given or not
-				if pes.PHASEDIM == 2:
-					assert pred is not None and dm_drawer is not None
-					dm_drawer(iTick, pred.reshape((pes.NUM_ELM,) + pred.shape[2:]), pts.center, pts.num_center, scale)
-				assert wfn_plotter is not None
-				wfn_plotter(iTick, marginal.diagonal(axis1=1, axis2=2).swapaxes(-1, -2)) # .diagonal will move axis to end
-
-		def print_parameter_scale_loss(scale: npt.NDArray[np.double]) -> None:
-			r"""To print parameters, rescale factor, and loss on point points to file
-
-			Parameters
-			----------
-			scale : npt.NDArray[np.double]
-				Rescale factor
-			"""
-			predictors.print(prm_f)
-			print("\n", file=prm_f)
-			np.savetxt(scl_f, scale)
-			print("\n", file=scl_f)
-			for i in range(pes.NUM_ELM):
-				print(predictors[i].error().item(), file=lss_f)
-			print("\n", file=lss_f)
-
-		try:
-			train_pred_draw(0)
-			print_parameter_scale_loss(pts.rescale_factor)
-			start_time: typing.Final[int] = int(time.time())
-			end_time = os.environ.get("SLURM_JOB_END_TIME")
-			if end_time is not None:
-				end_time = int(end_time) # int | None
-			to_stop: bool = False
-			iTick: int
-			for iTick in range(1, total_ticks):
-				# evolve
-				for _ in range(output_steps):
-					pts.evolve(mass, dt, predictors.predict)
-					epmca.evolve(mass, dt, predictors.predict)
-					scale: npt.NDArray[np.double] = pts.rescale_factor
-					predictors.update(pts.center, pts.density, pts.num_center, scale)
-					print_parameter_scale_loss(scale)
-				# update and predict
-				train_pred_draw(iTick)
-				print_parameter_scale_loss(pts.rescale_factor)
-				# check stopping criteria, when grid solution is not given
-				# use predictors (aia) with old points
-				if grid_data is None:
-					if np.any(epmca.coordinates()[:pes.DIM] > np.abs(r0[:pes.DIM])):
-						to_stop = True
-				if end_time is not None:
-					current_time: int = int(time.time())
-					time_pass: int = current_time - start_time
-					time_left: int = end_time - current_time
-					if time_left < time_pass // iTick:
-						# time left is not enough for next output, kill and rerun the job
-						print(f"Time left is {time_left} seconds, not enough for another iteration. Stop evolving after {time_pass} seconds, {iTick} iterations")
-						to_stop = True
-				if to_stop:
-					total_ticks = iTick + 1
-					break
-		except Exception as e:
-			traceback.print_exception(e, file=sys.stdout)
-
-	# then plots
-	plot.plot_average() # averages
-	if grid_data is not None: # error
-		plot.plot_error(output_steps * dt)
-	# parameters, loss and rescale factor
-	param_loss_scale_ticks: typing.Final[npt.NDArray[np.double]] = np.concatenate([np.arange(i * output_steps, (i + 1) * output_steps + 1) for i in range(iTick)]) * dt # This should be size of (total_ticks - 1) * (output_steps + 1)
-	plot.plot_parameters(param_loss_scale_ticks)
-	plot.plot_loss_and_rescale_factors(param_loss_scale_ticks)
-	# tar figures
-	if to_draw:
-		if pes.PHASEDIM == 2:
-			assert dm_drawer is not None
-			if os.path.isdir(dm_drawer.FILENAME_PREFIX):
-				os.rename(dm_drawer.FILENAME_PREFIX, dm_drawer.FILENAME_PREFIX + "_" + str(datetime.datetime.now()).replace(" ", "_"))
-			subprocess.run(["mkdir", dm_drawer.FILENAME_PREFIX]) # make directory
-			subprocess.run(["mv"] + [dm_drawer.picname.format(iTick) for iTick in range(total_ticks)] + [dm_drawer.FILENAME_PREFIX])
-			with tarfile.open(dm_drawer.FILENAME_PREFIX + plot.TAR_EXTENSION, "w:gz") as dm_tf:
-				dm_tf.add(dm_drawer.FILENAME_PREFIX)
-		assert wfn_plotter is not None
-		if os.path.isdir(wfn_plotter.FILENAME_PREFIX):
-			os.rename(wfn_plotter.FILENAME_PREFIX, wfn_plotter.FILENAME_PREFIX + "_" + str(datetime.datetime.now()).replace(" ", "_"))
-		subprocess.run(["mkdir", wfn_plotter.FILENAME_PREFIX]) # make directory
-		subprocess.run(["mv"] + [wfn_plotter.picname.format(iTick) for iTick in range(total_ticks)] + [wfn_plotter.FILENAME_PREFIX])
-		with tarfile.open(wfn_plotter.FILENAME_PREFIX + plot.TAR_EXTENSION, "w:gz") as wfn_tf:
-			wfn_tf.add(wfn_plotter.FILENAME_PREFIX)
+		for iTick in range(1, exe.total_ticks):
+			exe(iTick)
+	except Exception as e:
+		traceback.print_exception(e, file=sys.stdout)
+	finally:
+		total_ticks: typing.Final[int] = iTick + 1
+	exe.finalize(total_ticks)
 
 
 if __name__ == "__main__":

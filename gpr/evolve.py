@@ -3,18 +3,18 @@ r"""evolve
 This module provides the adiabatic and non-adiabatic evolution scheme.
 """
 import enum
-import os
-import sys
 import typing
 
-import numpy as np
-import numpy.typing as npt
+import torch
 
-sys.path.append(os.path.dirname(__file__))
-
+import constant
 import pes
 
+torch.set_default_dtype(constant.DTYPE)
+torch.set_default_device(constant.DEVICE)
 
+
+@typing.final
 class Direction(enum.IntEnum):
 	r"""Enumerate of directions
 
@@ -30,23 +30,26 @@ class Direction(enum.IntEnum):
 
 
 def evolve_coordinates_adiabatically(
-	x0: npt.NDArray[np.double],
-	p0: npt.NDArray[np.double],
-	mass: npt.NDArray[np.double],
+	potential: pes.Potential,
+	x0: torch.Tensor,
+	p0: torch.Tensor,
+	mass: torch.Tensor,
 	dt: float,
 	drc: Direction,
 	RowIndex: int,
 	ColIndex: int
-) -> tuple[npt.NDArray[np.double], npt.NDArray[np.double]]:
+) -> tuple[torch.Tensor, torch.Tensor]:
 	r"""To evolve the phase space coordinates adiabatically of given element for given interval along given direction
 
 	Parameters
 	----------
-	x0 : npt.NDArray[np.double], shape of (..., DIM)
+	potential : pes.Potential
+		Quantities derived from potential
+	x0 : torch.Tensor, shape of (..., DIM)
 		Starting positions
-	p0 : npt.NDArray[np.double], shape of (..., DIM)
+	p0 : torch.Tensor, shape of (..., DIM)
 		Starting momenta
-	mass : npt.NDArray[np.double], shape of (DIM,)
+	mass : torch.Tensor, shape of (DIM,)
 		Mass of classical degree of freedom
 	dt : float
 		Time interval
@@ -59,54 +62,55 @@ def evolve_coordinates_adiabatically(
 
 	Returns
 	-------
-	tuple[npt.NDArray[np.double], npt.NDArray[np.double]]
+	tuple[torch.Tensor, torch.Tensor]
 		The destination positions and momenta
 	"""
-	def position_evolve(x: npt.NDArray[np.double], p: npt.NDArray[np.double]) -> npt.NDArray[np.double]:
+	def position_evolve(x: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
 		r"""To evolve positions for half step
 
 		Parameters
 		----------
-		x : npt.NDArray[np.double], shape of (..., DIM)
+		x : torch.Tensor, shape of (..., DIM)
 			Positions
-		p : npt.NDArray[np.double], shape of (..., DIM)
+		p : torch.Tensor, shape of (..., DIM)
 			Momenta
 
 		Returns
 		-------
-		npt.NDArray[np.double], shape of (..., DIM)
+		torch.Tensor, shape of (..., DIM)
 			Positions after half step
 		"""
 		return x + drc.value * dt / 2.0 * p / mass
 
-	def momentum_diagonal_nonbranch_evolve(x: npt.NDArray[np.double], p: npt.NDArray[np.double]) -> npt.NDArray[np.double]:
+	def momentum_diagonal_nonbranch_evolve(x: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
 		r"""To evolve momenta
 
 		Parameters
 		----------
-		x : npt.NDArray[np.double], shape of (..., DIM)
+		x : torch.Tensor, shape of (..., DIM)
 			Positions
-		p : npt.NDArray[np.double], shape of (..., DIM)
+		p : torch.Tensor, shape of (..., DIM)
 			Momenta
 
 		Returns
 		-------
-		npt.NDArray[np.double], shape of (..., DIM)
+		torch.Tensor, shape of (..., DIM)
 			Momenta after evolving the step
 		"""
-		force: npt.NDArray[np.double] = pes.adiabatic_force(x) # ... * D * N * N
+		force: typing.Final[torch.Tensor] = potential(x, force=True)["force"] # ... * D * N * N
 		return p + drc.value * dt / 2.0 * (force[..., RowIndex, RowIndex] + force[..., ColIndex, ColIndex])
 
-	x1: typing.Final[npt.NDArray[np.double]] = position_evolve(x0, p0)
-	p1: typing.Final[npt.NDArray[np.double]] = momentum_diagonal_nonbranch_evolve(x1, p0)
+	x1: typing.Final[torch.Tensor] = position_evolve(x0, p0)
+	p1: typing.Final[torch.Tensor] = momentum_diagonal_nonbranch_evolve(x1, p0)
 	return position_evolve(x1, p1), p1
 
 
 def evolve_density_adiabatically(
-	density: npt.NDArray[np.cdouble],
-	x0: npt.NDArray[np.double],
-	x2: npt.NDArray[np.double],
-	x4: npt.NDArray[np.double] | None,
+	model : pes.Potential,
+	density: torch.Tensor,
+	x0: torch.Tensor,
+	x2: torch.Tensor,
+	x4: torch.Tensor | None,
 	drc: Direction,
 	dt: float,
 	RowIndex: int,
@@ -116,13 +120,15 @@ def evolve_density_adiabatically(
 
 	Parameters
 	----------
-	density : npt.NDArray[np.cdouble], shape of (...)
+	model : pes.Potential
+		Quantities derived from potential
+	density : torch.Tensor, shape of (...)
 		The density matrix elements to evolve adiabatically
-	x0 : npt.NDArray[np.double], shape of (..., DIM)
+	x0 : torch.Tensor, shape of (..., DIM)
 		The initial positions
-	x2 : npt.NDArray[np.double], shape of (..., DIM)
+	x2 : torch.Tensor, shape of (..., DIM)
 		The final positions if x4 does not exist, otherwise the intermediate
-	x4 : npt.NDArray[np.double], shape of (..., DIM)
+	x4 : torch.Tensor, shape of (..., DIM)
 		The final positions if exists
 	drc : Direction
 		The direction of evolution
@@ -134,46 +140,50 @@ def evolve_density_adiabatically(
 		Index of column of the element in density matrix
 	"""
 	if RowIndex != ColIndex:
-		E0: typing.Final[npt.NDArray[np.double]] = pes.adiabatic_potential(x0)
-		E2: typing.Final[npt.NDArray[np.double]] = pes.adiabatic_potential(x2)
+		E0: typing.Final[torch.Tensor] = model(x0, adiabatic_potential=True)["adiabatic_potential"]
+		E2: typing.Final[torch.Tensor] = model(x2, adiabatic_potential=True)["adiabatic_potential"]
 		if x4 is not None:
-			E4: typing.Final[npt.NDArray[np.double]] = pes.adiabatic_potential(x4)
-			density[...] *= np.exp(-drc.value * dt / 4.0 / pes.HBAR * 1.0j * (E0[..., RowIndex] - E0[..., ColIndex] + 2.0 * (E2[..., RowIndex] - E2[..., ColIndex]) + E4[..., RowIndex] - E4[..., ColIndex]))
+			E4: typing.Final[torch.Tensor] = model(x4, adiabatic_potential=True)["adiabatic_potential"]
+			density[...] *= torch.exp(-drc.value * dt / 4.0 / constant.HBAR * 1.0j * (E0[..., RowIndex] - E0[..., ColIndex] + 2.0 * (E2[..., RowIndex] - E2[..., ColIndex]) + E4[..., RowIndex] - E4[..., ColIndex]))
 		else:
-			density[...] *= np.exp(-drc.value * dt / 2.0 / pes.HBAR * 1.0j * (E0[..., RowIndex] - E0[..., ColIndex] + E2[..., RowIndex] - E2[..., ColIndex]))
+			density[...] *= torch.exp(-drc.value * dt / 2.0 / constant.HBAR * 1.0j * (E0[..., RowIndex] - E0[..., ColIndex] + E2[..., RowIndex] - E2[..., ColIndex]))
 
 
 def evolve_density_non_adiabatically(
-	density: npt.NDArray[np.cdouble] | None,
-	x0: npt.NDArray[np.double],
-	p0: npt.NDArray[np.double],
-	x2: npt.NDArray[np.double] | None,
-	p1: npt.NDArray[np.double] | None,
-	mass: npt.NDArray[np.double],
+	potential: pes.Potential,
+	density: torch.Tensor | None,
+	x0: torch.Tensor,
+	p0: torch.Tensor,
+	x2: torch.Tensor | None,
+	p1: torch.Tensor | None,
+	mass: torch.Tensor,
 	dt: float,
-	predictor: pes.Predictor,
+	predictor: constant.Predictor,
 	RowIndex: int,
 	ColIndex: int
-) -> npt.NDArray[np.cdouble]:
+) -> torch.Tensor:
 	r"""To predict the density matrix element at the given phase space coordinates according to non-adiabatic dynamics
 
 	Parameters
 	----------
-	density : npt.NDArray[np.cdouble], shape of (...) | None
-		The density matrix element of given index at give points, or not given. Notice all the elements passed to this function is in lower-triangular part.
-	x0 : npt.NDArray[np.double], shape of (..., DIM)
+	potential : pes.Potential
+		Quantities derived from potential
+	density : torch.Tensor, shape of (...) | None
+		The density matrix element of given index at give points, or not given.
+		Notice all the elements passed to this function is in lower-triangular part.
+	x0 : torch.Tensor, shape of (..., DIM)
 		The positions to predict density
-	p0 : npt.NDArray[np.double], shape of (..., DIM)
+	p0 : torch.Tensor, shape of (..., DIM)
 		The momenta to predict density
-	x2 : npt.NDArray[np.double], shape of (..., DIM) | None
+	x2 : torch.Tensor, shape of (..., DIM) | None
 		The positions of half step before
-	p1 : npt.NDArray[np.double], shape of (..., DIM) | None
+	p1 : torch.Tensor, shape of (..., DIM) | None
 		The momenta of half step before
-	mass : npt.NDArray[np.double], shape of (DIM,)
+	mass : torch.Tensor, shape of (DIM,)
 		Mass of classical degree of freedom
 	dt : float
 		Time interval
-	predictor : pes.Predictor
+	predictor : constant.Predictor
 		The function that gives the density matrix element at corresponding phase points
 	RowIndex : int
 		Index of row of the element in density matrix
@@ -182,7 +192,7 @@ def evolve_density_non_adiabatically(
 
 	Returns
 	-------
-	npt.NDArray[np.cdouble], shape of (...)
+	torch.Tensor, shape of (...)
 		The density after back-propagated non-adiabatic evolution
 
 	Raises
@@ -191,28 +201,28 @@ def evolve_density_non_adiabatically(
 		In case the model is unknown
 	"""
 	evolve_density_non_adiabatically.drc = Direction.BACKWARD
-	evolve_density_non_adiabatically.offdiagonal_branches = np.array([-1, 0, 1], np.int_)
-	evolve_density_non_adiabatically.offdiagonal_zero_branch_index = np.argwhere(evolve_density_non_adiabatically.offdiagonal_branches == 0)[0, 0]
-	match pes.NUM_PES:
+	evolve_density_non_adiabatically.offdiagonal_branches = torch.tensor([-1, 0, 1], dtype=torch.int)
+	evolve_density_non_adiabatically.offdiagonal_zero_branch_index = torch.argwhere(evolve_density_non_adiabatically.offdiagonal_branches == 0)[0, 0]
+	match potential.config.NUM_PES:
 		case 2:
-			def offdiagonal_rotation(rho_part: npt.NDArray[np.cdouble], x_part: npt.NDArray[np.double], p_part: npt.NDArray[np.double], dt_offdiag: float) -> None:
+			def offdiagonal_rotation(rho_part: torch.Tensor, x_part: torch.Tensor, p_part: torch.Tensor, dt_offdiag: float) -> None:
 				r"""To have a off-diagonal rotation on the given density matrices
 
 				Parameters
 				----------
-				rho_part : npt.NDArray[np.cdouble], shape of (NUM_TRIG * ...)
+				rho_part : torch.Tensor, shape of (NUM_TRIG * ...)
 					The density matrices
-				x_part : npt.NDArray[np.double], shape of (... * D)
+				x_part : torch.Tensor, shape of (... * D)
 					The positions corresponding to the density matrices
-				p_part : npt.NDArray[np.double], shape of (... * D)
+				p_part : torch.Tensor, shape of (... * D)
 					The momenta corresponding to the density matrices
 				dt : float
 					Time interval
 				"""
-				phi: typing.Final[npt.NDArray[np.double]] = np.sum(p_part / mass * pes.adiabatic_coupling(x_part)[..., 0, 1], -1) # v.dot(NAC), ...
-				sinphi: typing.Final[npt.NDArray[np.double]] = np.sin(2.0 * dt_offdiag * phi)
-				cosphi: typing.Final[npt.NDArray[np.double]] = np.cos(2.0 * dt_offdiag * phi)
-				rho_save: typing.Final[npt.NDArray[np.cdouble]] = np.copy(rho_part)
+				phi: typing.Final[torch.Tensor] = torch.sum(p_part / mass * potential(x_part, coupling=True)["coupling"][..., 0, 1], -1) # v.dot(NAC), ...
+				sinphi: typing.Final[torch.Tensor] = torch.sin(2.0 * dt_offdiag * phi)
+				cosphi: typing.Final[torch.Tensor] = torch.cos(2.0 * dt_offdiag * phi)
+				rho_save: typing.Final[torch.Tensor] = rho_part.clone()
 				rho_part.real[0] = (1.0 + cosphi) / 2.0 * rho_save[0].real - sinphi * rho_save[1].real + (1.0 - cosphi) / 2.0 * rho_save[2].real
 				rho_part.imag[0] = 0.0
 				rho_part.real[1] = sinphi / 2.0 * rho_save[0].real + cosphi * rho_save[1].real - sinphi / 2.0 * rho_save[2].real
@@ -222,33 +232,33 @@ def evolve_density_non_adiabatically(
 
 			# first step: (x0, p0) -> (x2, p1)
 			if x2 is None or p1 is None:
-				x2, p1 = evolve_coordinates_adiabatically(x0, p0, mass, dt / 2.0, evolve_density_non_adiabatically.drc, RowIndex, ColIndex)
+				x2, p1 = evolve_coordinates_adiabatically(potential, x0, p0, mass, dt / 2.0, evolve_density_non_adiabatically.drc, RowIndex, ColIndex)
 			# second step, off-diagonal branching to p2, and broadcast to x3
 			# (backward) direction is included. So when evolve forward, the branch correspondence remains the same
-			p2: typing.Final[npt.NDArray[np.double]] = p1 + dt * evolve_density_non_adiabatically.offdiagonal_branches.reshape((-1,) + tuple(1 for _ in range(x0.ndim))) * pes.adiabatic_force(x2)[..., 0, 1] # 3 * ... * D
-			x3: typing.Final[npt.NDArray[np.double]] = x2 + evolve_density_non_adiabatically.drc.value * dt / 4.0 * p2 / mass # 3 * ... * D
+			p2: typing.Final[torch.Tensor] = p1 + dt * evolve_density_non_adiabatically.offdiagonal_branches.reshape((-1,) + tuple(1 for _ in range(x0.ndim))) * potential(x2, force=True)["force"][..., 0, 1] # 3 * ... * D
+			x3: typing.Final[torch.Tensor] = x2 + evolve_density_non_adiabatically.drc.value * dt / 4.0 * p2 / mass # 3 * ... * D
 			# then adiabatic branching to p3, and broadcast to x4
-			f_x3: typing.Final[npt.NDArray[np.double]] = pes.adiabatic_force(x3) # 3 * ... * D * N * N
-			f_diag_ave_tril: typing.Final[npt.NDArray[np.double]] = (f_x3[..., pes.tril_row_indices, pes.tril_row_indices] + f_x3[..., pes.tril_col_indices, pes.tril_col_indices]) / 2.0 # 3 * ... * D * NUM_TRIG
-			p3: typing.Final[npt.NDArray[np.double]] = p2 + evolve_density_non_adiabatically.drc.value * dt / 2.0 * np.moveaxis(f_diag_ave_tril, -1, 0) # NUM_TRIG * 3 * ... * D
-			x4: typing.Final[npt.NDArray[np.double]] = x3 + evolve_density_non_adiabatically.drc.value * dt / 4.0 * p3 / mass # NUM_TRIG * 3 * ... * D
+			f_x3: typing.Final[torch.Tensor] = potential(x3, force=True)["force"] # 3 * ... * D * N * N
+			f_diag_ave_tril: typing.Final[torch.Tensor] = (f_x3[..., potential.config.TRIL_ROW_INDICES, potential.config.TRIL_ROW_INDICES] + f_x3[..., potential.config.TRIL_COL_INDICES, potential.config.TRIL_COL_INDICES]) / 2.0 # 3 * ... * D * NUM_TRIG
+			p3: typing.Final[torch.Tensor] = p2 + evolve_density_non_adiabatically.drc.value * dt / 2.0 * torch.moveaxis(f_diag_ave_tril, -1, 0) # NUM_TRIG * 3 * ... * D
+			x4: typing.Final[torch.Tensor] = x3 + evolve_density_non_adiabatically.drc.value * dt / 4.0 * p3 / mass # NUM_TRIG * 3 * ... * D
 			# predict
-			rho_predict: npt.NDArray[np.cdouble] = np.empty((pes.NUM_TRIG, 3) + x0.shape[:-1], np.cdouble) # NUM_TRIG * 3 * ...
-			for index, iElement in enumerate(pes.tril_element_indices):
-				branch_row_index: int = iElement // pes.NUM_PES
-				branch_col_index: int = iElement % pes.NUM_PES
-				rho_predict[index] = predictor(np.concatenate((x4[index], p3[index]), -1), iElement)
+			rho_predict: torch.Tensor = torch.empty((potential.config.NUM_TRIG, 3) + x0.shape[:-1], dtype=torch.cdouble) # NUM_TRIG * 3 * ...
+			for index, iElement in enumerate(potential.config.TRIL_ELEMENT_INDICES):
+				branch_row_index: int = iElement // potential.config.NUM_PES
+				branch_col_index: int = iElement % potential.config.NUM_PES
+				rho_predict[index] = predictor(torch.concatenate((x4[index], p3[index]), -1), iElement)
 				# assign the known density to it
 				if branch_row_index == RowIndex and branch_col_index == ColIndex and density is not None:
 					rho_predict[index, evolve_density_non_adiabatically.offdiagonal_zero_branch_index] = density
 				# first half-step adiabatic evolve. (x4, p3) -> (x2, p2) with an adiabatic rotation
-				evolve_density_adiabatically(rho_predict[index], x2, x4[index], None, Direction.FORWARD, dt / 2.0, branch_row_index, branch_col_index)
-			rho_combined_offdiag: npt.NDArray[np.cdouble] = np.zeros((pes.NUM_TRIG,) + rho_predict.shape[2:], np.cdouble) # NUM_TRIG * ...
+				evolve_density_adiabatically(potential, rho_predict[index], x2, x4[index], None, Direction.FORWARD, dt / 2.0, branch_row_index, branch_col_index)
+			rho_combined_offdiag: torch.Tensor = torch.zeros((potential.config.NUM_TRIG,) + rho_predict.shape[2:], dtype=torch.cdouble) # NUM_TRIG * ...
 			for index, branch in enumerate(evolve_density_non_adiabatically.offdiagonal_branches):
 				# now they are at (x2, p2). A off-diagonal rotation is needed.
 				offdiagonal_rotation(rho_predict[:, index], x2, p2[index], dt / 2.0)
 				# then the off-diagonal force evolution combination with a rotation matrix, (x2, p2) -> (x2, p1)
-				value: npt.NDArray[np.double]
+				value: torch.Tensor
 				match branch:
 					case -1:
 						rho_combined_offdiag.real += (rho_predict[0, index].real + 2.0 * rho_predict[1, index].real + rho_predict[2, index].real) / 4.0
@@ -267,48 +277,51 @@ def evolve_density_non_adiabatically(
 			# the other off-diagonal rotation at (x2, p1)
 			offdiagonal_rotation(rho_combined_offdiag, x2, p1, dt / 2.0)
 			# another adiabatic step, (x2, p1) -> (x0, p0)
-			trig_index: typing.Final[int] = np.argwhere(pes.tril_element_indices == RowIndex * pes.NUM_PES + ColIndex)[0, 0]
-			evolve_density_adiabatically(rho_combined_offdiag[trig_index], x0, x2, None, Direction.FORWARD, dt / 2.0, RowIndex, ColIndex)
+			trig_index: typing.Final[int] = potential.config.TRIL_ELEMENT_INDICES.index(RowIndex * potential.config.NUM_PES + ColIndex)
+			evolve_density_adiabatically(potential, rho_combined_offdiag[trig_index], x0, x2, None, Direction.FORWARD, dt / 2.0, RowIndex, ColIndex)
 			return rho_combined_offdiag[trig_index]
 		case _:
 			raise NotImplementedError("Model NOT Implemented!")
 
 
 def evolve(
-	points: list[npt.NDArray[np.double]],
-	densities: list[npt.NDArray[np.cdouble]],
-	mass: npt.NDArray[np.double],
+	potential: pes.Potential,
+	points: list[torch.Tensor],
+	densities: list[torch.Tensor],
+	mass: torch.Tensor,
 	dt: float,
-	predictor: pes.Predictor
+	predictor: constant.Predictor
 ) -> None:
 	r"""To evolve the given points and density matrices
 
 	Parameters
 	----------
-	points : list[npt.NDArray[np.double]], len of NUM_TRIG, each of shape (NUM_PTS, PHASEDIM)
+	potential : pes.Potential
+		Quantities derived from potential
+	points : list[torch.Tensor], len of NUM_TRIG, each of shape (NUM_PTS, PHASEDIM)
 		Phase space coordinates of selected points for each density matrix element
-	densities : list[npt.NDArray[np.cdouble]], len of NUM_TRIG, each of shape (NUM_PTS,)
+	densities : list[torch.Tensor], len of NUM_TRIG, each of shape (NUM_PTS,)
 		Density matrix element of the points
-	mass : npt.NDArray[np.double], shape of (DIM,)
+	mass : torch.Tensor, shape of (DIM,)
 		Mass of classical degree of freedom
 	dt : float
 		Time interval
-	predictor : pes.Predictor
+	predictor : model.Predictor
 		It predicts the density matrix element based on given coordinates and element index
 	"""
 	# lower triangular loop, evolve coordinates and density
 	evolve.drc = Direction.FORWARD
-	for iPES, jPES, iTrig in zip(pes.tril_row_indices, pes.tril_col_indices, np.arange(pes.NUM_TRIG)):
+	for iPES, jPES, iTrig in zip(potential.config.TRIL_ROW_INDICES, potential.config.TRIL_COL_INDICES, potential.config.TRIG_RANGE):
 		# get x and p, and 2 semi adiabatic steps
-		x0: npt.NDArray[np.double] = points[iTrig][:, :pes.DIM] # M * D
-		p0: npt.NDArray[np.double] = points[iTrig][:, pes.DIM:] # M * D
-		x2: npt.NDArray[np.double] # M * D
-		p1: npt.NDArray[np.double] # M * D
-		x2, p1 = evolve_coordinates_adiabatically(x0, p0, mass, dt / 2.0, evolve.drc, iPES, jPES)
-		x4: npt.NDArray[np.double] # M * D
-		p2: npt.NDArray[np.double] # M * D
-		x4, p2 = evolve_coordinates_adiabatically(x2, p1, mass, dt / 2.0, evolve.drc, iPES, jPES)
-		densities[iTrig][...] = evolve_density_non_adiabatically(densities[iTrig], x4, p2, x2, p1, mass, dt, predictor, iPES, jPES)
+		x0: torch.Tensor = points[iTrig][:, :potential.config.DIM] # M * D
+		p0: torch.Tensor = points[iTrig][:, potential.config.DIM:] # M * D
+		x2: torch.Tensor # M * D
+		p1: torch.Tensor # M * D
+		x2, p1 = evolve_coordinates_adiabatically(potential, x0, p0, mass, dt / 2.0, evolve.drc, iPES, jPES)
+		x4: torch.Tensor # M * D
+		p2: torch.Tensor # M * D
+		x4, p2 = evolve_coordinates_adiabatically(potential, x2, p1, mass, dt / 2.0, evolve.drc, iPES, jPES)
+		densities[iTrig][...] = evolve_density_non_adiabatically(potential, densities[iTrig], x4, p2, x2, p1, mass, dt, predictor, iPES, jPES)
 		# finally set up the point coordinates and density
-		points[iTrig][:, :pes.DIM] = x4
-		points[iTrig][:, pes.DIM:] = p2
+		points[iTrig][:, :potential.config.DIM] = x4
+		points[iTrig][:, potential.config.DIM:] = p2

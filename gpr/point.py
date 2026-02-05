@@ -277,7 +277,8 @@ class Points:
 		model: pes.Potential,
 		mass: torch.Tensor,
 		dt: float,
-		predictor: constant.Predictor
+		predictor: constant.Predictor,
+		variance: constant.Predictor
 	) -> None:
 		r"""Non-adiabatic dynamics with surface hopping
 
@@ -291,8 +292,8 @@ class Points:
 			Time interval
 		predictor : pes.Predictor
 			It predicts the density matrix element based on given coordinates and element index
-		purity : torch.Tensor, shape of (NUM_PES, NUM_PES)
-			The purity of each element, indicating the transition allowance to other elements
+		variance : pes.Predictor
+			It predicts the variance of density matrix element based on given coordinates and element index
 		"""
 		# evolve coordinates and hopping
 		x0: typing.Final[torch.Tensor] = self.__coordinate[:, :self.__config.DIM] # N * D, slice of centers
@@ -351,6 +352,7 @@ class Points:
 					mass,
 					dt,
 					predictor,
+					variance,
 					iPES,
 					jPES
 				)

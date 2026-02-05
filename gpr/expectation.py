@@ -302,7 +302,8 @@ class EvolvingPointsMCAverage(MonteCarloAverage):
 		model: pes.Potential,
 		mass: torch.Tensor,
 		dt: float,
-		predictor: constant.Predictor
+		predictor: constant.Predictor,
+		variance: constant.Predictor
 	) -> None:
 		r"""To evolve the coordinates, and density if applicable
 
@@ -316,6 +317,8 @@ class EvolvingPointsMCAverage(MonteCarloAverage):
 			Time interval
 		predictor : constant.Predictor
 			It predicts the density matrix element based on given coordinates and element index
+		variance : constant.Predictor
+			It predicts the variance of density matrix element based on given coordinates and element index
 		"""
 		if self.__evolve_coordinates_only:
 			for pts, row_idx, col_idx in zip(self.point_set, self.config.TRIL_ROW_INDICES, self.config.TRIL_COL_INDICES):
@@ -330,7 +333,7 @@ class EvolvingPointsMCAverage(MonteCarloAverage):
 					col_idx
 				)
 		else:
-			evolve.evolve(model, [ps for ps in self.point_set], [den for den in self.density], mass, dt, predictor)
+			evolve.evolve(model, [ps for ps in self.point_set], [den for den in self.density], mass, dt, predictor, variance)
 
 	def update_density(self, predictor: constant.Predictor) -> None:
 		r"""To update the density using the predictor if the density is not evolved

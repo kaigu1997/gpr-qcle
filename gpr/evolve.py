@@ -7,6 +7,7 @@ import typing
 
 import torch
 
+import clustering
 import constant
 import pes
 
@@ -173,6 +174,8 @@ class evolve_density_non_adiabatically:
 		Time interval
 	predictor : constant.Predictor
 		The function that gives the density matrix element at corresponding phase points
+	variance : constant.Predictor
+		The function that gives the variance of density matrix element at corresponding phase points
 	RowIndex : int
 		Index of row of the element in density matrix
 	ColIndex : int
@@ -191,6 +194,31 @@ class evolve_density_non_adiabatically:
 	drc: typing.Final = Direction.BACKWARD
 	offdiagonal_branches: typing.Final = torch.tensor([-1, 0, 1], dtype=torch.int)
 	offdiagonal_zero_branch_index: typing.Final = int(torch.argwhere(offdiagonal_branches == 0)[0, 0].item())
+	knn: typing.Final[int] = 10
+
+	@classmethod
+	def __cutoff(cls, pred: torch.Tensor, adia: torch.Tensor, pts: torch.Tensor) -> torch.Tensor:
+		r"""To cutoff the value based on variance
+
+		Parameters
+		----------
+		value : torch.Tensor, shape of (...)
+			The value from prediction
+		adia : torch.Tensor, shape of (...)
+			The adiabatic value
+		pts : torch.Tensor, shape of (..., PHASEDIM)
+			The coordinates of the points
+
+		Returns
+		-------
+		torch.Tensor, shape of (...)
+			The cutoff value
+		"""
+		p: int = 4
+		knn_distances: torch.Tensor = clustering.knn(pts, cls.knn).distances.sum(-1) / cls.knn # M
+		print(knn_distances.min().item(), knn_distances.median().item(), knn_distances.max().item(), (knn_distances.median() ** p / (knn_distances.min() ** p + knn_distances.median() ** p)).item(), (knn_distances.median() ** p / (knn_distances.max() ** p + knn_distances.median() ** p)).item())
+		return adia + (pred - adia) * (knn_distances.median() ** p / (knn_distances ** p + knn_distances.median() ** p))
+
 	def __new__(
 		cls,
 		model: pes.Potential,
@@ -279,7 +307,11 @@ class evolve_density_non_adiabatically:
 		# another adiabatic step, (x2, p1) -> (x0, p0)
 		trig_index: typing.Final[int] = model.config.FLATTEN_TRIL_INDEX[RowIndex * model.config.NUM_PES + ColIndex]
 		evolve_density_adiabatically(model, rho_combined_offdiag[trig_index], x0, x2, None, Direction.FORWARD, dt / 2.0, RowIndex, ColIndex)
-		return rho_combined_offdiag[trig_index]
+		result: typing.Final[torch.Tensor] = rho_combined_offdiag[trig_index]
+		den_adia: torch.Tensor = density.clone()
+		evolve_density_adiabatically(model, den_adia, x0, x2, x4[model.config.FLATTEN_TRIL_INDEX[RowIndex * model.config.NUM_PES + ColIndex], evolve_density_non_adiabatically.offdiagonal_zero_branch_index], Direction.FORWARD, dt, RowIndex, ColIndex)
+		# var: typing.Final[torch.Tensor] = variance(torch.cat((x0, p0), -1), RowIndex * model.config.NUM_PES + ColIndex)
+		return evolve_density_non_adiabatically.__cutoff(result, den_adia, torch.cat((x0, p0), -1))
 
 
 def evolve(
@@ -288,7 +320,8 @@ def evolve(
 	densities: list[torch.Tensor],
 	mass: torch.Tensor,
 	dt: float,
-	predictor: constant.Predictor
+	predictor: constant.Predictor,
+	variance: constant.Predictor
 ) -> None:
 	r"""To evolve the given points and density matrices
 
@@ -306,6 +339,8 @@ def evolve(
 		Time interval
 	predictor : model.Predictor
 		It predicts the density matrix element based on given coordinates and element index
+	variance : model.Predictor
+		It predicts the variance of density matrix element based on given coordinates and element index
 	"""
 	# lower triangular loop, evolve coordinates and density
 	evolve.drc = Direction.FORWARD
@@ -319,7 +354,7 @@ def evolve(
 		x4: torch.Tensor # M * D
 		p2: torch.Tensor # M * D
 		x4, p2 = evolve_coordinates_adiabatically(model, x2, p1, mass, dt / 2.0, evolve.drc, iPES, jPES)
-		densities[iTrig][...] = evolve_density_non_adiabatically(model, densities[iTrig], x4, p2, x2, p1, mass, dt, predictor, iPES, jPES)
+		densities[iTrig][...] = evolve_density_non_adiabatically(model, densities[iTrig], x4, p2, x2, p1, mass, dt, predictor, variance, iPES, jPES)
 		# finally set up the point coordinates and density
 		points[iTrig][:, :model.config.DIM] = x4
 		points[iTrig][:, model.config.DIM:] = p2

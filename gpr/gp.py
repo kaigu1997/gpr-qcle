@@ -251,7 +251,7 @@ class SinglePredictor:
 	FTOL: typing.Final = 2.2204460492503131e-09
 	GTOL: typing.Final = 1e-5
 	NOISE: typing.Final = float(gpytorch.settings.min_fixed_noise.value(torch.double) or 1e-8)
-	__slots__: typing.Final[tuple] = ("__kernel", "__x_all", "__y_all", "__scale", "__model", "__model_param", "__k_inv_y", "__weights_updated", "__optimizer")
+	__slots__: typing.Final[tuple] = ("__kernel", "__x_all", "__y_all", "__scale", "__model", "__model_param", "__k_inv_y", "__kmm_inv", "__weights_updated", "__kernel_updated", "__optimizer")
 	__kernel: typing.Final[gpytorch.kernels.Kernel]
 	__x_all: torch.Tensor
 	__y_all: torch.Tensor
@@ -259,7 +259,9 @@ class SinglePredictor:
 	__model: typing.Final[GP]
 	__model_param: dict[str, torch.Tensor]
 	__k_inv_y: torch.Tensor
+	__kmm_inv: torch.Tensor
 	__weights_updated: bool
+	__kernel_updated: bool
 	__optimizer: __GradientDescend
 
 	def __init__(self, PHASEDIM: int, kernel_initial_value: torch.Tensor | None):
@@ -271,7 +273,9 @@ class SinglePredictor:
 		self.__model = GP(torch.zeros((2, PHASEDIM)), torch.zeros((2,)), likelihood, self.__kernel)
 		self.__model_param: dict[str, torch.Tensor] = copy.deepcopy(self.__model.state_dict())
 		self.__k_inv_y = torch.Tensor()
+		self.__kmm_inv = torch.Tensor()
 		self.__weights_updated = False
+		self.__kernel_updated = False
 		self.__optimizer = SinglePredictor.__GradientDescend(self.__model.parameters(), lr=1.0)
 
 	@property
@@ -340,6 +344,46 @@ class SinglePredictor:
 			Corresponding validation/test targets based on noise-free SR/PP mean.
 		"""
 		return (self.__model.cov(x_test, self.get_training_features()) @ self.k_inv_y).to_dense().detach()
+	
+	def variance(self, x_test: torch.Tensor) -> torch.Tensor:
+		r"""To get the variance of the prediction at test points
+
+		Parameters
+		----------
+		x_test : torch.Tensor, shape of (N, PHASEDIM)
+			Validation/Test inputs
+
+		Returns
+		-------
+		torch.Tensor, shape of (N,)
+			Variance of the prediction at test points
+		"""
+		if not self.__weights_updated:
+			self.__update_weights()
+		if not self.__kernel_updated:
+			# inverse of kmm by ldl
+			num_feature: int = self.get_training_features().shape[0]
+			ld: torch.Tensor
+			pivot: torch.Tensor
+			ld, pivot, _ = torch.linalg.ldl_factor_ex(self.model.cov(self.get_training_features()).to_dense() + __class__.NOISE * torch.eye(num_feature))
+			self.__kmm_inv = torch.linalg.ldl_solve(ld.detach(), pivot.detach(), torch.eye(num_feature)).detach()
+			self.__kernel_updated = True
+		kxm: typing.Final[torch.Tensor] = self.model.cov(x_test, self.get_training_features()).to_dense().detach()
+		var: typing.Final[torch.Tensor] = self.model.cov(x_test, diag=True).to_dense().detach() - torch.einsum("ij,jk,ik->i", kxm, self.__kmm_inv, kxm).detach() # diagonal only
+		sigma_f2: typing.Final[float] = (self.k_inv_y.reshape(1, -1) @ self.model.cov(self.get_training_features()) @ self.k_inv_y.reshape(-1, 1)).to_dense().item() / self.k_inv_y.numel()
+		nans: typing.Final[torch.Tensor] = torch.isnan(var)
+		if torch.isnan(var).any().item():
+			print(
+				f"{"K^{-1}y CONTAINS nan\n" if torch.isnan(self.k_inv_y).any().item() else ""}Sigma_f2 = {sigma_f2}",
+				plot.format_array(var[nans], "Variance"),
+				plot.format_array(torch.abs(var[nans]), "|Variance|"),
+				sep="\n"
+			)
+			exit(0)
+		if math.isnan(sigma_f2):
+			print("Sigma_f2 is nan")
+			exit(0)
+		return sigma_f2 * var
 
 	def error(self, use_weight: bool = True) -> torch.Tensor:
 		r"""Error function of subset of regressor (SR) / projected process (PP)
@@ -382,6 +426,7 @@ class SinglePredictor:
 		self.__scale = scale
 		self.__model.set_train_data(self.__x_all[:num_points].detach(), self.__y_all[:num_points].detach(), False)
 		self.__weights_updated = False
+		self.__kernel_updated = False
 
 	def train(self, print_log: bool = DEBUG_MODE) -> None:
 		r"""To train the parameters
@@ -447,6 +492,7 @@ class SinglePredictor:
 			print_model(model, print_grad)
 
 		self.__weights_updated = False
+		self.__kernel_updated = False
 		assert isinstance(self.__model.train_targets, torch.Tensor)
 		# train model
 		self.__model.likelihood = gpytorch.likelihoods.FixedNoiseGaussianLikelihood(torch.full((self.get_training_features().shape[0],), SinglePredictor.NOISE))
@@ -706,6 +752,28 @@ class GPRPredictors:
 			ElementIndex // self.__config.NUM_PES,
 			ElementIndex % self.__config.NUM_PES,
 			lambda pred, x_test: (pred.predict(x_test),) if GPRPredictors.__check_predictor(pred) else (torch.zeros(x_test.shape[0]),)
+		)[0]
+
+	def variance(self, x_input: torch.Tensor, ElementIndex: int) -> torch.Tensor:
+		r"""To get the variance of the prediction at test points
+
+		Parameters
+		----------
+		x_input : torch.Tensor, shape of (..., PHASEDIM)
+			Test inputs
+		ElementIndex : int
+			Index of the element
+
+		Returns
+		-------
+		torch.Tensor, shape of (...)
+			Variance of the prediction at test points
+		"""
+		return self.__combine_to_complex(
+			x_input,
+			ElementIndex // self.__config.NUM_PES,
+			ElementIndex % self.__config.NUM_PES,
+			lambda pred, x_test: (pred.variance(x_test),) if GPRPredictors.__check_predictor(pred) else (torch.zeros(x_test.shape[0]),)
 		)[0]
 
 	def get_marginal(

@@ -371,8 +371,8 @@ class Main:
 		"""
 		# evolve
 		for _ in range(self.__quantity.output_ticks):
-			self.__pts.evolve(self.__potential, self.__quantity.mass, self.__quantity.dt, self.__predictors.predict)
-			self.__epmca.evolve(self.__potential, self.__quantity.mass, self.__quantity.dt, self.__predictors.predict)
+			self.__pts.evolve(self.__potential, self.__quantity.mass, self.__quantity.dt, self.__predictors.predict, self.__predictors.variance)
+			self.__epmca.evolve(self.__potential, self.__quantity.mass, self.__quantity.dt, self.__predictors.predict, self.__predictors.variance)
 			self.__scale = self.__pts.rescale_factor
 			self.__predictors.update(self.__pts.center, self.__pts.density, self.__pts.num_center, self.__scale)
 			self.__print_parameter_scale_loss()

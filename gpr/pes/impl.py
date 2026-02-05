@@ -2,7 +2,6 @@ r"""pes.impl
 ============
 This is the implementaion of the diabatic potential
 """
-import collections.abc
 import math
 import typing
 
@@ -14,6 +13,16 @@ from . import models
 
 torch.set_default_dtype(constant.DTYPE)
 torch.set_default_device(constant.DEVICE)
+
+
+@typing.final
+class PotentialQuantity(typing.NamedTuple):
+	diabatic_potential: torch.Tensor | None
+	diabatic_to_adiabatic: torch.Tensor | None
+	adiabatic_potential: torch.Tensor | None
+	coupling: torch.Tensor | None
+	second_order_coupling: torch.Tensor | None
+	force: torch.Tensor | None
 
 
 @typing.final
@@ -44,7 +53,6 @@ class Potential:
 	second_order_coupling_on_all_grids()
 		To get the second order non-adiabatic coupling :math:`<\psi_i|\frac{\partial^2}{\partial R_d^2}|\psi_j>\forall d` at all coordinate grids
 	"""
-	# comment for layout conflict, may uncomment for static check
 	__slots__: typing.ClassVar[tuple] = ("__model", "__config")
 	__model: typing.Final[type[models.ModelBase]]
 	__config: typing.Final[models.ModelConfig]
@@ -69,37 +77,69 @@ class Potential:
 		"""
 		return self.__config
 
-	def __C_and_E(
-		self,
-		V: torch.Tensor,
-		*,
-		diabatic_to_adiabatic: bool,
-		adiabatic_potential: bool
-	) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-		r"""To get the the basis transformation matrices and/or the adiabatic potential, if needed
+	def __need_manual(self, method: str, need: bool = True) -> bool:
+		r"""To decide whether need to calculate the quantity manually
+
+		Parameters
+		----------
+		method : str
+			Name of the method
+		need : bool, optional
+			Whether the quantity need to be calculated or not, by default `True`
+
+		Returns
+		-------
+		bool
+			Whether need to calculate the quantity manually
+		"""
+		def is_implemented_since[T](derived_cls: type[T], method_name: str, base_cls: type[T]) -> bool:
+			r"""To check if `derived_cls` or any of its ancestors (up to but not including `base_cls`) has implemented method_name.
+
+			Parameters
+			----------
+			derived_cls : type[object]
+				Derived classes, check if the method is implemented in it.
+			method_name : str
+				The name of the method, to see if it is implemented
+			base_cls : type[object]
+				The base class. `method_name` raises `NotImplementedError` there, in general.
+
+			Returns
+			-------
+			bool
+				True if the method has been overridden somewhere between `base_cls` and `derived_cls` in the inheritance chain
+			"""
+			# Get the method from base_cls
+			base_descriptor = base_cls.__dict__.get(method_name)
+			if base_descriptor is None:
+				return False
+			# Walk through MRO from cls up to (but not including) base_cls
+			for mro_cls in derived_cls.__mro__:
+				if mro_cls == base_cls:
+					break
+				current_descriptor = mro_cls.__dict__.get(method_name)
+				if current_descriptor is not None and current_descriptor is not base_descriptor:
+					return True
+			return False
+
+		return need and not is_implemented_since(self.__model, method, models.ModelBase)
+
+	def __C(self, V: torch.Tensor) -> torch.Tensor:
+		r"""To get the basis transformation matrices
 
 		Parameters
 		----------
 		V : torch.Tensor
 			Diabatic potential
-		diabatic_to_adiabatic : bool
-			To calculate diabatic to adiabatic basis transformation matrix
-		adiabatic_potential : bool
-			To calculate adiabatic potential
 
 		Returns
 		-------
-		tuple[torch.Tensor | None, torch.Tensor | None]
-			Basis transformation matrices, adiabatic potential
+		torch.Tensor
+			Basis transformation matrices
 		"""
-		C: torch.Tensor | None = None
-		E: torch.Tensor | None = None
 		match self.__config.NUM_PES:
 			case 1:
-				if diabatic_to_adiabatic:
-					C = torch.eye(self.__config.NUM_PES)
-				if adiabatic_potential:
-					E = V
+				return torch.eye(self.__config.NUM_PES)
 			case 2:
 				V00: typing.Final[torch.Tensor] = V[..., 0, 0] # ...
 				V01: typing.Final[torch.Tensor] = V[..., 0, 1] # ...
@@ -107,17 +147,68 @@ class Potential:
 				diff: typing.Final[torch.Tensor] = V00 - V11 # ...
 				V01_double: typing.Final[torch.Tensor] = 2.0 * V01 # ...
 				discriminant: typing.Final[torch.Tensor] = torch.sqrt(torch.square(diff) + torch.square(V01_double)) # ...
-				if diabatic_to_adiabatic:
-					discriminant_absdiff: typing.Final[torch.Tensor] = discriminant + torch.abs(diff) # ...
-					C_unnormalized: typing.Final[torch.Tensor] = torch.where(diff[..., torch.newaxis] < 0, torch.stack([-discriminant_absdiff, V01_double, V01_double, discriminant_absdiff], -1), torch.stack([-V01_double, discriminant_absdiff, discriminant_absdiff, V01_double], -1)).reshape_as(V)
-					C = C_unnormalized / torch.linalg.norm(C_unnormalized, axis=-2, keepdims=True)
-				if adiabatic_potential:
-					E = ((V00 + V11)[..., torch.newaxis] + torch.tensor([-1.0, 1.0]) * discriminant[..., torch.newaxis]) / 2.0
+				discriminant_absdiff: typing.Final[torch.Tensor] = discriminant + torch.abs(diff) # ...
+				C_unnormalized: typing.Final[torch.Tensor] = torch.where(diff[..., torch.newaxis] < 0, torch.stack([-discriminant_absdiff, V01_double, V01_double, discriminant_absdiff], -1), torch.stack([-V01_double, discriminant_absdiff, discriminant_absdiff, V01_double], -1)).reshape_as(V)
+				return C_unnormalized / torch.linalg.norm(C_unnormalized, axis=-2, keepdims=True)
 			case _:
-				if diabatic_to_adiabatic:
-					C = torch.linalg.eigh(V.cpu()).eigenvectors.to(torch.get_default_device())
-				if adiabatic_potential:
-					E = torch.linalg.eigvalsh(V.cpu()).to(torch.get_default_device()) # pylint: disable=not-callable
+				return torch.linalg.eigh(V.cpu()).eigenvectors.to(torch.get_default_device())
+
+	def __E(self, V: torch.Tensor) -> torch.Tensor:
+		r"""To get the adiabatic potential, if needed
+
+		Parameters
+		----------
+		V : torch.Tensor
+			Diabatic potential
+
+		Returns
+		-------
+		torch.Tensor
+			Adiabatic potential
+		"""
+		match self.__config.NUM_PES:
+			case 1:
+				return V
+			case 2:
+				V00: typing.Final[torch.Tensor] = V[..., 0, 0] # ...
+				V01: typing.Final[torch.Tensor] = V[..., 0, 1] # ...
+				V11: typing.Final[torch.Tensor] = V[..., 1, 1] # ...
+				diff: typing.Final[torch.Tensor] = V00 - V11 # ...
+				V01_double: typing.Final[torch.Tensor] = 2.0 * V01 # ...
+				discriminant: typing.Final[torch.Tensor] = torch.sqrt(torch.square(diff) + torch.square(V01_double)) # ...
+				return ((V00 + V11)[..., torch.newaxis] + torch.tensor([-1.0, 1.0]) * discriminant[..., torch.newaxis]) / 2.0
+			case _:
+				return torch.linalg.eigvalsh(V.cpu()).to(torch.get_default_device()) # pylint: disable=not-callable
+
+	def __C_and_E(self, V: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+		r"""To get the the basis transformation matrices and the adiabatic potential, if needed
+
+		Parameters
+		----------
+		V : torch.Tensor
+			Diabatic potential
+
+		Returns
+		-------
+		tuple[torch.Tensor, torch.Tensor]
+			Basis transformation matrices, adiabatic potential
+		"""
+		match self.__config.NUM_PES:
+			case 1:
+				return torch.eye(self.__config.NUM_PES), V
+			case 2:
+				V00: typing.Final[torch.Tensor] = V[..., 0, 0] # ...
+				V01: typing.Final[torch.Tensor] = V[..., 0, 1] # ...
+				V11: typing.Final[torch.Tensor] = V[..., 1, 1] # ...
+				diff: typing.Final[torch.Tensor] = V00 - V11 # ...
+				V01_double: typing.Final[torch.Tensor] = 2.0 * V01 # ...
+				discriminant: typing.Final[torch.Tensor] = torch.sqrt(torch.square(diff) + torch.square(V01_double)) # ...
+				discriminant_absdiff: typing.Final[torch.Tensor] = discriminant + torch.abs(diff) # ...
+				C_unnormalized: typing.Final[torch.Tensor] = torch.where(diff[..., torch.newaxis] < 0, torch.stack([-discriminant_absdiff, V01_double, V01_double, discriminant_absdiff], -1), torch.stack([-V01_double, discriminant_absdiff, discriminant_absdiff, V01_double], -1)).reshape_as(V)
+				return C_unnormalized / torch.linalg.norm(C_unnormalized, axis=-2, keepdims=True), ((V00 + V11)[..., torch.newaxis] + torch.tensor([-1.0, 1.0]) * discriminant[..., torch.newaxis]) / 2.0
+			case _:
+				result: typing.Final = torch.linalg.eigh(V) # pylint: disable=not-callable
+				return result.eigenvectors.to(torch.get_default_device()), result.eigenvalues.to(torch.get_default_device())
 		return C, E
 
 	def __D(
@@ -236,6 +327,179 @@ class Potential:
 		"""
 		return D @ D + torch.autograd.grad(D.reshape(tensor_to_supervector_shape), x, torch.eye(self.__config.NUM_ELM).reshape(tensor_eye_broadcast_shape).repeat(tensor_eye_repeat_shape), True, True, True, True, True, True)[0].moveaxis(0, -1).reshape(deriv_result_shape)
 
+	def adiabatic_potential(self, x: torch.Tensor) -> torch.Tensor:
+		r"""To calculate adiabatic potential
+
+		Parameters
+		----------
+		x : torch.Tensor, shape of (..., DIM)
+			All cooridnates
+
+		Returns
+		-------
+		torch.Tensor, shape of (..., NUM_PES)
+			adiabatic potential
+		"""
+		if self.__need_manual("adiabatic_potential"):
+			return self.__E(self.__model(x)).detach()
+		else:
+			return self.__model.adiabatic_potential(x).detach()
+
+	def coupling(self, x: torch.Tensor) -> torch.Tensor:
+		r"""To calculate the first order nonadiabatic coupling under adiabatic basis
+
+		Parameters
+		----------
+		x : torch.Tensor, shape of (..., DIM)
+			All cooridnates
+
+		Returns
+		-------
+		torch.Tensor, shape of (..., DIM, NUM_PES, NUM_PES)
+			Nonadiabatic coupling
+		"""
+		if self.__need_manual("coupling"):
+			x = x.detach().requires_grad_()
+			return self.__D(
+				x,
+				self.__C(self.__model(x)),
+				x.shape[:-1] + (self.__config.NUM_ELM,),
+				(self.__config.NUM_ELM,) + (1,) * (x.ndim - 1) + (self.__config.NUM_ELM,),
+				(1,) + x.shape[:-1] + (1,),
+				x.shape + (self.__config.NUM_PES, self.__config.NUM_PES)
+			).detach()
+		else:
+			return self.__model.coupling(x).detach()
+
+	def adiabatic_potential_and_coupling(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+		r"""To calculate adiabatic potential and non-adiabatic coupling under adiabatic basis
+
+		Parameters
+		----------
+		x : torch.Tensor, shape of (..., DIM)
+			All cooridnates
+
+		Returns
+		-------
+		tuple[torch.Tensor, torch.Tensor]
+			Adiabatic potential and coupling
+		"""
+		need_manual_D: typing.Final[bool] = self.__need_manual("coupling")
+		need_manual_E: typing.Final[bool] = self.__need_manual("adiabatic_potential")
+		if not need_manual_D and not need_manual_E:
+			return self.__model.adiabatic_potential(x).detach(), self.__model.coupling(x).detach()
+		else:
+			need_C: typing.Final[bool] = need_manual_D
+			need_manual_C: typing.Final[bool] = self.__need_manual("diabatic_to_adiabatic", need_C)
+			x = x.detach().requires_grad_()
+			C: torch.Tensor | None = None
+			E: torch.Tensor
+			if torch.cuda.is_available():
+				V: torch.Tensor = self.__model(x)
+				E = self.__E(V) if need_manual_E else self.__model.adiabatic_potential(x)
+				if need_C:
+					C = self.__C(V) if need_manual_C else self.__model.diabatic_to_adiabatic(x)
+			else:
+				if need_C and not need_manual_C:
+					C = self.__model.diabatic_to_adiabatic(x)
+				if not need_manual_E:
+					E = self.__model.adiabatic_potential(x)
+				if need_manual_C or need_manual_E: # need V
+					V: torch.Tensor = self.__model(x)
+					if not need_manual_C:
+						E = self.__E(V)
+					elif not need_manual_E:
+						C = self.__C(V)
+					else: # need_manual_C and need_manual_E
+						C, E = self.__C_and_E(V)
+			D: typing.Final[torch.Tensor] = self.__D(
+				x,
+				C,
+				x.shape[:-1] + (self.__config.NUM_ELM,),
+				(self.__config.NUM_ELM,) + (1,) * (x.ndim - 1) + (self.__config.NUM_ELM,),
+				(1,) + x.shape[:-1] + (1,),
+				x.shape + (self.__config.NUM_PES, self.__config.NUM_PES)
+			) if C is not None else self.__model.coupling(x)
+			return E.detach(), D.detach()
+
+	def force(self, x: torch.Tensor) -> torch.Tensor:
+		r"""To calculate the adiabatic force
+
+		Parameters
+		----------
+		x : torch.Tensor, shape of (..., DIM)
+			All cooridnates
+
+		Returns
+		-------
+		torch.Tensor, shape of (..., DIM, NUM_PES, NUM_PES)
+			Adiabatic force
+		"""
+		if self.__need_manual("adiabatic_force"):
+			x = x.detach().requires_grad_()
+			V: typing.Final[torch.Tensor] = self.__model(x)
+			need_manual_E: typing.Final[bool] = self.__need_manual("adiabatic_potential")
+			# who need C: D, F
+			need_manual_C: typing.Final[bool] = self.__need_manual("diabatic_to_adiabatic")
+			if need_manual_C and need_manual_E:
+				C, E = self.__C_and_E(V)
+			elif need_manual_C: # and not need_manual_E
+				C = self.__C(V)
+				E = self.__model.adiabatic_potential(x)
+			elif need_manual_E: # and not need_manual_C
+				C = self.__model.diabatic_to_adiabatic(x)
+				E = self.__E(V)
+			else: # not need_manual_C and not need_manual_E
+				C = self.__model.diabatic_to_adiabatic(x)
+				E = self.__model.adiabatic_potential(x)
+			return self.__F(
+				x,
+				C,
+				E,
+				V,
+				(self.__config.NUM_PES,) + (1,) * (x.ndim - 1) + (self.__config.NUM_PES,),
+				(1,) + x.shape[:-1] + (1,),
+				x.shape[:-1] + (self.__config.NUM_ELM,),
+				(self.__config.NUM_ELM,) + (1,) * (x.ndim - 1) + (self.__config.NUM_ELM,),
+				(1,) + x.shape[:-1] + (1,),
+				x.shape + (self.__config.NUM_PES, self.__config.NUM_PES)
+			).detach()
+		else:
+			return self.__model.adiabatic_force(x).detach()
+
+	def coupling_and_second_order_coupling(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+		r"""To calculate the first and second order nonadiabatic coupling under adiabatic basis
+
+		Parameters
+		----------
+		x : torch.Tensor, shape of (..., DIM)
+			All cooridnates
+
+		Returns
+		-------
+		tuple[torch.Tensor, torch.Tensor]
+			The first and second order coupling
+		"""
+		x = x.detach().requires_grad_()
+		C: typing.Final = (self.__C(self.__model(x)) if self.__need_manual("diabatic_to_adiabatic") else self.__model.diabatic_to_adiabatic(x)) if self.__need_manual("coupling") else None
+		D: typing.Final[torch.Tensor] = self.__D(
+			x,
+			C,
+			x.shape[:-1] + (self.__config.NUM_ELM,),
+			(self.__config.NUM_ELM,) + (1,) * (x.ndim - 1) + (self.__config.NUM_ELM,),
+			(1,) + x.shape[:-1] + (1,),
+			x.shape + (self.__config.NUM_PES, self.__config.NUM_PES)
+		) if C is not None else self.__model.coupling(x)
+		return D.detach(), self.__G(
+			x,
+			D,
+			x.shape + (self.__config.NUM_ELM,),
+			(self.__config.NUM_ELM,) + (1,) * x.ndim + (self.__config.NUM_ELM,),
+			(1,) + x.shape + (1,),
+			x.shape + (self.__config.NUM_PES, self.__config.NUM_PES)
+		).detach() if self.__need_manual("second_order_coupling") else self.__model.second_order_coupling(x).detach()
+
+
 	def __call__(
 		self,
 		x: torch.Tensor,
@@ -246,7 +510,7 @@ class Potential:
 		coupling: bool = False,
 		second_order_coupling: bool = False,
 		force: bool = False,
-	) -> dict[str, torch.Tensor]:
+	) -> PotentialQuantity:
 		r"""To get the selected quantities for all inputs
 
 		Returns
@@ -256,7 +520,7 @@ class Potential:
 
 		Parameters
 		----------
-		x : torch.Tensor
+		x : torch.Tensor, shape of (..., DIM)
 			All cooridnates
 		diabatic_potential : bool
 			To calculate diabatic potential
@@ -273,54 +537,23 @@ class Potential:
 
 		Returns
 		-------
-		dict[str, torch.Tensor]
+		PotentialQuantity
 			Keys are the same as the parameters, and the values are the corresponding quantities
 		"""
-		def is_implemented_since[T](derived_cls: type[T], method_name: str, base_cls: type[T]) -> bool:
-			"""Check if `derived_cls` or any of its ancestors (up to but not including `base_cls`) has implemented method_name.
-
-			Parameters
-			----------
-			derived_cls : type[object]
-				Derived classes, check if the method is implemented in it.
-			method_name : str
-				The name of the method, to see if it is implemented
-			base_cls : type[object]
-				The base class. `method_name` raises `NotImplementedError` there, in general.
-
-			Returns
-			-------
-			bool
-				True if the method has been overridden somewhere between `base_cls` and `derived_cls` in the inheritance chain
-			"""
-			# Get the method from base_cls
-			base_descriptor = base_cls.__dict__.get(method_name)
-			if base_descriptor is None:
-				return False
-			# Walk through MRO from cls up to (but not including) base_cls
-			for mro_cls in derived_cls.__mro__:
-				if mro_cls == base_cls:
-					break
-				current_descriptor = mro_cls.__dict__.get(method_name)
-				if current_descriptor is not None and current_descriptor is not base_descriptor:
-					return True
-			return False
 
 		assert any((diabatic_potential, diabatic_to_adiabatic, adiabatic_potential, coupling, second_order_coupling, force))
 		x = x.detach().requires_grad_()
-		result: typing.Final[dict[str, torch.Tensor]] = {}
 		# who need D: G
-		need_manual: typing.Final[collections.abc.Callable[[bool, str], bool]] = lambda need, method: need and not is_implemented_since(self.__model, method, models.ModelBase)
-		need_manual_G: typing.Final[bool] = need_manual(second_order_coupling, "second_order_coupling")
+		need_manual_G: typing.Final[bool] = self.__need_manual("second_order_coupling", second_order_coupling)
 		need_D: typing.Final[bool] = coupling or need_manual_G
-		need_manual_D: typing.Final[bool] = need_manual(need_D, "coupling")
+		need_manual_D: typing.Final[bool] = self.__need_manual("coupling", need_D)
 		# who need adiaV: F
-		need_manual_F: typing.Final[bool] = need_manual(force, "adiabatic_force")
+		need_manual_F: typing.Final[bool] = self.__need_manual("adiabatic_force", force)
 		need_E: typing.Final[bool] = adiabatic_potential or need_manual_F
-		need_manual_E: typing.Final[bool] = need_manual(need_E, "adiabatic_potential")
+		need_manual_E: typing.Final[bool] = self.__need_manual("adiabatic_potential", need_E)
 		# who need C: D, F
 		need_C: typing.Final[bool] = diabatic_to_adiabatic or need_manual_D or need_manual_F
-		need_manual_C: typing.Final[bool] = need_manual(need_C, "diabatic_to_adiabatic")
+		need_manual_C: typing.Final[bool] = self.__need_manual("diabatic_to_adiabatic", need_C)
 		# who need V: C, E, F
 		need_V: typing.Final[bool] = diabatic_potential or need_manual_C or need_manual_E or need_manual_F
 		# shapes
@@ -334,9 +567,6 @@ class Potential:
 		tensor_eye_repeat_shape: typing.Final[tuple[int, ...] | None] = (1,) + x.shape + (1,) if need_manual_G else None
 		deriv_result_shape: typing.Final[tuple[int, ...] | None] = x.shape + (self.__config.NUM_PES, self.__config.NUM_PES) if need_manual_D or need_manual_F or need_manual_G else None
 		V: typing.Final[torch.Tensor | None] = self.__model(x) if need_V else None
-		if diabatic_potential:
-			assert V is not None
-			result["diabatic_potential"] = V
 		C: torch.Tensor | None = None
 		E: torch.Tensor | None = None
 		if need_C and not need_manual_C:
@@ -345,17 +575,14 @@ class Potential:
 			E = self.__model.adiabatic_potential(x)
 		if need_manual_C or need_manual_E:
 			assert V is not None
-			C, E = self.__C_and_E(V, diabatic_to_adiabatic=need_manual_C, adiabatic_potential=need_manual_E)
-		if diabatic_to_adiabatic:
-			assert C is not None
-			result["diabatic_to_adiabatic"] = C.detach()
-		if adiabatic_potential:
-			assert E is not None
-			result["adiabatic_potential"] = E.detach()
+			if not need_manual_C:
+				E = self.__E(V)
+			elif not need_manual_E:
+				C = self.__C(V)
+			else: # need_manual_C and need_manual_E
+				C, E = self.__C_and_E(V)
 		D: typing.Final[torch.Tensor | None] = (self.__D(x, C, matrix_to_supervector_shape, matrix_eye_broadcast_shape, matrix_eye_repeat_shape, deriv_result_shape) if need_manual_D else self.__model.coupling(x)) if need_D else None # type: ignore[reportArgumentType]
-		if coupling:
-			assert D is not None
-			result["coupling"] = D.detach()
+		F: torch.Tensor | None = None
 		if force:
 			if need_manual_F:
 				assert C is not None
@@ -367,9 +594,10 @@ class Potential:
 				assert matrix_eye_broadcast_shape is not None
 				assert matrix_eye_repeat_shape is not None
 				assert deriv_result_shape is not None
-				result["force"] = self.__F(x, C, E, V, vector_eye_broadcast_shape, vector_eye_repeat_shape, matrix_to_supervector_shape, matrix_eye_broadcast_shape, matrix_eye_repeat_shape, deriv_result_shape).detach()
+				F = self.__F(x, C, E, V, vector_eye_broadcast_shape, vector_eye_repeat_shape, matrix_to_supervector_shape, matrix_eye_broadcast_shape, matrix_eye_repeat_shape, deriv_result_shape)
 			else:
-				result["force"] = self.__model.adiabatic_force(x).detach()
+				F = self.__model.adiabatic_force(x)
+		G: torch.Tensor | None = None
 		if second_order_coupling:
 			if need_manual_G:
 				assert D is not None
@@ -377,10 +605,17 @@ class Potential:
 				assert tensor_eye_broadcast_shape is not None
 				assert tensor_eye_repeat_shape is not None
 				assert deriv_result_shape is not None
-				result["second_order_coupling"] = self.__G(x, D, tensor_to_supervector_shape, tensor_eye_broadcast_shape, tensor_eye_repeat_shape, deriv_result_shape).detach()
+				G = self.__G(x, D, tensor_to_supervector_shape, tensor_eye_broadcast_shape, tensor_eye_repeat_shape, deriv_result_shape)
 			else:
-				result["second_order_coupling"] = self.__model.second_order_coupling(x).detach()
-		return result
+				G = self.__model.second_order_coupling(x)
+		return PotentialQuantity(
+			diabatic_potential=V.detach() if diabatic_potential and V is not None else None,
+			diabatic_to_adiabatic=C.detach() if diabatic_to_adiabatic and C is not None else None,
+			adiabatic_potential=E.detach() if adiabatic_potential and E is not None else None,
+			coupling=D.detach() if coupling and D is not None else None,
+			second_order_coupling=G.detach() if second_order_coupling and G is not None else None,
+			force=F.detach() if force and F is not None else None
+		)
 
 
 @typing.final
@@ -389,14 +624,16 @@ class InitialDistribution:
 
 	Parameters
 	----------
+	model : Potential
+		Quantities derived from potential
 	r0 : torch.Tensor, shape of (PHASEDIM,)
 		Initial center of each dimension
 	sigma_r0 : torch.Tensor, shape of (PHASEDIM,)
 		Initial standard deviation of each dimension
-	initial_population : torch.Tensor, shape of (NUM_PES,)
-		The population on each surface, whose squared sum is normalized. Default to all on the ground state.
-	initial_phase_factor : torch.Tensor, shape of (NUM_PES,)
-		The phase factor for each surface, in unit of arc.
+	init_ppl_and_phase : torch.Tensor, shape of (NUM_PES,)
+		The population and phase factor on each surface, whose squared sum is normalized. Default to all on the ground state.
+	diabatic : bool, optional
+		Whether to construct in diabatic basis or adiabatic basis, by default `False` (adiabatic basis)
 
 	Methods
 	-------
@@ -417,8 +654,8 @@ class InitialDistribution:
 
 	The off-diagonal elements guarantee the purity of the initial distribution to be 1, i.e., pure state.
 	"""
-	__slots__: tuple = ("__potential", "__r0", "__sigma_r0", "__weight_phase", "__factors", "__order")
-	__potential: typing.Final[Potential]
+	__slots__: tuple = ("__model", "__r0", "__sigma_r0", "__weight_phase", "__factors", "__order")
+	__model: typing.Final[Potential]
 	__r0: typing.Final[torch.Tensor]
 	__sigma_r0: typing.Final[torch.Tensor]
 	__weight_phase: typing.Final[torch.Tensor]
@@ -427,19 +664,19 @@ class InitialDistribution:
 
 	def __init__(
 		self,
-		potential: Potential,
+		model: Potential,
 		r0: torch.Tensor,
 		sigma_r0: torch.Tensor,
 		init_ppl_and_phase: torch.Tensor,
 		*,
 		diabatic: bool = False
 	):
-		self.__potential = potential
+		self.__model = model
 		self.__r0 = r0
 		self.__sigma_r0 = sigma_r0
 		weight_phase: typing.Final[torch.Tensor] = init_ppl_and_phase.conj()[:, torch.newaxis] * init_ppl_and_phase # shape of (NUM_PES, NUM_PES)
 		self.__weight_phase = (weight_phase + weight_phase.T.conj()) / 2.0 # remove numerical error, shape of (NUM_PES, NUM_PES)
-		self.__factors = self.__weight_phase / (2.0 * math.pi) ** potential.config.DIM / self.__sigma_r0.prod() # divide by normalization factor, shape of (NUM_ELM,)
+		self.__factors = self.__weight_phase / (2.0 * math.pi) ** model.config.DIM / self.__sigma_r0.prod() # divide by normalization factor, shape of (NUM_ELM,)
 		if diabatic:
 			self.__order = 0 # direct transform
 		elif torch.any(init_ppl_and_phase == 0).item():
@@ -489,7 +726,7 @@ class InitialDistribution:
 		models.ModelConfig
 			Configuration of the model
 		"""
-		return self.__potential.config
+		return self.__model.config
 
 	def __call__(self, r: torch.Tensor) -> torch.Tensor:
 		r"""To calculate the initial density of the given element at the given phase point
@@ -502,10 +739,10 @@ class InitialDistribution:
 		Returns
 		-------
 		torch.Tensor, shape of (..., NUM_PES, NUM_PES)
-			Density of the given element
+			Density matrices of the given elements
 		"""
-		x: typing.Final[torch.Tensor] = r[..., :self.__potential.config.DIM].detach()
-		p: typing.Final[torch.Tensor] = r[..., self.__potential.config.DIM:].detach()
+		x: typing.Final[torch.Tensor] = r[..., :self.__model.config.DIM].detach()
+		p: typing.Final[torch.Tensor] = r[..., self.__model.config.DIM:].detach()
 		if self.__order > 0:
 			p.requires_grad_()
 			r = torch.cat((x, p), -1)
@@ -520,15 +757,18 @@ class InitialDistribution:
 				is_grads_batched=True,
 				materialize_grads=True
 			)[0][0, ...] # same shape as p
-			potential_quantities: typing.Final[dict[str, torch.Tensor]] = self.__potential(x, coupling=True, second_order_coupling=self.__order > 1)
-			D: typing.Final[torch.Tensor] = potential_quantities["coupling"].to(torch.cdouble)
-			result += constant.HBAR / 2.0 * 1.0j * (dXdP[..., torch.newaxis, torch.newaxis] * (self.__factors @ D + D @ self.__factors)).sum(-3)
-			if self.__order > 1:
-				G: typing.Final[torch.Tensor] = potential_quantities["second_order_coupling"].to(torch.cdouble)
+			D: torch.Tensor
+			if self.__order == 1:
+				D = self.__model.coupling(x).to(torch.cdouble)
+			else:
+				D, G = self.__model.coupling_and_second_order_coupling(x)
+				D = D.to(torch.cdouble)
+				G = G.to(torch.cdouble)
 				result += -constant.HBAR ** 2 / 8.0 * (torch.autograd.grad(
 					dXdP,
 					p,
 					torch.ones_like(dXdP),
 					materialize_grads=True
 				)[0][..., torch.newaxis, torch.newaxis] * (G @ self.__factors + (G @ self.__factors).conj().mT + 2.0 * D @ self.__factors @ D)).sum(-3)
+			result += constant.HBAR / 2.0 * 1.0j * (dXdP[..., torch.newaxis, torch.newaxis] * (self.__factors @ D + D @ self.__factors)).sum(-3)
 		return result.detach()

@@ -36,7 +36,7 @@ def main(arguments: None | collections.abc.Sequence[str] = None) -> None:
 	parser.add_argument("--dx", nargs=config.DIM, default=[0.1] * config.DIM, type=float, help="Grid spacing in configurational space (for positions)")
 	parser.add_argument("--population", "--ppl", nargs=config.NUM_PES, default=[1.0] + [0.0] * (config.NUM_PES - 1), type=float, help="Initial population. The squared sum will be normalized.")
 	parser.add_argument("--phase-factor", nargs=config.NUM_PES, default=[0.0] * config.NUM_PES, type=float, help="Initial phase factor in degree.")
-	parser.add_argument("output-interval", type=float, help="Interval between outputs (in a.u.)")
+	parser.add_argument("output_interval", type=float, help="Interval between outputs (in a.u.)")
 	parser.add_argument("--reoptimization-interval", "--reopt", "-r", default=-1.0, type=float, help="Interval between parameter optimization (in a.u.)")
 	parser.add_argument("--dt", default=0.1, type=float, help="Time step")
 	result: typing.Final[argparse.Namespace] = parser.parse_args(remaining_args)

@@ -21,6 +21,8 @@ import torch
 
 import constant
 
+torch.set_default_dtype(constant.DTYPE)
+
 TITLE_PROPERTY: typing.Final[matplotlib.font_manager.FontProperties] = matplotlib.font_manager.FontProperties(size="xx-large", weight="bold")
 LEGEND_PROPERTY: typing.Final[dict[str, typing.Any]] = {"frameon": False, "prop": matplotlib.font_manager.FontProperties(size="large", weight="semibold")}
 MARKERS: list[str] = ["o", "v", "^", "<", ">", "8", "s", "p", "P", "*", "h", "H", "X", "D", "d"]

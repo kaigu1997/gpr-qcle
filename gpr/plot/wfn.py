@@ -117,7 +117,7 @@ class MarginalProbabilityPlot:
 		IndexError
 			Unexpected index
 		"""
-		assert 0 <= DimIndex < self.__marginal_ranges[-1]
+		assert 0 <= DimIndex <= self.__marginal_ranges[-1]
 		if self.__marginal_ranges[-1] == self.config.PHASEDIM:
 			return self.__axs[DimIndex % 2, DimIndex // 2]
 		else:
@@ -169,7 +169,7 @@ class MarginalProbabilityPlot:
 			)
 			ax.set_xlim(self.__grids_each_dim[iDim][0], self.__grids_each_dim[iDim][-1])
 			ax.set_ybound(0.0, 1.5 * max_y[iDim])
-		__class__.__call__(self, 0, initial_probability, picname)
+		MarginalProbabilityPlot.__call__(self, 0, initial_probability, picname)
 
 	@property
 	def picname(self) -> str:
@@ -195,7 +195,7 @@ class MarginalProbabilityPlot:
 		frame_index : int
 			The index of the frame.
 			Product with `self.__output_interval` gives the duration since beginning
-		probability : list[npt.NDArray[np.double]], len of (1~2) * PHASEDIM, each of shape (N_GRIDS, NUM_PES)
+		probability : list[npt.NDArray[np.double]], len of (1~2) * PHASEDIM, each of shape (NUM_PES, NUM_PES, N_GRIDS)
 			Probability of each dimension
 		picnames : str | None, optional
 			Naming template, should be used with `.format(frame_index)`, by default None (and use the class picname instead)
@@ -211,7 +211,7 @@ class MarginalProbabilityPlot:
 			for iPES in self.config.PES_RANGE:
 				ax.plot(
 					self.__grids_each_dim[iDim],
-					probability[iDim][:, iPES] * rescale_factor[iPES],
+					probability[iDim][iPES, iPES] * rescale_factor[iPES],
 					color=self.__wfn_colors[iPES],
 					lw=utility.LINE_WIDTH,
 					label=utility.pes_name(iPES, self.config.NUM_PES)
@@ -276,8 +276,8 @@ class DensityMatrixMarginalPlotter(MarginalProbabilityPlot):
 		if dm is None:
 			return []
 		else:
-			dm_diag: typing.Final[npt.NDArray[np.double]] = dm[..., config.PES_RANGE, config.PES_RANGE].real.detach().numpy()
-			return [dm_diag.sum(config.SUM_DIMS_FOR_PWTDM_MARGINAL[iDim]) * DensityMatrixMarginalPlotter.__volume_elements_reduce_to_each_dim[iDim] for iDim in config.PHASEDIM_RANGE]
+			dm_diag: typing.Final[npt.NDArray[np.double]] = dm[..., config.PES_RANGE, config.PES_RANGE].real.detach().cpu().numpy()
+			return [dm_diag.sum(config.SUM_DIMS_FOR_PWTDM_MARGINAL[iDim]) * DensityMatrixMarginalPlotter.__volume_elements_reduce_to_each_dim[iDim].item() for iDim in config.PHASEDIM_RANGE]
 
 	def __init__(
 		self,
@@ -287,7 +287,7 @@ class DensityMatrixMarginalPlotter(MarginalProbabilityPlot):
 		initial_gpr_marginal: list[npt.NDArray[np.double]],
 		initial_grid_dm: torch.Tensor | None
 	) -> None:
-		self.__volume_elements_reduce_to_each_dim = (quantity.dx.prod() * quantity.dp.prod()).item() / np.concat([quantity.dx, quantity.dp])
+		self.__volume_elements_reduce_to_each_dim = (quantity.dx.prod() * quantity.dp.prod()).item() / torch.cat([quantity.dx, quantity.dp]).detach().cpu().numpy()
 		self.__picname = utility.get_picname(f"{constant.PWTDM_MARGINAL_FILENAME}_adiabatic", max_outputs)
 		super().__init__(
 			quantity.config,
@@ -295,7 +295,7 @@ class DensityMatrixMarginalPlotter(MarginalProbabilityPlot):
 			draw_rescaled,
 			True,
 			max_outputs,
-			[grids.detach().numpy() for grids in quantity.x_grids_each_dim + quantity.p_grids_each_dim],
+			[grids.detach().cpu().numpy() for grids in quantity.x_grids_each_dim + quantity.p_grids_each_dim],
 			initial_gpr_marginal + DensityMatrixMarginalPlotter.__dm_to_1d_probability(initial_grid_dm, quantity.config),
 			self.__picname,
 		)

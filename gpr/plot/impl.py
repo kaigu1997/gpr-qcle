@@ -43,7 +43,7 @@ def plot_average(config: pes.ModelConfig) -> npt.NDArray[np.double]:
 		+ [("Cov(" + utility.dimension_name(jDim, config.DIM) + ", " + utility.dimension_name(iDim, config.DIM) + ")") if iDim != jDim else ("Var[" + utility.dimension_name(iDim, config.DIM) + "]") for iDim in config.PHASEDIM_RANGE for jDim in range(iDim + 1)]\
 		+ ["Energy", "Purity"] # moments of 0th, 1st and 2nd order, and other (energy and purity)
 	NUM_TITLE: typing.Final[int] = len(plot_titles)
-	fig: matplotlib.figure.Figure = plt.figure(FIGSIZE=(constant.FIGSIZE[0] * NUM_TITLE, constant.FIGSIZE[1] * NUM_AVE_TYPES * 2))
+	fig: matplotlib.figure.Figure = plt.figure(figsize=(constant.FIGSIZE[0] * NUM_TITLE, constant.FIGSIZE[1] * NUM_AVE_TYPES * 2))
 	axs = fig.subplots(NUM_AVE_TYPES * 2, NUM_TITLE) # population, <x> and <p>, energy, purity
 	assert isinstance(axs, np.ndarray)
 	averages_all: typing.Final[npt.NDArray[np.double]] = np.loadtxt(constant.AVERAGE_FILENAME + constant.DATA_EXTENSION)
@@ -96,7 +96,7 @@ def plot_error(config: pes.ModelConfig, ticks: npt.NDArray[np.double]) -> None:
 	ticks : npt.NDArray[np.double]
 		The time since start for each output, in unit of a.u.
 	"""
-	fig: matplotlib.figure.Figure = plt.figure(FIGSIZE=(constant.FIGSIZE[0] * 3, constant.FIGSIZE[1]))
+	fig: matplotlib.figure.Figure = plt.figure(figsize=(constant.FIGSIZE[0] * 3, constant.FIGSIZE[1]))
 	axs = fig.subplots(1, 3)
 	assert isinstance(axs, np.ndarray)
 	error: typing.Final[npt.NDArray[np.double]] = np.loadtxt(constant.ERROR_FILENAME + constant.DATA_EXTENSION).reshape(-1, 3, config.NUM_ELM)
@@ -125,16 +125,16 @@ def plot_parameters(config: pes.ModelConfig, ticks: npt.NDArray[np.double]) -> N
 	ticks : npt.NDArray[np.double]
 		The time since start for each output, in unit of a.u.
 	"""
-	fig: matplotlib.figure.Figure = plt.figure(FIGSIZE=(constant.FIGSIZE[0] * config.PHASEDIM, constant.FIGSIZE[1]))
+	fig: matplotlib.figure.Figure = plt.figure(figsize=(constant.FIGSIZE[0] * config.PHASEDIM, constant.FIGSIZE[1]))
 	axs = fig.subplots(1, config.PHASEDIM)
 	assert isinstance(axs, np.ndarray)
 	parameters: typing.Final[npt.NDArray[np.double]] = np.loadtxt(constant.PARAMETER_FILENAME + constant.DATA_EXTENSION).reshape(-1, config.NUM_ELM, config.PHASEDIM)[:-1]
-	assert ticks.size == parameters.shape[0]
+	assert ticks.size >= parameters.shape[0]
 	parameter_names: typing.Final[list[str]] = [utility.dimension_name(iDim, config.DIM) for iDim in range(config.PHASEDIM)]
 	for iDim in range(config.PHASEDIM):
 		ax: matplotlib.axes.Axes = axs[iDim]
 		for iElement in range(config.NUM_ELM):
-			ax.plot(ticks, parameters[:, iElement, iDim], label=utility.get_RI_label(iElement, config.NUM_PES))
+			ax.plot(ticks[:parameters.shape[0]], parameters[:, iElement, iDim], label=utility.get_RI_label(iElement, config.NUM_PES))
 		ax.set_xlabel("Time / a.u.")
 		ax.set_ylabel("Characteristic Length / a.u.")
 		ax.set_title("Characteristic Length of " + parameter_names[iDim])
@@ -160,7 +160,7 @@ def plot_loss_and_rescale_factors(config: pes.ModelConfig, ticks: npt.NDArray[np
 	"""
 	loss_scale_titles: typing.Final[list[str]] = ["Loss on Sample Points", "Rescale Factor"]
 	loss_scale_ylabels: typing.Final[list[str]] = ["Loss", "Rescale Factor"]
-	fig: matplotlib.figure.Figure = plt.figure(FIGSIZE=(constant.FIGSIZE[0] * 2, constant.FIGSIZE[1]))
+	fig: matplotlib.figure.Figure = plt.figure(figsize=(constant.FIGSIZE[0] * 2, constant.FIGSIZE[1]))
 	axs = fig.subplots(1, 2)
 	assert isinstance(axs, np.ndarray)
 	loss_scale: typing.Final[npt.NDArray[np.double]] = np.concatenate(
@@ -170,11 +170,11 @@ def plot_loss_and_rescale_factors(config: pes.ModelConfig, ticks: npt.NDArray[np
 		),
 		-1
 	)[:-1]
-	assert ticks.size == loss_scale.shape[0]
+	assert ticks.size >= loss_scale.shape[0]
 	for iPlot in range(axs.size):
 		ax: matplotlib.axes.Axes = axs[iPlot]
 		for iElement in range(config.NUM_ELM):
-			ax.semilogy(ticks, loss_scale[:, iElement, iPlot], label=utility.get_RI_label(iElement, config.NUM_PES))
+			ax.semilogy(ticks[:loss_scale.shape[0]], loss_scale[:, iElement, iPlot], label=utility.get_RI_label(iElement, config.NUM_PES))
 		ax.set_xlabel("Time / a.u.")
 		ax.set_ylabel(loss_scale_ylabels[iPlot])
 		ax.set_title(loss_scale_titles[iPlot])
@@ -209,7 +209,7 @@ def main(arguments: None | collections.abc.Sequence[str] = None) -> None:
 	if grid_solution_filename != "": # error
 		plot_error(quantity.config, ticks)
 	# parameters, loss and rescale factor
-	param_loss_scale_ticks: typing.Final[npt.NDArray[np.double]] = np.concatenate([np.arange(i * quantity.output_ticks, (i + 1) * quantity.output_ticks + 1) for i in range(ticks.size)]) * quantity.dt # This should be size of (total_ticks - 1) * (output_steps + 1)
+	param_loss_scale_ticks: typing.Final[npt.NDArray[np.double]] = np.concatenate([np.arange(i * quantity.output_ticks, (i + 1) * quantity.output_ticks + 1) for i in range(ticks.size)]) * np.double(quantity.dt) # This should be size of (total_ticks - 1) * (output_steps + 1)
 	plot_parameters(quantity.config, param_loss_scale_ticks)
 	scale: typing.Final[npt.NDArray[np.double]] = plot_loss_and_rescale_factors(quantity.config, param_loss_scale_ticks)
 	# plot from dm: including marginal, or its marginal only

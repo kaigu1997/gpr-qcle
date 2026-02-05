@@ -337,8 +337,8 @@ def main() -> None:
 						if iPES != jPES:
 							all_density[jPES * pes.NUM_PES + iPES] = np.conj(all_density[ElementIndex])
 				for iElement in range(pes.NUM_ELM):
-					interpolators[iElement][0].values = all_density[iElement].reshape(n_grids, n_grids).real
-					interpolators[iElement][1].values = all_density[iElement].reshape(n_grids, n_grids).imag
+					interpolators[iElement][0].values = all_density[iElement].reshape(n_grids, n_grids).real # pyright: ignore[reportAttributeAccessIssue]
+					interpolators[iElement][1].values = all_density[iElement].reshape(n_grids, n_grids).imag # pyright: ignore[reportAttributeAccessIssue]
 			pred_draw(iTick)
 			return fig, axs
 

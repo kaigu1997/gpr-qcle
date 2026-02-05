@@ -1,13 +1,14 @@
 r"""point
-======
+=====
 Implementation for sampling.
 """
+import datetime
 import typing
 
 import numpy as np
-import numpy.typing as npt
 import sklearn.cluster
 import torch
+import torch_kmeans
 
 import constant
 import evolve
@@ -15,33 +16,8 @@ import pes
 import plot
 
 SEED: typing.Final = 0
-_np_rng: np.random.Generator = np.random.Generator(np.random.MT19937(SEED))
 torch.set_default_dtype(constant.DTYPE)
 torch.set_default_device(constant.DEVICE)
-
-
-def _normal_sample(
-	num_points: int,
-	mean: npt.NDArray[np.double],
-	stddev: npt.NDArray[np.double]
-) -> npt.NDArray[np.double]:
-	r"""To create normally distributed point set based on given mean and variance
-
-	Parameters
-	----------
-	num_points : int
-		The number of points needed
-	mean : npt.NDArray[np.double], shape of (PHASEDIM,)
-		The center of the points
-	stddev : npt.NDArray[np.double], shape of (PHASEDIM,)
-		The standard deviation of the points
-
-	Returns
-	-------
-	npt.NDArray[np.double], shape of (NUM_PTS, PHASEDIM)
-		Normally distributed point test
-	"""
-	return _np_rng.multivariate_normal(mean, np.diag(stddev ** 2), num_points, "raise", method="eigh")
 
 
 def normal_sample(
@@ -65,7 +41,7 @@ def normal_sample(
 	torch.Tensor, shape of (NUM_PTS, PHASEDIM)
 		Normally distributed point test
 	"""
-	return torch.from_numpy(_normal_sample(num_points, mean.detach().numpy(), stddev.detach().numpy()))
+	return torch.randn((num_points, mean.numel()), device=stddev.device) * stddev + mean
 
 
 @typing.final
@@ -112,14 +88,14 @@ class Points:
 	__slots__: typing.Final[tuple] = ("__config", "__dest_row_idx", "__dest_col_idx", "__coup_row_idx", "__coup_col_idx", "__dest_idx", "__num_all_centers", "__coordinate", "__density", "__index", "__tril_element_indices")
 	
 	@staticmethod
-	def __init_sampling(center: npt.NDArray[np.double], stddev: npt.NDArray[np.double], num_pts: int, extra_ratio: int) -> torch.Tensor:
+	def __init_sampling(center: torch.Tensor, stddev: torch.Tensor, num_pts: int, extra_ratio: int) -> torch.Tensor:
 		r"""To sample the initial points by k-means
 
 		Parameters
 		----------
-		center : npt.NDArray[np.double]
+		center : torch.Tensor
 			Center of the initial distribution
-		stddev : npt.NDArray[np.double]
+		stddev : torch.Tensor
 			Standard deviation of the initial distribution
 		num_pts : int
 			The number of central (inducing) points
@@ -131,56 +107,63 @@ class Points:
 		torch.Tensor, shape of (`num_pts` * (1 + `extra_ratio`), PHASEDIM)
 			All points, first `num_pts` points are the central points, and the rest are the extra points
 		"""
-		def print_coordinate_distribution(title: str, coordinates: npt.NDArray[np.double]) -> None:
+		def print_coordinate_distribution(title: str, coordinates: torch.Tensor) -> None:
 			r"""To print the average and standard deviation of the points
 
 			Parameters
 			----------
 			title : str
 				What is the meaning of the given coordinates
-			coordinates : npt.NDArray[np.double], shape of (NUM_POINTS, PHASEDIM)
+			coordinates : torch.Tensor, shape of (NUM_POINTS, PHASEDIM)
 				The phase space coordinates
 			"""
-			print(((title + ": ") if title != "" else "") + f"{plot.format_array(np.mean(coordinates, 0), "<r>")}, {plot.format_array(np.std(coordinates, 0), "stddev")}")
+			print(((title + ": ") if title != "" else "") + f"{plot.format_array(torch.mean(coordinates, 0), "<r>")}, {plot.format_array(torch.std(coordinates, 0), "stddev")}", datetime.datetime.now())
 
-		def sample_extra_points(central_points: npt.NDArray[np.double], extra_ratio: int) -> npt.NDArray[np.double]:
+		def sample_extra_points(central_points: torch.Tensor, extra_ratio: int) -> torch.Tensor:
 			r"""To create the extra point set
-
-			First `num_points` points remain the same, and the rest of the points are resampled based on the first `num_points` points and their variance
 
 			Parameters
 			----------
-			central_points : shape of (num_point, PHASEDIM)
+			central_points : torch.Tensor, shape of (num_point, PHASEDIM)
 				Points who will be used as center of sampling
 			extra_ratio : int
 				The number of points around each central point
+
+			Returns
+			-------
+			torch.Tensor
+				Extra points
 			"""
-			stddev: typing.Final[npt.NDArray[np.double]] = np.std(central_points, 0)
-			result: typing.Final[npt.NDArray[np.double]] = np.concatenate([_normal_sample(extra_ratio, pt, stddev) for pt in central_points])
+			stddev: typing.Final[torch.Tensor] = torch.std(central_points, 0)
+			result: typing.Final[torch.Tensor] = torch.cat([normal_sample(extra_ratio, pt, stddev) for pt in central_points])
 			print_coordinate_distribution("Sample Extra Points", result)
 			return result
-		
-		kmeans_center: typing.Final[sklearn.cluster.KMeans] = sklearn.cluster.KMeans(num_pts, init="k-means++", n_init="auto", random_state=np.random.RandomState(_np_rng.bit_generator), algorithm="lloyd")
-		kmeans_extra: typing.Final[sklearn.cluster.KMeans] = sklearn.cluster.KMeans(num_pts * extra_ratio, init="k-means++", n_init="auto", random_state=np.random.RandomState(_np_rng.bit_generator), algorithm="lloyd")
-		coordinate: npt.NDArray[np.double] = np.tile(_normal_sample(num_pts, center, stddev), (1 + extra_ratio, 1))
+
+		kmeans_center: typing.Final = torch_kmeans.KMeans(init_method="k-means++", n_clusters=num_pts, seed=SEED)
+		kmeans_extra: typing.Final = sklearn.cluster.KMeans(num_pts * extra_ratio, init="k-means++", n_init="auto", random_state=np.random.RandomState(np.random.Generator(np.random.MT19937(SEED)).bit_generator), algorithm="lloyd")
+		coordinate: typing.Final[torch.Tensor] = torch.tile(normal_sample(num_pts, center, stddev), (1 + extra_ratio, 1))
 		print_coordinate_distribution("Sample Central Points", coordinate[:num_pts])
 		coordinate[num_pts:] = sample_extra_points(coordinate[:num_pts], extra_ratio)
-		kmeans_center.fit(coordinate)
-		coordinate[:num_pts] = kmeans_center.cluster_centers_
-		print_coordinate_distribution("KMeans Central Points", kmeans_center.cluster_centers_)
-		kmeans_extra.fit(sample_extra_points(kmeans_center.cluster_centers_, extra_ratio ** 2))
-		print_coordinate_distribution("KMeans Extra Points", kmeans_extra.cluster_centers_)
-		coordinate[num_pts:] = kmeans_extra.cluster_centers_
-		# kmeans_center.fit(coordinate)
-		# rint_coordinate_distribution("KMeans Central Points", kmeans_center.cluster_centers_)
-		# coordinate[:num_pts] = kmeans_center.cluster_centers_
-		# kmeans_extra.fit(sample_extra_points(kmeans_center.cluster_centers_, extra_ratio ** 2))
-		# print_coordinate_distribution("KMeans Extra Points", kmeans_extra.cluster_centers_)
-		# coordinate[num_pts:] = kmeans_extra.fit(np.concatenate([coordinate[num_pts:], kmeans_extra.cluster_centers_])).cluster_centers_
-		# print_coordinate_distribution("KMeans Extra Points", kmeans_extra.cluster_centers_)
+		cen_cen: torch.Tensor = kmeans_center(coordinate[torch.newaxis]).centers[0]
+		print_coordinate_distribution("KMeans Central Points", cen_cen)
+		coordinate[:num_pts] = cen_cen
+
+		xtr_cen: torch.Tensor = torch.from_numpy(kmeans_extra.fit(sample_extra_points(cen_cen.cpu(), extra_ratio ** 2).detach().numpy()).cluster_centers_)
+		print_coordinate_distribution("KMeans Extra Points", xtr_cen)
+		coordinate[num_pts:] = xtr_cen.to(coordinate.device)
+
+		# cen_cen = kmeans_center(coordinate[torch.newaxis]).centers[0]
+		# print_coordinate_distribution("KMeans Central Points", cen_cen)
+		# coordinate[:num_pts] = cen_cen
+		# xtr_cen = torch.from_numpy(kmeans_extra.fit(sample_extra_points(cen_cen.cpu(), extra_ratio ** 2).detach().numpy()).cluster_centers_)
+		# print_coordinate_distribution("KMeans Extra Points", xtr_cen)
+		# xtr_cen = torch.from_numpy(kmeans_extra.fit(torch.cat([coordinate[num_pts:].cpu(), xtr_cen]).detach().numpy()).cluster_centers_)
+		# coordinate[num_pts:] = xtr_cen.to(coordinate.device)
+		# print_coordinate_distribution("KMeans Extra Points", xtr_cen)
+
 		print_coordinate_distribution("Overall", coordinate)
 		print("", end="", flush=True)
-		return torch.from_numpy(coordinate)
+		return coordinate.to(torch.get_default_device())
 
 
 	def __init__(
@@ -210,14 +193,14 @@ class Points:
 		self.__dest_row_idx, self.__dest_col_idx = torch.maximum(self.__dest_row_idx, self.__dest_col_idx), torch.minimum(self.__dest_row_idx, self.__dest_col_idx)
 		self.__dest_idx = self.__dest_row_idx * init_dist.config.NUM_PES + self.__dest_col_idx
 		self.__num_all_centers = init_dist.config.NUM_TRIG * num_pts
-		self.__coordinate = Points.__init_sampling(init_dist.r0.detach().numpy(), init_dist.sigma_r0.detach().numpy(), num_pts, extra_ratio)
+		self.__coordinate = Points.__init_sampling(init_dist.r0, init_dist.sigma_r0, num_pts, extra_ratio)
 		self.__density = torch.cat((init_dist(self.__coordinate[:num_pts])[..., init_dist.config.TRIL_ROW_INDICES, init_dist.config.TRIL_COL_INDICES].T.reshape(-1), init_dist(self.__coordinate[num_pts:])[..., init_dist.config.TRIL_ROW_INDICES, init_dist.config.TRIL_COL_INDICES].T.reshape(-1)))
 		self.__coordinate = torch.cat([torch.tile(self.__coordinate[:num_pts], (init_dist.config.NUM_TRIG, 1)), torch.tile(self.__coordinate[num_pts:], (init_dist.config.NUM_TRIG, 1))]) # central pts of all elements, then extra pts of all elements
 		self.__tril_element_indices = torch.tensor(init_dist.config.TRIL_ELEMENT_INDICES)
 		self.__index = torch.cat([torch.repeat_interleave(self.__tril_element_indices, num_pts), torch.repeat_interleave(self.__tril_element_indices, num_pts * extra_ratio)])
 
 	@property
-	def num_center(self) -> torch.Tensor:
+	def num_center(self) -> list[int]:
 		r"""To calculate the number of points in the center that corresponding to each element
 
 		Returns
@@ -225,7 +208,7 @@ class Points:
 		torch.Tensor
 			Central points cooresponding to each element
 		"""
-		return (self.__index[:self.__num_all_centers] == self.__tril_element_indices[:, torch.newaxis]).to(torch.int).sum(-1)
+		return (self.__index[:self.__num_all_centers] == self.__tril_element_indices[:, torch.newaxis]).to(torch.int).sum(-1).tolist()
 
 	@property
 	def center(self) -> list[torch.Tensor]:
@@ -283,7 +266,7 @@ class Points:
 		"""
 		np.savetxt(
 			belong_file,
-			np.repeat(np.concatenate([[idx, idx + self.__config.NUM_ELM] for idx in self.__config.TRIL_ELEMENT_INDICES]), np.concatenate([[m, n - m] for m, n in zip(self.num_center, (self.__index == self.__tril_element_indices[:, np.newaxis]).detach().numpy().astype(np.int_).sum(-1))]))[np.newaxis],
+			np.repeat(np.concatenate([[idx, idx + self.__config.NUM_ELM] for idx in self.__config.TRIL_ELEMENT_INDICES]), np.concatenate([[m, n - m] for m, n in zip(self.num_center, (self.__index == self.__tril_element_indices[:, torch.newaxis]).detach().cpu().numpy().astype(np.int_).sum(-1))]))[np.newaxis],
 			footer="\n",
 			comments="",
 			encoding=constant.ENC
@@ -328,18 +311,17 @@ class Points:
 				x4[indices, :], p2[indices, :] = evolve.evolve_coordinates_adiabatically(model, x2[indices, :], p1[indices, :], mass, dt / 2.0, evolve.Direction.FORWARD, iBelongPES, jBelongPES)
 				# surface hopping
 				# choose the one to jump to
-				idx_of_dest_idx: torch.Tensor = torch.from_numpy(_np_rng.integers(0, 2 * self.__config.NUM_PES - 2, size=num_pts, dtype=np.int_)) # n
+				idx_of_dest_idx: torch.Tensor = torch.randint(0, 2 * self.__config.NUM_PES - 2, (num_pts,)) # n
 				velocity: torch.Tensor = p2[indices, :] / mass # n * D
-				eng_coup: dict[str, torch.Tensor] = model(x4[indices, :], adiabatic_potential=True, coupling=True)
-				coupling: torch.Tensor = eng_coup["coupling"][torch.arange(num_pts), :, self.__coup_row_idx[iTrig, idx_of_dest_idx], self.__coup_col_idx[iTrig, idx_of_dest_idx]] # n * D
+				potential, couplings = model.adiabatic_potential_and_coupling(x4[indices, :]) # n * N, n * D * N * N
+				coupling: torch.Tensor = couplings[torch.arange(num_pts), :, self.__coup_row_idx[iTrig, idx_of_dest_idx], self.__coup_col_idx[iTrig, idx_of_dest_idx]] # n * D
 				transition_rate: torch.Tensor = torch.abs(torch.sum(velocity * coupling, -1) * dt) # n
 				transition_prob: torch.Tensor = transition_rate / (1.0 + transition_rate) # n
 				# energy conservation
-				potential: torch.Tensor = eng_coup["adiabatic_potential"] # n * N
 				momentum_rescale_factor_sq: torch.Tensor = 1.0\
 					+ (potential[torch.arange(num_pts), self.__coup_col_idx[iTrig, idx_of_dest_idx]] - potential[torch.arange(num_pts), self.__coup_row_idx[iTrig, idx_of_dest_idx]]) / torch.sum(p2[indices, :] ** 2 / mass, -1) # n
 				# judgment
-				transition: torch.Tensor = torch.logical_and(torch.from_numpy(_np_rng.random(num_pts)) < transition_prob, momentum_rescale_factor_sq >= 0.0) # n
+				transition: torch.Tensor = torch.logical_and(torch.rand(num_pts) < transition_prob, momentum_rescale_factor_sq >= 0.0) # n
 				# change index, momentum, and the back propagation
 				if torch.any(transition).item():
 					transit_indices: torch.Tensor = indices[transition] # indices[transition] equivalent to [current_indices[iTrig]][transition]

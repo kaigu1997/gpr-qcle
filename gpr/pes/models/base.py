@@ -310,20 +310,6 @@ class ModelConfig:
 		`range(DIM, PHASEDIM)`, indices for p in phase space
 	PHASEDIM_RANGE : tuple[int, ...]
 		Combination of `DIM_RANGE` and `P_DIM_RANGE`
-	DIM1_EINSUM_INDEX : typing.LiteralString
-		First DIM dimensions of x coordinates
-	DIM2_EINSUM_INDEX : typing.LiteralString]
-		First DIM dimensions of p coordinates
-	WIGNER_DIM_EINSUM_INDEX : typing.LiteralString]
-		First DIM dimensions of y_coord
-	PES1_EINSUM_INDEX : typing.LiteralString]
-		Row Index of potential energy surface
-	PES2_EINSUM_INDEX : typing.LiteralString]
-		Column Index of potential energy surface
-	DIM_EINSUM_INDEX : typing.LiteralString]
-		Last dimension of x/p coordinates
-	SUM_DIMS_FOR_PWTDM_MARGINAL : list[tuple[int, ...]]]
-		For each element, it is a tuple containing all values in `PHASEDIM_RANGE` except for index of itself
 	"""
 	NAME: typing.Final
 	NUM_PES: typing.Final
@@ -341,7 +327,7 @@ class ModelConfig:
 	TRIL_ROW_INDICES: typing.Final[tuple[int, ...]]
 	TRIL_COL_INDICES: typing.Final[tuple[int, ...]]
 	TRIL_ELEMENT_INDICES: typing.Final[tuple[int, ...]]
-	FLATTEN_TRIL_INDEX: typing.Final[tuple[int, ...]]
+	FLATTEN_TRIL_INDEX: typing.Final[tuple[int]]
 	SUM_DIMS_FOR_PWTDM_MARGINAL: typing.Final[list[tuple[int, ...]]]
 
 	def __init__(self, model: type[ModelBase]) -> None:

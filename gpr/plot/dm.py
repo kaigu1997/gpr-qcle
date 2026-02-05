@@ -420,24 +420,6 @@ class DensityMatrixDrawer:
 		return get_divisor(figsize_in_dots[0] * ax_bbox.width, array_shape[0]), get_divisor(figsize_in_dots[1] * ax_bbox.height, array_shape[1])
 
 	@staticmethod
-	def __get_independent_part(config: pes.ModelConfig, dm: torch.Tensor) -> list[npt.NDArray[np.double]]:
-		r"""To get the real part of upper triangular and imaginary part of strict lower triangular of a density matrix.
-
-		Parameters
-		----------
-		config : pes.ModelConfig
-			Configuration of the model
-		dm : torch.Tensor, dtype of `torch.cdouble`, shape of (N_GRIDS, N_GRIDS, NUM_PES, NUM_PES)
-			The phase space distribution
-
-		Returns
-		-------
-		list[npt.NDArray[np.double]], len of NUM_ELM, each of shape (N_GRIDS, N_GRIDS)
-			List in the order of [rho11.real, rho12.real, ..., rho1n.real, rho21.imag, rho22.real, rho23.real, ..., rhonn.real]
-		"""
-		return [(dm.detach().numpy()[:, :, iPES, jPES].real if iPES <= jPES else dm.detach().numpy()[:, :, iPES, jPES].imag) for iPES in config.PES_RANGE for jPES in config.PES_RANGE] # pyright: ignore[reportAttributeAccessIssue]
-
-	@staticmethod
 	def __update_colorbar_limit(
 		colorbar_limit: float,
 		ctr_norm: matplotlib.colors.CenteredNorm,
@@ -521,6 +503,8 @@ class DensityMatrixDrawer:
 		axs: np.ndarray,
 		config: pes.ModelConfig,
 		colorbar_limit: float,
+		draw_logscale: bool,
+		draw_scattered: bool,
 		xv: npt.NDArray[np.double],
 		pv: npt.NDArray[np.double],
 	) -> tuple[matplotlib.colors.CenteredNorm, npt.NDArray[np.double], matplotlib.colorbar.Colorbar, __PNLogNorm | None, npt.NDArray[np.double] | None, matplotlib.colorbar.Colorbar | None]:
@@ -536,6 +520,10 @@ class DensityMatrixDrawer:
 			Configuration of the model
 		colorbar_limit : float
 			The maximum value on color bar
+		draw_logscale : bool
+			Whether to draw logscale figures or not
+		draw_scattered : bool
+			Whether to draw the sample points or not
 		xv : npt.NDArray[np.double], shape of (N_GRIDS, N_GRIDS)
 			Grid coordinates for position
 		pv : npt.NDArray[np.double], shape of (N_GRIDS, N_GRIDS)
@@ -560,15 +548,14 @@ class DensityMatrixDrawer:
 			for spine in cbar.ax.spines.values():
 				spine.set_linewidth(5.0)
 
-		draw_logscale: typing.Final[bool] = axs.shape[0] == config.NUM_PES * 2
 		ctr_norm, ctr_level, ctr_ticks = DensityMatrixDrawer.__get_centered(colorbar_limit * utility.I_UB)
 		ctr_cbar: typing.Final[matplotlib.colorbar.Colorbar] = fig.colorbar(
 			matplotlib.cm.ScalarMappable(ctr_norm, DensityMatrixDrawer.__CMAP),
-			ax=axs[:config.NUM_PES, :],
+			ax=axs[:config.NUM_PES * (1 + int(draw_scattered)), :],
 			ticks=ctr_ticks.tolist()
 		)
 		set_colorbar(ctr_cbar)
-		for iRow in config.PES_RANGE:
+		for iRow in range(config.NUM_PES * (1 + int(draw_scattered))):
 			for iCol in range(axs.shape[1]):
 				ax: matplotlib.axes.Axes = axs[iRow, iCol]
 				utility.axes_decoration(
@@ -576,7 +563,7 @@ class DensityMatrixDrawer:
 					iRow * config.NUM_PES + iCol,
 					xlabel="R [a.u.]" if iRow == config.NUM_PES - 1 and not draw_logscale else None,
 					ylabel="P [a.u.]" if iCol == 0 else None,
-					title=DensityMatrixDrawer.__get_ax_title(iRow, iCol, config.NUM_PES, axs.shape[1] == config.NUM_PES)
+					title=("Scattered " if iRow > config.NUM_PES else "") + DensityMatrixDrawer.__get_ax_title(iRow % config.NUM_PES, iCol, config.NUM_PES, axs.shape[1] == config.NUM_PES)
 				)
 				ax.contourf(xv, pv, np.zeros_like(xv), levels=ctr_level, cmap=DensityMatrixDrawer.__CMAP, norm=ctr_norm)
 		log_norm: DensityMatrixDrawer.__PNLogNorm | None = None
@@ -586,20 +573,20 @@ class DensityMatrixDrawer:
 			log_norm, log_level, log_ticks = DensityMatrixDrawer.__get_posneg_log(colorbar_limit * sys.float_info.epsilon, colorbar_limit)
 			log_cbar = fig.colorbar( # logscale colorbar
 				matplotlib.cm.ScalarMappable(log_norm, DensityMatrixDrawer.__CMAP),
-				ax=axs[config.NUM_PES:, :],
+				ax=axs[config.NUM_PES * (1 + int(draw_scattered)):, :],
 				ticks=log_ticks.tolist(),
 				format=r"%+.1e"
 			)
 			set_colorbar(log_cbar)
 			for iRow in config.PES_RANGE:
 				for iCol in range(axs.shape[1]):
-					ax: matplotlib.axes.Axes = axs[iRow + config.NUM_PES, iCol]
+					ax: matplotlib.axes.Axes = axs[iRow + config.NUM_PES * (1 + int(draw_scattered)), iCol]
 					utility.axes_decoration(
 						ax,
-						iRow * config.NUM_PES + iCol + config.NUM_PES * axs.shape[1],
+						iRow * config.NUM_PES + iCol + config.NUM_PES * (1 + int(draw_scattered)) * axs.shape[1],
 						xlabel="R [a.u.]" if iRow == config.NUM_PES - 1 else None,
 						ylabel="P [a.u.]" if iCol == 0 else None,
-						title=DensityMatrixDrawer.__get_ax_title(iRow, iCol, config.NUM_PES, axs.shape[1] == config.NUM_PES)
+						title="Logscale " + DensityMatrixDrawer.__get_ax_title(iRow, iCol, config.NUM_PES, axs.shape[1] == config.NUM_PES)
 					)
 					ax.contourf(xv, pv, np.zeros_like(xv), levels=log_level, cmap=DensityMatrixDrawer.__CMAP, norm=log_norm)
 		return ctr_norm, ctr_level, ctr_cbar, log_norm, log_level, log_cbar
@@ -654,14 +641,16 @@ class DensityMatrixDrawer:
 		self.__fig = plt.figure(figsize=(constant.FIGSIZE[0] * N_COLS, constant.FIGSIZE[1] * N_ROWS), layout="constrained")
 		self.__axs = self.__fig.subplots(nrows=N_ROWS, ncols=N_COLS, squeeze=False)
 		self.__row_divisor, self.__col_divisor = DensityMatrixDrawer.__get_factor(self.__fig, self.__axs[0, 0], initial_dm.shape[:-2])
-		self.__xv, self.__pv = np.meshgrid(quantity.x_grids_each_dim[0].reshape(-1).detach().numpy(), quantity.p_grids_each_dim[0].reshape(-1).detach().numpy(), indexing="xy")
+		self.__xv, self.__pv = np.meshgrid(quantity.x_grids_each_dim[0].reshape(-1).detach().cpu().numpy(), quantity.p_grids_each_dim[0].reshape(-1).detach().cpu().numpy(), indexing="xy")
 		self.__xv = self.__xv[::self.__row_divisor, ::self.__col_divisor]
 		self.__pv = self.__pv[::self.__row_divisor, ::self.__col_divisor]
 		self.__ctr_norm, self.__ctr_level, self.__ctr_cbar, self.__log_norm, self.__log_level, self.__log_cbar = DensityMatrixDrawer.__fig_axs_initialize(
 			self.__fig,
 			self.__axs,
 			quantity.config,
-			utility.I_UB * (1.0 if draw_rescaled else max(np.max(np.abs(dm)) for dm in DensityMatrixDrawer.__get_independent_part(self.config, initial_dm))),
+			1.0 if draw_rescaled else utility.I_UB * np.max(np.abs(initial_dm)),
+			self.__draw_logscale,
+			self.__draw_scattered,
 			self.__xv,
 			self.__pv
 		)
@@ -693,7 +682,7 @@ class DensityMatrixDrawer:
 		----------
 		frame_index : int
 			The index of the frame. Product with output interval gives the duration since beginning
-		dm : torch.Tensor, dtype of `torch.cdouble`, shape of (N_GRID, N_GRID, NUM_PES, NUM_PES)
+		dm : torch.Tensor, dtype of `torch.cdouble`, shape of (NUM_PES, NUM_PES, N_GRID, N_GRID)
 			Adiabatic PWTDM
 		points : collections.abc.Sequence[npt.NDArray[np.double]] | None, len of 2 * NUM_TRIG, each of shape (NUM_PTS, PHASEDIM), optional
 			The points to scatter. Only used if `self.__draw_scattered` is True.
@@ -748,7 +737,7 @@ class DensityMatrixDrawer:
 			ax.contourf(
 				self.__xv,
 				self.__pv,
-				data.T * rescale_factor,
+				data * rescale_factor,
 				levels=level,
 				cmap=DensityMatrixDrawer.__CMAP,
 				norm=norm
@@ -769,7 +758,7 @@ class DensityMatrixDrawer:
 					DensityMatrixDrawer.__CEN_PT_COLOR
 				)
 
-		dm_to_draw: typing.Final[list[npt.NDArray[np.double]]] = DensityMatrixDrawer.__get_independent_part(self.config, dm[::self.__col_divisor, ::self.__row_divisor]) + (DensityMatrixDrawer.__get_independent_part(self.config, grid_dm[::self.__col_divisor, ::self.__row_divisor]) if grid_dm is not None else []) # gpr first, then grid
+		dm_to_draw: typing.Final[list[npt.NDArray[np.double]]] = [d[::self.__row_divisor, ::self.__col_divisor] for d in dm.detach().cpu().numpy().reshape(self.config.NUM_ELM, *dm.shape[2:])] + ([d[::self.__row_divisor, ::self.__col_divisor] for d in grid_dm.detach().cpu().numpy().reshape(self.config.NUM_ELM, *grid_dm.shape[2:])] if grid_dm is not None else []) # gpr first, then grid
 		if not self.__draw_rescaled: # update colorbar
 			DensityMatrixDrawer.__update_colorbar_limit(
 				utility.I_UB * max(np.max(np.abs(dm)) for dm in dm_to_draw),

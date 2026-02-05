@@ -104,12 +104,12 @@ class Averager(abc.ABC):
 		return torch.sqrt(torch.diagonal(self.covariance()))
 
 	@abc.abstractmethod
-	def potential(self, potential_model: pes.Potential) -> float:
+	def potential(self, model: pes.Potential) -> float:
 		r"""To calculate the average potential energy
 
 		Parameters
 		----------
-		potential : pes.Potential
+		model : pes.Potential
 			Quantities derived from potential
 
 		Returns
@@ -243,12 +243,9 @@ class MonteCarloAverage(Averager):
 			0
 		)
 
-	def potential(self, potential_model: pes.Potential) -> float:
+	def potential(self, model: pes.Potential) -> float:
 		return torch.sum(torch.mean(
-			potential_model(
-				self.point_set[self.DIAGONAL_TRIL_INDEX, :, :self.config.DIM],
-				adiabatic_potential=True
-			)["adiabatic_potential"][self.config.PES_RANGE, :, self.config.PES_RANGE]
+			model.adiabatic_potential(self.point_set[self.DIAGONAL_TRIL_INDEX, :, :self.config.DIM])[self.config.PES_RANGE, :, self.config.PES_RANGE]
 			* self.density[self.DIAGONAL_TRIL_INDEX, ...].real
 			/ self.weight[self.DIAGONAL_TRIL_INDEX, ...],
 			-1)
@@ -302,7 +299,7 @@ class EvolvingPointsMCAverage(MonteCarloAverage):
 
 	def evolve(
 		self,
-		potential_model: pes.Potential,
+		model: pes.Potential,
 		mass: torch.Tensor,
 		dt: float,
 		predictor: constant.Predictor
@@ -311,17 +308,19 @@ class EvolvingPointsMCAverage(MonteCarloAverage):
 
 		Parameters
 		----------
+		model : pes.Potential
+			Quantities derived from potential
 		mass : torch.Tensor, shape of (DIM,)
 			Mass of classical degree of freedom
 		dt : float
 			Time interval
-		predictor : self.config.Predictor
+		predictor : constant.Predictor
 			It predicts the density matrix element based on given coordinates and element index
 		"""
 		if self.__evolve_coordinates_only:
 			for pts, row_idx, col_idx in zip(self.point_set, self.config.TRIL_ROW_INDICES, self.config.TRIL_COL_INDICES):
 				pts[:, :self.config.DIM], pts[:, self.config.DIM:] = evolve.evolve_coordinates_adiabatically(
-					potential_model,
+					model,
 					pts[:, :self.config.DIM],
 					pts[:, self.config.DIM:],
 					mass,
@@ -331,7 +330,7 @@ class EvolvingPointsMCAverage(MonteCarloAverage):
 					col_idx
 				)
 		else:
-			evolve.evolve(potential_model, [ps for ps in self.point_set], [den for den in self.density], mass, dt, predictor)
+			evolve.evolve(model, [ps for ps in self.point_set], [den for den in self.density], mass, dt, predictor)
 
 	def update_density(self, predictor: constant.Predictor) -> None:
 		r"""To update the density using the predictor if the density is not evolved
@@ -395,7 +394,7 @@ class AnalyticalAverager(Averager):
 	def covariance(self) -> torch.Tensor:
 		return super().covariance()
 
-	def potential(self, potential_model: pes.Potential) -> float:
+	def potential(self, model: pes.Potential) -> float:
 		return math.nan
 
 	def purity(self) -> torch.Tensor:

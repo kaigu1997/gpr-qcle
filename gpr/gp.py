@@ -3,91 +3,131 @@ r"""gp
 Implementation for gaussian process (gp) regression.
 """
 import collections.abc
-import copy
 import math
 import typing
 
-import gpytorch
-import gpytorch.constraints
 import linear_operator
 import numpy as np
 import torch
 
 import constant
+import expectation
 import pes
-import plot
-import point
 
 torch.set_default_dtype(constant.DTYPE)
 torch.set_default_device(constant.DEVICE)
-torch.manual_seed(point.SEED)
-DEBUG_MODE: bool = False
 
 
-@typing.final
-class GP(gpytorch.models.ExactGP):
-	r"""Gaussian process regression
+def _distance_matrix(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+	r"""To compute the pairwise distance matrix between two sets of vectors
 
 	Parameters
 	----------
 	x : torch.Tensor
-		Training inputs
+		The first set of vectors
 	y : torch.Tensor
-		Training targets
-	likelihood : gpytorch.likelihoods.Likelihood
-		Likelihood for gaussian
-	kernel : gpytorch.kernels.Kernel
-		The kernel for gaussian
+		The second set of vectors
 
-	Methods
-	----------
-	cov()
-		The kernel function
-	forward(x)
-		The implementation of GPR
+	Returns
+	-------
+	torch.Tensor
+		The pairwise distance matrix
 	"""
-	__slots__: typing.Final[tuple] = ("__mean", "__cov")
-	__mean: typing.Final[gpytorch.means.Mean]
-	__cov: typing.Final[gpytorch.kernels.Kernel]
+	return torch.linalg.norm(x[:, torch.newaxis] - y[torch.newaxis], dim=-1)
 
-	def __init__(
-		self,
-		x: torch.Tensor,
-		y: torch.Tensor,
-		likelihood: gpytorch.likelihoods.GaussianLikelihood | gpytorch.likelihoods.FixedNoiseGaussianLikelihood,
-		kernel: gpytorch.kernels.Kernel
-	):
-		super().__init__(x, y, likelihood)
-		self.__mean = gpytorch.means.ZeroMean()
-		self.__cov = kernel
 
-	@property
-	def cov(self) -> gpytorch.kernels.Kernel:
-		r"""The kernel function
+@typing.final
+class _KNNResult(typing.NamedTuple):
+	indices: torch.Tensor
+	distances: torch.Tensor
+	points: torch.Tensor
 
-		Returns
-		-------
-		gpytorch.kernels.Kernel
-			`gpytorch` kernel which is callable
-		"""
-		return self.__cov
 
-	def forward(self, x: torch.Tensor) -> gpytorch.distributions.MultivariateNormal:
-		r"""The implementation of GPR
+def _knn(train_points: torch.Tensor, k: int, test_points: torch.Tensor | None = None) -> _KNNResult:
+	r"""To find the k-nearest neighbors of a set of points
 
-		Parameters
-		----------
-		x : torch.Tensor
-			Training inputs
+	Author: Josue N Rivera (github.com/wzjoriv)
 
-		Returns
-		-------
-		gpytorch.distributions.MultivariateNormal
-			A gaussian process with certain mean and covariance
-		"""
-		Mean = self.__mean(x)
-		assert isinstance(Mean, torch.Tensor)
-		return gpytorch.distributions.MultivariateNormal(Mean, self.__cov(x))
+	Date: 7/3/2021
+
+	Description: Snippet of various clustering implementations only using PyTorch
+
+	Full project repository: https://github.com/wzjoriv/Lign (A graph deep learning framework that works alongside PyTorch)
+
+	Parameters
+	----------
+	train_points : torch.Tensor
+		The training points
+	k : int
+		The number of neighbors to consider
+	test_points : torch.Tensor | None, optional, shape of (N, D)
+		The points to predict the labels for, by default None (and uses the training points)
+
+	Returns
+	-------
+	_KNNResult
+		The k-nearest neighbors result, including indices (shape of (N, k)),
+		distances (shape of (N, k)), and points (shape of (N, k, D))
+	"""
+	assert train_points.ndim == 2
+	if test_points is not None:
+		assert test_points.ndim == 2
+	else: # test_points is None
+		test_points = train_points
+	topk: typing.Final = _distance_matrix(test_points, train_points).topk(k, -1, False, False)
+	return _KNNResult(indices=topk.indices, distances=topk.values, points=train_points[topk.indices])
+
+
+def _cov(lengthscale: torch.Tensor, x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
+	r"""To calculate the covariance matrix using RBF kernel
+
+	Parameters
+	----------
+	lengthscale : torch.Tensor
+		The characteristic lengths
+	x1 : torch.Tensor
+		The first feature set
+	x2 : torch.Tensor
+		The second feature set
+
+	Returns
+	-------
+	torch.Tensor
+		The covariance matrix
+	"""
+	return torch.exp(-torch.square((x1[:, torch.newaxis] - x2) / lengthscale).sum(-1))
+
+
+def _raw_lengthscale_to_value(raw_lengthscale: torch.Tensor) -> torch.Tensor:
+	r"""To calculate the explicit lengthscale
+
+	Parameters
+	----------
+	raw_lengthscale : torch.Tensor
+		Raw lengthscale in log form
+
+	Returns
+	-------
+	torch.Tensor
+		Exponential of raw lengthscale
+	"""
+	return torch.exp(raw_lengthscale)
+
+
+def _lengthscale_to_raw_value(lengthscale: torch.Tensor) -> torch.Tensor:
+	r"""To calculate the underlying lengthscale
+
+	Parameters
+	----------
+	lengthscale : torch.Tensor
+		Explicit lengthscale
+
+	Returns
+	-------
+	torch.Tensor
+		Logarithm of lengthscale
+	"""
+	return torch.log(lengthscale)
 
 
 @typing.final
@@ -96,194 +136,65 @@ class SinglePredictor:
 
 	Parameters
 	----------
-	PHASEDIM : int
-		The dimensions of the kernel (and features)
+	x_all : torch.Tensor, of shape (N_ALL_PT, PHASEDIM)
+		All training inputs
+	y_all : torch.Tensor, of shape (N_ALL_PT)
+		All training targets
+	num_points : int
+		The number of points located at the front of all points that is used as the subset
 	kernel_initial_value : torch.Tensor | None
 		Initial value of kernel
 
-	Attributes
-	----------
-	MAX_ITER : typing.Literal[50000]
-		Maximum iteration of optimization
-	FTOL : float
-		Absolute and relative tolerance of function in optimization
-	GTOL : float
-		Tolerance of gradient in optimization
-	NOISE: float
-		Extra noise term added for numerical stability in matrix inversion
-
 	Methods
 	-------
-	model()
-		The exact GPR model
 	x_all()
 		All features for approximate method
 	get_training_features()
 		To get the training features of the core subset
-	update_weights()
-		To update the weights, :math:`K^{-1}y`
-	get_weights()
+	k_inv_y()
 		To get the weights, :math:`K^{-1}y`
 	predict(x_test)
 		To predict the average
 	error()
 		To get the error by comparing label with prediction
-	train()
-		To train the parameters
 	"""
 	@typing.final
-	class __NoConstraint(gpytorch.constraints.Interval):
-		r"""No constraint on the parameter, the value could be any float value
-
-		Parameters
-		----------
-		initial_value : torch.Tensor | None, optional
-			Initial value for the parameter, by default None
-
-		Methods
-		-------
-		transform(tensor)
-			To transform the raw value to the actual value
-		inverse_transform(transformed_tensor)
-			To transform the actual value to the raw value
-		"""
-		def __init__(self, initial_value: torch.Tensor | None = None):
-			super().__init__(
-				lower_bound=-math.inf,
-				upper_bound=math.inf,
-				transform=lambda x: x,
-				inv_transform=lambda x: x,
-				initial_value=initial_value,
-			)
-
-		def __repr__(self) -> str:
-			r"""The official string representation of an object
-
-			Returns
-			-------
-			str
-				The name of the class with an empty parenthesis
-			"""
-			return __class__.__name__ + "()"
-
-		def transform(self, tensor: torch.Tensor) -> torch.Tensor:
-			r"""To transform the raw value to the actual value
-
-			Parameters
-			----------
-			tensor : torch.Tensor
-				The raw value
-
-			Returns
-			-------
-			torch.Tensor
-				The transformed, actual value
-			"""
-			return tensor
-
-		def inverse_transform(self, transformed_tensor: torch.Tensor) -> torch.Tensor:
-			r"""To transform the actual value to the raw value
-
-			Parameters
-			----------
-			transformed_tensor : torch.Tensor
-				The transformed, actual value
-
-			Returns
-			-------
-			torch.Tensor
-				The raw value
-			"""
-			return transformed_tensor
+	class InputDerivativeReturn(typing.NamedTuple):
+		predict: torch.Tensor
+		derivative: torch.Tensor
 
 	@typing.final
-	class __GradientDescend(torch.optim.Optimizer):
-		r"""Implementation of the simple gradient descend optimization algorithm
+	class InternalDerivativeReturn(typing.NamedTuple):
+		feature_derivative: torch.Tensor
+		label_derivative: torch.Tensor
+		raw_param_derivative: torch.Tensor
 
-		Parameters
-		----------
-		params : collections.abc.Iterable[torch.Tensor] | collections.abc.Iterable[dict[str, typing.Any]] | collections.abc.Iterable[tuple[str, torch.Tensor]]
-			Parameters
-		lr : float
-			Learning rate
-
-		Methods
-		-------
-		step(closure)
-
-		"""
-		def __init__(
-			self,
-			params: collections.abc.Iterable[torch.Tensor] | collections.abc.Iterable[dict[str, typing.Any]] | collections.abc.Iterable[tuple[str, torch.Tensor]],
-			lr: float
-		) -> None:
-			super().__init__(params, dict(lr=lr))
-
-		def step(self, closure: collections.abc.Callable[[], torch.Tensor] | None = None) -> torch.Tensor | None:
-			r"""Performs a single optimization step.
-
-			Parameters
-			----------
-			closure : collections.abc.Callable[[], torch.Tensor] | None, optional
-				A closure that reevaluates the model and returns the loss, by default None
-
-			Returns
-			-------
-			torch.Tensor | None
-				The loss if `closure` is provided
-			"""
-			loss = None
-			if closure is not None:
-				self.zero_grad()
-				loss = closure()
-				loss.backward()
-
-			for group in self.param_groups:
-				lr: float = group["lr"]
-				p: torch.Tensor
-				for p in group["params"]:
-					if p.grad is None:
-						continue
-					p.data.add_(p.grad.data, alpha=-lr)
-			return loss
-
-	MAX_ITER: typing.Final = 15000
-	FTOL: typing.Final = 2.2204460492503131e-09
-	GTOL: typing.Final = 1e-5
-	NOISE: typing.Final = float(gpytorch.settings.min_fixed_noise.value(torch.double) or 1e-8)
-	__slots__: typing.Final[tuple] = ("__kernel", "__x_all", "__y_all", "__scale", "__model", "__model_param", "__k_inv_y", "__weights_updated", "__optimizer")
-	__kernel: typing.Final[gpytorch.kernels.Kernel]
+	__NOISE: typing.Final[float] = 1e-6
+	__K_NEIGHBORHOOD: typing.Final[int] = 10
+	# __slots__: typing.Final[tuple] = ("__x_all", "__y_all", "__num_pts", "__raw_lengthscale", "__k_inv_y", "__weights_updated")
 	__x_all: torch.Tensor
 	__y_all: torch.Tensor
-	__scale: float
-	__model: typing.Final[GP]
-	__model_param: dict[str, torch.Tensor]
+	__num_pts: int
+	__raw_lengthscale: torch.Tensor
+	__old_lengthscale: torch.Tensor
 	__k_inv_y: torch.Tensor
-	__weights_updated: bool
-	__optimizer: __GradientDescend
 
-	def __init__(self, PHASEDIM: int, kernel_initial_value: torch.Tensor | None):
-		self.__kernel = gpytorch.kernels.RBFKernel(PHASEDIM, lengthscale_constraint=SinglePredictor.__NoConstraint(kernel_initial_value))
-		likelihood: typing.Final = gpytorch.likelihoods.FixedNoiseGaussianLikelihood(torch.full((2,), SinglePredictor.NOISE))
-		self.__x_all = torch.Tensor()
-		self.__y_all = torch.Tensor()
-		self.__scale: float = 1.0
-		self.__model = GP(torch.zeros((2, PHASEDIM)), torch.zeros((2,)), likelihood, self.__kernel)
-		self.__model_param: dict[str, torch.Tensor] = copy.deepcopy(self.__model.state_dict())
-		self.__k_inv_y = torch.Tensor()
-		self.__weights_updated = False
-		self.__optimizer = SinglePredictor.__GradientDescend(self.__model.parameters(), lr=1.0)
-
-	@property
-	def model(self) -> GP:
-		r"""The exact GPR model
-
-		Returns
-		-------
-		GP
-			The model
-		"""
-		return self.__model
+	def __init__(
+		self,
+		x_all: torch.Tensor,
+		y_all: torch.Tensor,
+		num_points: int,
+		kernel_initial_value: torch.Tensor
+	):
+		PHASEDIM: typing.Final[int] = x_all.shape[-1]
+		self.__x_all = x_all.reshape(-1, PHASEDIM).clone().detach()
+		self.__y_all = y_all.reshape(-1).clone().detach()
+		self.__num_pts = num_points
+		nearest_distances: typing.Final[torch.Tensor] = _knn(self.__x_all[:self.__num_pts], self.__K_NEIGHBORHOOD).distances.mean(-1)
+		noise: typing.Final[torch.Tensor] = SinglePredictor.__NOISE * torch.eye(self.__num_pts) + self.__NOISE * torch.diag(torch.square(nearest_distances / nearest_distances.median()))
+		self.__raw_lengthscale = torch.log(torch.repeat_interleave(kernel_initial_value.reshape(-1), PHASEDIM // kernel_initial_value.numel()).detach()) # true length = exp(raw_length), and raw range in (-inf, inf)
+		self.__old_lengthscale = self.lengthscale
+		self.__k_inv_y = linear_operator.utils.stable_pinverse(_cov(self.lengthscale, self.__x_all, self.__x_all[:self.__num_pts]) + torch.cat((noise, torch.zeros(self.__x_all.shape[0] - self.__num_pts, self.__num_pts)))) @ self.__y_all
 
 	@property
 	def x_all(self) -> torch.Tensor:
@@ -304,15 +215,7 @@ class SinglePredictor:
 		torch.Tensor
 			The training features
 		"""
-		assert self.__model.train_inputs is not None
-		return self.__model.train_inputs[0]
-
-	def __update_weights(self) -> None:
-		r"""To update the weights, :math:`K^{-1}y`
-		"""
-		if not self.__weights_updated:
-			self.__k_inv_y = (linear_operator.utils.stable_pinverse(self.__model.cov(self.__x_all, self.get_training_features()).to_dense()) @ self.__y_all).to_dense().detach()
-			self.__weights_updated = True
+		return self.__x_all[:self.__num_pts]
 
 	@property
 	def k_inv_y(self) -> torch.Tensor:
@@ -323,8 +226,29 @@ class SinglePredictor:
 		torch.Tensor
 			Weights, :math:`K^{-1}y`
 		"""
-		self.__update_weights()
-		return self.__k_inv_y.detach()
+		return self.__k_inv_y
+	
+	@property
+	def lengthscale(self) -> torch.Tensor:
+		r"""To get the lengthscale
+
+		Returns
+		-------
+		torch.Tensor
+			The lengthscale
+		"""
+		return _raw_lengthscale_to_value(self.__raw_lengthscale)
+
+	@property
+	def old_lengthscale(self) -> torch.Tensor:
+		r"""To get the old lengthscale
+
+		Returns
+		-------
+		torch.Tensor
+			Old lengthscale
+		"""
+		return self.__old_lengthscale
 
 	def predict(self, x_test: torch.Tensor) -> torch.Tensor:
 		r"""Instance of prediction of subset of regressor (SR) / projected process (PP)
@@ -339,29 +263,83 @@ class SinglePredictor:
 		torch.Tensor, shape of (N,)
 			Corresponding validation/test targets based on noise-free SR/PP mean.
 		"""
-		return (self.__model.cov(x_test, self.get_training_features()) @ self.k_inv_y).to_dense().detach()
+		return _cov(self.lengthscale, x_test, self.__x_all[:self.__num_pts]) @ self.k_inv_y
 
-	def error(self, use_weight: bool = True) -> torch.Tensor:
+	def error(self) -> float:
 		r"""Error function of subset of regressor (SR) / projected process (PP)
 
 		This function gives the sum of squared error
 
 		Returns
 		-------
-		torch.Tensor
+		float
 			The sum of squared prediction error
 		"""
-		if use_weight:
-			return torch.sum((self.__y_all - self.predict(self.__x_all)) ** 2) * (self.__scale ** 2)
-		else:
-			kmn: torch.Tensor = self.__model.cov(self.__x_all, self.get_training_features()).to_dense()
-			return torch.sum((self.__y_all - (kmn @ (linear_operator.utils.stable_pinverse(kmn) @ self.__y_all)).to_dense()) ** 2) * (self.__scale ** 2)
+		return torch.sum((self.__y_all - self.predict(self.__x_all)) ** 2).item()
+
+	def predict_derivative_over_input(self, x_test: torch.Tensor) -> InputDerivativeReturn:
+		r"""To give the derivative of prediction over the input
+
+		Parameters
+		----------
+		x_test : torch.Tensor, shape of (N, PHASEDIM)
+			Validation/Test inputs
+
+		Returns
+		-------
+		__InputDerivativeReturn
+			Prediction (shape of (N,)), and its derivative over input (shape of (N, PHASEDIM))
+		"""
+		with torch.no_grad():
+			x_test = x_test.reshape(-1, x_test.shape[-1]).detach().requires_grad_()
+		predict: typing.Final[torch.Tensor] = self.predict(x_test)
+		return SinglePredictor.InputDerivativeReturn(predict=predict.detach(), derivative=torch.autograd.grad(predict, x_test, torch.ones_like(predict), False, False, True, True, False, True)[0].detach())
+
+	def predict_derivative_over_internal(self, x_test: torch.Tensor) -> InternalDerivativeReturn:
+		r"""To calculate the derivative of prediction over all related quantities
+
+		Parameters
+		----------
+		x_test : torch.Tensor, shape of (N, PHASEDIM)
+			Validation/Test inputs
+
+		Returns
+		-------
+		__AllDerivativeReturn
+			Prediction (shape of (N,)),
+			derivative over each `x_test` (shape of (N, PHASEDIM)),
+			derivative over training feature (shape of (N, M, PHASEDIM)),
+			derivative over training label (shape of (N, M)),
+			and derivative over raw characteristic lengthscale (shape of (N, PHASEDIM))
+		"""
+		with torch.no_grad():
+			x_all: typing.Final[torch.Tensor] = self.__x_all.detach().requires_grad_()
+			y_all: typing.Final[torch.Tensor] = self.__y_all.detach().requires_grad_()
+			raw_lengthscale: typing.Final[torch.Tensor] = self.__raw_lengthscale.detach().requires_grad_()
+		nearest_distances: typing.Final[torch.Tensor] = _knn(self.__x_all[:self.__num_pts], self.__K_NEIGHBORHOOD).distances.mean(-1)
+		noise: typing.Final[torch.Tensor] = SinglePredictor.__NOISE * torch.eye(self.__num_pts) + self.__NOISE * torch.diag(torch.square(nearest_distances / nearest_distances.median())) # independent of derivative
+		predict: typing.Final[torch.Tensor] = _cov(_raw_lengthscale_to_value(raw_lengthscale), x_test, x_all[:self.__num_pts]) @ linear_operator.utils.stable_pinverse(_cov(_raw_lengthscale_to_value(raw_lengthscale), x_all, x_all[:self.__num_pts]) + torch.cat((noise, torch.zeros(self.__x_all.shape[0] - self.__num_pts, self.__num_pts)))) @ y_all
+		return SinglePredictor.InternalDerivativeReturn(
+			feature_derivative=torch.autograd.grad(predict, x_all, torch.eye(predict.numel()), False, False, True, True, True, True)[0].detach().reshape(predict.shape + x_all.shape),
+			label_derivative=torch.autograd.grad(predict, y_all, torch.eye(predict.numel()), False, False, True, True, True, True)[0].detach().reshape(predict.shape + y_all.shape),
+			raw_param_derivative=torch.autograd.grad(predict, raw_lengthscale, torch.eye(predict.numel()), False, False, True, True, True, True)[0].detach().reshape(predict.shape + raw_lengthscale.shape)
+		)
+
+	def update_param(self, new_lengthscale: torch.Tensor) -> None:
+		r"""To update the parameters
+
+		Parameters
+		----------
+		new_lengthscale : torch.Tensor
+			The updated parameter
+		"""
+		self.__old_lengthscale = self.lengthscale
+		self.__raw_lengthscale = _lengthscale_to_raw_value(new_lengthscale)
 
 	def update(
 		self,
 		x_all: torch.Tensor,
 		y_all: torch.Tensor,
-		scale: float,
 		num_points: int
 	) -> None:
 		r"""To update the training features and labels of the model
@@ -372,152 +350,15 @@ class SinglePredictor:
 			All training inputs
 		y_all : torch.Tensor, of shape (N_ALL_PT)
 			All training targets
-		scale : float
-			The scaling factor to increase
 		num_points : int
 			The number of points located at the front of all points that is used as the subset
 		"""
 		self.__x_all = x_all.reshape(-1, x_all.shape[-1]).clone().detach()
+		nearest_distances: typing.Final[torch.Tensor] = _knn(self.__x_all[:self.__num_pts], self.__K_NEIGHBORHOOD).distances.mean(-1)
+		noise: typing.Final[torch.Tensor] = self.__NOISE * torch.eye(self.__num_pts) + self.__NOISE * torch.diag(torch.square(nearest_distances / nearest_distances.median()))
 		self.__y_all = y_all.reshape(-1).clone().detach()
-		self.__scale = scale
-		self.__model.set_train_data(self.__x_all[:num_points].detach(), self.__y_all[:num_points].detach(), False)
-		self.__weights_updated = False
-
-	def train(self, print_log: bool = DEBUG_MODE) -> None:
-		r"""To train the parameters
-		Parameters
-		----------
-		print_log : bool, optional
-			Whether to print the log to console, by default `DEBUG_MODE`
-		"""
-		def print_model(model: gpytorch.models.ExactGP, print_grad: bool = False) -> None:
-			r"""To print the parameters of the model
-
-			Parameters
-			----------
-			model : gpytorch.models.ExactGP
-				Gaussian process model, containing mean and covariances and their parameters
-			print_grad : bool, optional
-				Whether to print the gradient or not, by default False
-			"""
-			for param_name, param, constraint in model.named_parameters_and_constraints():
-				if print_grad and param.grad is not None:
-					print(f"Parameter name: {param_name:42} value = {plot.format_array(param)} grad = {plot.format_array(param.grad)}")
-				else:
-					print(f"Parameter name: {"".join(param_name.split("raw_")):42} value = {plot.format_array(constraint.transform(param) if isinstance(constraint, gpytorch.constraints.Interval) else param)}")
-
-		def get_lr(optimizer: torch.optim.Optimizer) -> float:
-			r"""To get the learning rate of the optimizer
-
-			Parameters
-			----------
-			optimizer : torch.optim.Optimizer
-				The optimizer, which contains learning rate
-
-			Returns
-			-------
-			float
-				Learning rate
-			"""
-			return optimizer.param_groups[0]["lr"]
-
-		def print_stuff(
-			loss: torch.Tensor,
-			optimizer: torch.optim.Optimizer,
-			model: gpytorch.models.ExactGP,
-			print_grad: bool = False,
-			extra_str: str = "\t"
-		) -> None:
-			r"""To print all stuffs needed
-
-			Parameters
-			----------
-			loss : torch.Tensor
-				Loss by error function
-			optimizer : torch.optim.Optimizer
-				The optimizer, containing learning rate
-			model : gpytorch.models.ExactGP
-				Gaussian process model, containing mean and covariances and their parameters
-			print_grad : bool, optional
-				Whether to print gradient in the model or not, by default False
-			extra_str : str, optional
-				An extra string added at the front, by default "\t"
-			"""
-			print(f"{extra_str}loss = {loss.item():.15e}, lr = {get_lr(optimizer)}\n{extra_str}", end="")
-			print_model(model, print_grad)
-
-		self.__weights_updated = False
-		assert isinstance(self.__model.train_targets, torch.Tensor)
-		# train model
-		self.__model.likelihood = gpytorch.likelihoods.FixedNoiseGaussianLikelihood(torch.full((self.get_training_features().shape[0],), SinglePredictor.NOISE))
-		self.__model.train()
-		self.__model.likelihood.train()
-		self.__model.load_state_dict(self.__model_param)
-		if print_log:
-			print_model(self.__model)
-		finish_early: bool = False
-		self.__optimizer.zero_grad()
-		loss: torch.Tensor = self.error(False)
-		loss.backward()
-		last_value: float = loss.item()
-		print_stuff(loss, self.__optimizer, self.__model, True, "Init")
-		for i in range(1, SinglePredictor.MAX_ITER + 1):
-			if math.sqrt(sum(torch.sum(param.grad ** 2).item() if param.grad is not None else math.nan for param in self.__model.parameters())) < SinglePredictor.GTOL:
-				finish_early = True
-				print("Convergence: |Gradient| <= GTOL")
-				i -= 1
-				break
-			# adjust lr
-			old_prm: dict[str, torch.Tensor] = copy.deepcopy(self.__model.state_dict())
-			self.__optimizer.step()
-			loss = self.error(False)
-			if print_log:
-				print_stuff(loss, self.__optimizer, self.__model, True)
-			if loss < last_value:
-				self.__optimizer = SinglePredictor.__GradientDescend(self.__model.parameters(), lr=get_lr(self.__optimizer) * 2.0)
-				if print_log:
-					print("loss < last_value")
-					print_stuff(loss, self.__optimizer, self.__model, True)
-			else:
-				if print_log:
-					print("loss > last_value or loss is NaN")
-				while loss >= last_value or loss.isnan().item():
-					last_loop_value: float = loss.item()
-					self.__model.load_state_dict(old_prm)
-					self.__optimizer = SinglePredictor.__GradientDescend(self.__model.parameters(), lr=get_lr(self.__optimizer) / 2.0)
-					self.__optimizer.step()
-					loss = self.error(False)
-					if print_log:
-						print_stuff(loss, self.__optimizer, self.__model, True)
-					if last_loop_value == loss.item():
-						print("No stepping forward")
-						# no stepping forward, but still larger than last, meaning last is the best
-						self.__model.load_state_dict(old_prm)
-						loss = self.error(False)
-						break
-			if i % (SinglePredictor.MAX_ITER // 1000) == 0 or DEBUG_MODE:
-				print(f"Iter {i} - Loss: {loss.item():.15e} - lr: {get_lr(self.__optimizer)}")
-				print_model(self.__model, True)
-				print_model(self.__model)
-			# stopping criteria
-			if (last_value - loss.item()) / max(abs(last_value), abs(loss.item()), 1.0) < SinglePredictor.FTOL:
-				finish_early = True
-				print("Convergence: |f_i - f_{i+1}| <= FTOL")
-				break
-			self.__optimizer = SinglePredictor.__GradientDescend(self.__model.parameters(), lr=get_lr(self.__optimizer))
-			self.__optimizer.zero_grad()
-			last_value = loss.item()
-			loss.backward()
-			if print_log:
-				print_stuff(loss, self.__optimizer, self.__model, True, f"\tlast = {last_value}, ")
-		if not finish_early:
-			print("Stop: Total No. iterations reached limit.")
-		print(f"Iter {i} - Loss: {loss.item():.15e} - lr: {get_lr(self.__optimizer)}")
-		print_model(self.__model)
-		print("", flush=True)
-		self.__model.eval()
-		self.__model.likelihood.eval()
-		self.__model_param = copy.deepcopy(self.__model.state_dict())
+		self.__num_pts = num_points
+		self.__k_inv_y = linear_operator.utils.stable_pinverse(_cov(self.lengthscale, self.__x_all, self.__x_all[:num_points]) + torch.cat((noise, torch.zeros(self.__x_all.shape[0] - self.__num_pts, self.__num_pts)))) @ self.__y_all
 
 	def get_marginal(self, dimensions: collections.abc.Sequence[int], x_test: torch.Tensor) -> torch.Tensor:
 		r"""To get the marginal distribution of current gaussian process regression
@@ -535,9 +376,8 @@ class SinglePredictor:
 			Corresponding validation/test targets based on noise-free SR/PP mean.
 		"""
 		phasedim: typing.Final[int] = self.__x_all.shape[-1]
-		marginal_kernel: typing.Final[gpytorch.kernels.RBFKernel] = gpytorch.kernels.RBFKernel(len(dimensions), lengthscale_constraint=SinglePredictor.__NoConstraint(self.__model.cov.lengthscale.reshape(1, phasedim)[:, dimensions]))
-		prefactor: typing.Final[float] = math.sqrt((2.0 * torch.pi) ** (phasedim - len(dimensions))) * self.__model.cov.lengthscale[:, [i for i in range(phasedim) if i not in dimensions]].prod().item()
-		return prefactor * marginal_kernel(x_test, self.get_training_features()[:, dimensions]).to_dense() @ self.k_inv_y
+		prefactor: typing.Final[float] = math.sqrt((2.0 * torch.pi) ** (phasedim - len(dimensions))) * self.lengthscale[:, [i for i in range(phasedim) if i not in dimensions]].prod().item()
+		return prefactor * _cov(self.lengthscale[dimensions], x_test, self.__x_all[:self.__num_pts, dimensions]) @ self.k_inv_y
 
 
 @typing.final
@@ -551,42 +391,40 @@ class GPRPredictors:
 
 	Methods
 	-------
-	__check_predictor(predictor)
-		To check if the predictor could be used for training / predicting
 	update(x_all, y_all, num_pt, scale)
 		To update the training inputs and targets, as well as the rescale factor
-	train()
-		To train each predictor
 	predict(x_input, ElementIndex)
 		To predict test targets based on input and corresponding density matrix element
 	print(f)
 		To print hyperparameters to file
 	"""
-	@staticmethod
-	def __check_predictor(predictor: SinglePredictor) -> bool:
-		r"""To check if the predictor could be used for training / predicting
-
-		If no label is given, or all the labels are 0, training / predicting is not needed.
-
-		Parameters
-		----------
-		predictor : SinglePredictor
-			The predictor
-
-		Returns
-		-------
-		bool
-			Availability of training / predicting
-		"""
-		return isinstance(predictor.model.train_targets, torch.Tensor) and not torch.all(predictor.model.train_targets == 0).item() # pyright: ignore[reportArgumentType, reportCallIssue]
 
 	__slots__: typing.Final[tuple] = ("__config", "__predictors",)
 	__config: typing.Final[pes.ModelConfig]
-	__predictors: typing.Final[tuple[SinglePredictor, ...]]
+	__predictors: typing.Final[list[SinglePredictor]]
 
-	def __init__(self, config: pes.ModelConfig, kernel_initial_value: torch.Tensor | None):
+	def __init__(
+		self,
+		config: pes.ModelConfig,
+		x_all: list[torch.Tensor],
+		y_all: list[torch.Tensor],
+		num_points: int | list[int],
+		kernel_initial_value: torch.Tensor
+	):
 		self.__config = config
-		self.__predictors = tuple(SinglePredictor(config.PHASEDIM, kernel_initial_value) for _ in config.ELEMENT_RANGE)
+		self.__predictors = []
+		if isinstance(num_points, int):
+			num_points = [num_points] * self.__config.NUM_TRIG
+		for iElement in self.__config.ELEMENT_RANGE:
+			RowIndex: int = iElement // self.__config.NUM_PES
+			ColIndex: int = iElement % self.__config.NUM_PES
+			TrilIndex: int = self.__config.FLATTEN_TRIL_INDEX[iElement]
+			self.__predictors.append(SinglePredictor(
+				x_all[TrilIndex],
+				y_all[TrilIndex].real if RowIndex <= ColIndex else y_all[TrilIndex].imag,
+				num_points[TrilIndex],
+				kernel_initial_value
+			))
 
 	def __getitem__(self, ElementIndex: int) -> SinglePredictor:
 		r"""To get corresponding predictor
@@ -609,7 +447,6 @@ class GPRPredictors:
 		x_all: list[torch.Tensor],
 		y_all: list[torch.Tensor],
 		num_points: int | list[int],
-		scale: torch.Tensor
 	) -> None:
 		r"""To update the training inputs and targets, as well as the rescale factor
 
@@ -621,8 +458,6 @@ class GPRPredictors:
 			All training targets
 		num_points : int | torch.Tensor, shape of (NUM_TRIG,)
 			The number of points located at the front of all points that is used as the subset
-		scale : torch.Tensor, shape of (NUM_ELM,)
-			The rescale factor
 		"""
 		if isinstance(num_points, int):
 			num_points = [num_points] * self.__config.NUM_TRIG
@@ -633,29 +468,15 @@ class GPRPredictors:
 			pred.update(
 				x_all[TrilIndex],
 				y_all[TrilIndex].real if RowIndex <= ColIndex else y_all[TrilIndex].imag,
-				scale[iElement].item(),
 				num_points[TrilIndex]
 			)
 
-	def train(self, print_log: bool = DEBUG_MODE) -> None:
-		r"""To train each predictor
-
-		Parameters
-		----------
-		print_log : bool, optional
-			Whether to print the log to console, by default `DEBUG_MODE`
-		"""
-		for iElement in self.__config.ELEMENT_RANGE:
-			if __class__.__check_predictor(self.__predictors[iElement]):
-				print("Training " + plot.get_RI_label(iElement, self.__config.NUM_PES))
-				self.__predictors[iElement].train(print_log)
-
-	def __combine_to_complex[**P](
+	def __combine_to_complex[**P, T: collections.abc.Iterable[torch.Tensor]](
 		self,
 		x_input: torch.Tensor,
 		RowIndex: int,
 		ColIndex: int,
-		call_single_predictor: collections.abc.Callable[typing.Concatenate[SinglePredictor, torch.Tensor, P], collections.abc.Iterable[torch.Tensor]],
+		call_single_predictor: collections.abc.Callable[typing.Concatenate[SinglePredictor, torch.Tensor, P], T],
 		*args: P.args,
 		**kwargs: P.kwargs
 	) -> tuple[torch.Tensor, ...]:
@@ -705,8 +526,138 @@ class GPRPredictors:
 			x_input,
 			ElementIndex // self.__config.NUM_PES,
 			ElementIndex % self.__config.NUM_PES,
-			lambda pred, x_test: (pred.predict(x_test),) if GPRPredictors.__check_predictor(pred) else (torch.zeros(x_test.shape[0]),)
+			lambda pred, x_test: (pred.predict(x_test),)
 		)[0]
+
+	def evolve_parameter(
+		self,
+		integral_pts: torch.Tensor,
+		weights: torch.Tensor,
+		model: pes.Potential,
+		mass: torch.Tensor,
+		dt: float
+	) -> None:
+		r"""To evolve the parameters of predictors of each element
+
+		Parameters
+		----------
+		integral_pts : torch.Tensor, shape of (NUM_TRIG, N, PHASEDIM)
+			The points for monte carlo integration
+		weights : torch.Tensor, shape of (NUM_TRIG, N)
+			The weights of the monte carlo points
+		model : pes.Potential
+			Quantities derived from potential
+		mass : torch.Tensor, shape of (DIM,)
+			Mass of classical degree of freedom
+		dt : float
+			Time interval
+		"""
+		def coord_and_time_derivative(x: torch.Tensor, RowIndex: int, ColIndex: int) -> tuple[torch.Tensor, torch.Tensor]:
+			r"""To calculate dX/dt and drho_ij/dt
+
+			Parameters
+			----------
+			x : torch.Tensor, shape of (..., PHASEDIM)
+				Phase space coordinates
+			RowIndex : int
+				Index of row of the element in density matrix
+			ColIndex : int
+				Index of column of the element in density matrix
+
+			Returns
+			-------
+			tuple[torch.Tensor, torch.Tensor]
+				dX/dt, shape of (..., PHASEDIM) and drho_ij/dt, shape of (...)
+			"""
+			predict_derivative_over_input: typing.Final[collections.abc.Callable[[torch.Tensor, int, int], SinglePredictor.InputDerivativeReturn]] = lambda x_input, RowIndex, ColIndex: SinglePredictor.InputDerivativeReturn(*self.__combine_to_complex(
+				x_input,
+				RowIndex,
+				ColIndex,
+				lambda pred, x_test: pred.predict_derivative_over_input(x_test)
+			))
+			r: torch.Tensor = x[..., :self.__config.DIM] # position coordinates
+			v: torch.Tensor = x[..., self.__config.DIM:] / mass # velocity
+			E, D, F = model.adiabatic_potential_coupling_and_force(r)
+			# dGPR/dt at x_test
+			phase_deriv: torch.Tensor = torch.cat((v, (F[..., RowIndex, RowIndex] + F[..., ColIndex, ColIndex]) / 2.0), -1) # same shape as x
+			pred, grad_input = predict_derivative_over_input(x, RowIndex, ColIndex)
+			# drho/dt at x_test
+			time_deriv: torch.Tensor = -(phase_deriv * grad_input).sum(-1)
+			if RowIndex != ColIndex:
+				time_deriv -= 1.0j / constant.HBAR * (E[..., RowIndex] - E[..., ColIndex]) * pred
+			for iPES in self.__config.PES_RANGE:
+				if iPES != RowIndex:
+					pred_kj, grad_kj = predict_derivative_over_input(x, iPES, ColIndex)
+					time_deriv -= (D[..., RowIndex, iPES] * (v * pred_kj[..., np.newaxis] + (E[..., RowIndex] - E[..., iPES])[..., np.newaxis] / 2.0 * grad_kj[..., self.__config.DIM:])).sum(-1)
+				if iPES != ColIndex:
+					pred_ik, grad_ik = predict_derivative_over_input(x, RowIndex, iPES)
+					time_deriv += (D[..., iPES, ColIndex] * (v * pred_ik[..., np.newaxis] + (E[..., ColIndex] - E[..., iPES])[..., np.newaxis] / 2.0 * grad_ik[..., self.__config.DIM:])).sum(-1)
+			return phase_deriv, time_deriv
+
+		def evolve(
+			weight: torch.Tensor,
+			test_den_time_deriv: torch.Tensor,
+			grad_feature: torch.Tensor,
+			grad_label: torch.Tensor,
+			grad_param: torch.Tensor,
+			feature_time_deriv: torch.Tensor,
+			label_time_deriv: torch.Tensor,
+			param_old: torch.Tensor,
+			param_now: torch.Tensor
+		) -> torch.Tensor:
+			r"""To evolve the parameter by the given information
+
+			Parameters
+			----------
+			weight : torch.Tensor
+				The monte carlo weights of the points
+			test_den_time_deriv : torch.Tensor
+				Time derivative of the density at the monte carlo points
+			grad_feature : torch.Tensor
+				Derivative of prediction at the monte carlo points over training features
+			grad_label : torch.Tensor
+				Derivative of prediction at the monte carlo points over training labels
+			grad_param : torch.Tensor
+				Derivative of prediction at the monte carlo points over hyperparameters
+			feature_time_deriv : torch.Tensor
+				Derivative of training feature over time
+			label_time_deriv : torch.Tensor
+				Derivative of training label over time
+			param_old : torch.Tensor
+				Hyperparameters from last time step
+			param_now : torch.Tensor
+				Hyperparameters from this time step
+
+			Returns
+			-------
+			torch.Tensor
+				Hyperparameters for the next time step
+			"""
+			param_ref_epsilon: typing.Final = 0.01 # param_ref(t)=(1-epsilon)*param(t-dt)+epsilon*param(t)
+			damp_c: typing.Final = 1.0
+			damp_epsilon: typing.Final = 1e-6 # gamma(t)=c*||d(param)/dt||/(||param(t)-param_ref(t)||+epsilon*||param(t)||)
+			residual: typing.Final[torch.Tensor] = test_den_time_deriv - grad_feature.reshape(grad_feature.shape[0], -1) @ feature_time_deriv.reshape(-1) - grad_label @ label_time_deriv
+			time_depend: typing.Final[torch.Tensor] = torch.linalg.ldl_solve(*torch.linalg.ldl_factor((grad_param.T * grad_param.T[:, torch.newaxis] / weight).mean(-1)), (grad_param.T * residual / weight).mean(-1)) # it times dt gives Euler
+			param_ref: typing.Final[torch.Tensor] = param_old + param_ref_epsilon * (param_now - param_old)
+			param_ref_diff: typing.Final[torch.Tensor] = param_now - param_ref
+			damp_coe: typing.Final[float] = damp_c * time_depend.norm().item() / (param_ref_diff.norm().item() + damp_epsilon * param_now.norm().item())
+			damp_coe_exp: typing.Final[float] = math.exp(-damp_coe * dt)
+			return param_ref + param_ref_diff * damp_coe_exp + (1 - damp_coe_exp) / damp_coe * time_depend
+
+		for iTrig, (iPES, jPES, iElement) in enumerate(zip(self.__config.TRIL_ROW_INDICES, self.__config.TRIL_COL_INDICES, self.__config.TRIL_ELEMENT_INDICES)):
+			test_pts: torch.Tensor = integral_pts[iTrig]
+			test_wt: torch.Tensor = weights[iTrig]
+			feature_time_deriv, label_time_deriv = coord_and_time_derivative(self[iElement].x_all, iPES, jPES)
+			test_den_time_deriv: torch.Tensor = coord_and_time_derivative(test_pts, iPES, jPES)[1]
+			# deal with real and imag part separately
+			real_pred: SinglePredictor
+			imag_pred: SinglePredictor | None
+			if iPES == jPES:
+				real_pred = self[iElement]
+			else:
+				real_pred = self[jPES * self.__config.NUM_PES + iPES]
+				self[iElement].update_param(evolve(test_wt, test_den_time_deriv.imag, *self[iElement].predict_derivative_over_internal(test_pts), feature_time_deriv, label_time_deriv.imag, self[iElement].old_lengthscale, self[iElement].lengthscale))
+			real_pred.update_param(evolve(test_wt, test_den_time_deriv.real, *real_pred.predict_derivative_over_internal(test_pts), feature_time_deriv, label_time_deriv.real, real_pred.old_lengthscale, real_pred.lengthscale))
 
 	def get_marginal(
 		self,
@@ -747,10 +698,7 @@ class GPRPredictors:
 			torch.Tensor, shape of (N,)
 				Test targets by the predictor
 			"""
-			if GPRPredictors.__check_predictor(pred):
-				return (pred.get_marginal(dims, x_test),)
-			else:
-				return (torch.zeros(x_test.shape[0]),)
+			return (pred.get_marginal(dims, x_test),)
 
 		if isinstance(dimensions, int):
 			dimensions = [dimensions]
@@ -775,5 +723,66 @@ class GPRPredictors:
 			The file to save the parameters
 		"""
 		for predictor in self.__predictors:
-			np.savetxt(f, predictor.model.cov.lengthscale.detach().cpu().numpy().reshape(1, -1))
+			np.savetxt(f, predictor.lengthscale.detach().cpu().numpy().reshape(1, -1))
 		print("\n", file=f)
+
+
+@typing.final
+class AnalyticalAverager(expectation.Averager):
+	r"""Using analytical integral of GPR to estimate averages
+
+	Parameters
+	----------
+	config : pes.ModelConfig
+		Configuration of the model
+	pred : GPRPredictors
+		GPR predictors
+	"""
+	__slots__: tuple = ("__AVERAGE_CONSTANT", "__predictors",)
+	__AVERAGE_CONSTANT: typing.Final[float]
+	__predictors: typing.Final[GPRPredictors]
+
+	def __init__(self, config: pes.ModelConfig, pred: GPRPredictors):
+		super().__init__(config)
+		self.__AVERAGE_CONSTANT = (2.0 * math.pi) ** self.config.DIM
+		self.__predictors = pred
+
+	def population(self) -> torch.Tensor:
+		result: torch.Tensor = torch.empty(self.config.NUM_PES)
+		for iPES in range(self.config.NUM_PES):
+			ElementIndex: int = iPES * self.config.NUM_PES + iPES
+			pred: SinglePredictor = self.__predictors[ElementIndex]
+			result[iPES] = pred.lengthscale.prod().item() * pred.k_inv_y.sum().item()
+		return result * self.__AVERAGE_CONSTANT
+
+	def coordinates(self) -> torch.Tensor:
+		result: torch.Tensor = torch.zeros(self.config.PHASEDIM)
+		for iPES in range(self.config.NUM_PES):
+			ElementIndex: int = iPES * self.config.NUM_PES + iPES
+			pred: SinglePredictor = self.__predictors[ElementIndex]
+			result += pred.lengthscale.prod().item() * (pred.k_inv_y[:, None] * pred.get_training_features()).sum(0)
+		return result * self.__AVERAGE_CONSTANT
+
+	def square_coordinates(self) -> torch.Tensor:
+		result: torch.Tensor = torch.zeros((self.config.PHASEDIM, self.config.PHASEDIM))
+		for iPES in range(self.config.NUM_PES):
+			ElementIndex: int = iPES * self.config.NUM_PES + iPES
+			pred: SinglePredictor = self.__predictors[ElementIndex]
+			result += pred.lengthscale.prod().item() * (
+				(pred.k_inv_y[:, None, None] * pred.get_training_features()[:, :, None] * pred.get_training_features()[:, None, :]).sum(0)
+				+ pred.k_inv_y.sum() * torch.diagflat(pred.lengthscale ** 2))
+		return result * self.__AVERAGE_CONSTANT
+
+	def covariance(self) -> torch.Tensor:
+		return super().covariance()
+
+	def potential(self, model: pes.Potential) -> float:
+		return math.nan
+
+	def purity(self) -> torch.Tensor:
+		result: torch.Tensor = torch.empty(self.config.NUM_PES, self.config.NUM_PES)
+		for iPES in range(self.config.NUM_PES):
+			for jPES in range(self.config.NUM_PES):
+				pred: SinglePredictor = self.__predictors[iPES * self.config.NUM_PES + jPES]
+				result[iPES, jPES] = (math.pi ** self.config.DIM) * pred.lengthscale.prod().item() * (pred.k_inv_y @ _cov(pred.lengthscale * math.sqrt(2.0), pred.get_training_features(), pred.get_training_features()).to_dense() @ pred.k_inv_y).item()
+		return self.PURITY_FACTOR * (result + result.T - torch.diag(torch.diag(result)))

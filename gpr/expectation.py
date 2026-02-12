@@ -11,7 +11,6 @@ import torch
 
 import constant
 import evolve
-import gp
 import pes
 import point
 
@@ -343,67 +342,3 @@ class EvolvingPointsMCAverage(MonteCarloAverage):
 		if self.__evolve_coordinates_only:
 			for i, ElementIndex in enumerate(self.config.TRIL_ELEMENT_INDICES):
 				self.density[i] = predictor(self.point_set[i], ElementIndex)
-
-
-@typing.final
-class AnalyticalAverager(Averager):
-	r"""Using analytical integral of GPR to estimate averages
-
-	Parameters
-	----------
-	config : pes.ModelConfig
-		Configuration of the model
-	pred : gp.GPRPredictors
-		GPR predictors
-	"""
-	__slots__: tuple = ("__AVERAGE_CONSTANT", "__predictors",)
-	__AVERAGE_CONSTANT: typing.Final[float]
-	__predictors: typing.Final[gp.GPRPredictors]
-
-	def __init__(self, config: pes.ModelConfig, pred: gp.GPRPredictors):
-		super().__init__(config)
-		self.__AVERAGE_CONSTANT = (2.0 * math.pi) ** self.config.DIM
-		self.__predictors = pred
-
-	def population(self) -> torch.Tensor:
-		result: torch.Tensor = torch.empty(self.config.NUM_PES)
-		for iPES in range(self.config.NUM_PES):
-			ElementIndex: int = iPES * self.config.NUM_PES + iPES
-			pred: gp.SinglePredictor = self.__predictors[ElementIndex]
-			result[iPES] = pred.model.cov.lengthscale.prod().item() * pred.k_inv_y.sum().item()
-		return result * self.__AVERAGE_CONSTANT
-
-	def coordinates(self) -> torch.Tensor:
-		result: torch.Tensor = torch.zeros(self.config.PHASEDIM)
-		for iPES in range(self.config.NUM_PES):
-			ElementIndex: int = iPES * self.config.NUM_PES + iPES
-			pred: gp.SinglePredictor = self.__predictors[ElementIndex]
-			result += pred.model.cov.lengthscale.prod().item() * (pred.k_inv_y[:, None] * pred.get_training_features()).sum(0)
-		return result * self.__AVERAGE_CONSTANT
-
-	def square_coordinates(self) -> torch.Tensor:
-		result: torch.Tensor = torch.zeros((self.config.PHASEDIM, self.config.PHASEDIM))
-		for iPES in range(self.config.NUM_PES):
-			ElementIndex: int = iPES * self.config.NUM_PES + iPES
-			pred: gp.SinglePredictor = self.__predictors[ElementIndex]
-			result += pred.model.cov.lengthscale.prod().item() * (
-				(pred.k_inv_y[:, None, None] * pred.get_training_features()[:, :, None] * pred.get_training_features()[:, None, :]).sum(0)
-				+ pred.k_inv_y.sum() * torch.diagflat(pred.model.cov.lengthscale ** 2))
-		return result * self.__AVERAGE_CONSTANT
-
-	def covariance(self) -> torch.Tensor:
-		return super().covariance()
-
-	def potential(self, model: pes.Potential) -> float:
-		return math.nan
-
-	def purity(self) -> torch.Tensor:
-		result: torch.Tensor = torch.empty(self.config.NUM_PES, self.config.NUM_PES)
-		for iPES in range(self.config.NUM_PES):
-			for jPES in range(self.config.NUM_PES):
-				pred: gp.SinglePredictor = self.__predictors[iPES * self.config.NUM_PES + jPES]
-				model: gp.GP = copy.deepcopy(pred.model)
-				with torch.no_grad():
-					model.cov.lengthscale = model.cov.lengthscale * math.sqrt(2.0)
-				result[iPES, jPES] = (math.pi ** self.config.DIM) * pred.model.cov.lengthscale.prod().item() * (pred.k_inv_y @ model.cov(pred.get_training_features()).to_dense() @ pred.k_inv_y).item()
-		return self.PURITY_FACTOR * (result + result.T - torch.diag(torch.diag(result)))

@@ -202,7 +202,6 @@ class evolve_density_non_adiabatically:
 		mass: torch.Tensor,
 		dt: float,
 		predictor: constant.Predictor,
-		variance: constant.Predictor,
 		RowIndex: int,
 		ColIndex: int
 	) -> torch.Tensor:

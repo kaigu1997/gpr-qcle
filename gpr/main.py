@@ -83,7 +83,7 @@ class Main:
 	__scale: torch.Tensor
 	__predictors: typing.Final[gp.GPRPredictors]
 	__mca: typing.Final[expectation.MonteCarloAverage]
-	__aia: typing.Final[expectation.AnalyticalAverager]
+	__aia: typing.Final[gp.AnalyticalAverager]
 	__epmca: typing.Final[expectation.EvolvingPointsMCAverage]
 	__dm_drawer: typing.Final[plot.DensityMatrixDrawer | None]
 	__wfn_plotter: typing.Final[plot.DensityMatrixMarginalPlotter | None]
@@ -137,10 +137,10 @@ class Main:
 		self.__pts = point.Points(self.__init_dist)
 		self.__scale = torch.empty((self.__quantity.config.NUM_ELM,))
 		# the regressor
-		self.__predictors = gp.GPRPredictors(self.__quantity.config, self.__quantity.sigma_r0)
+		self.__predictors = gp.GPRPredictors(self.__quantity.config, self.__pts.center, self.__pts.density, self.__pts.num_center, self.__quantity.sigma_r0)
 		# average evaluators
 		self.__mca = expectation.MonteCarloAverage(self.__quantity.config, NUM_MC_PTS)
-		self.__aia = expectation.AnalyticalAverager(self.__quantity.config, self.__predictors)
+		self.__aia = gp.AnalyticalAverager(self.__quantity.config, self.__predictors)
 		self.__epmca = expectation.EvolvingPointsMCAverage(self.__quantity.config, NUM_EVL_MC_PTS, self.__init_dist)
 		# files for output
 		self.__pts_f = open(constant.POINTS_FILENAME + constant.DATA_EXTENSION, "w", encoding=constant.ENC)
@@ -221,9 +221,7 @@ class Main:
 		self.__pts.print_belonging(self.__bln_f)
 		print("", end="", file=self.__bln_f, flush=True)
 		# fit
-		self.__predictors.update(self.__pts.center, self.__pts.density, self.__pts.num_center, self.__scale)
-		if to_train:
-			self.__predictors.train()
+		self.__predictors.update(self.__pts.center, self.__pts.density, self.__pts.num_center)
 
 	def __predict_and_save_to_file(self, iTick: int) -> None:
 		r"""To make predictions on marginal/grids
@@ -353,7 +351,7 @@ class Main:
 		print("\n", file=self.__prm_f, flush=True)
 		np.savetxt(self.__scl_f, self.__scale.detach().cpu().numpy(), constant.FMT, footer="\n", encoding=constant.ENC)
 		for i in self.__quantity.config.ELEMENT_RANGE:
-			print(self.__predictors[i].error().item(), file=self.__lss_f)
+			print(self.__predictors[i].error(), file=self.__lss_f)
 		print("\n", file=self.__lss_f, flush=True)
 
 	def __call__(self, iTick: int) -> bool:
@@ -374,7 +372,7 @@ class Main:
 			self.__pts.evolve(self.__potential, self.__quantity.mass, self.__quantity.dt, self.__predictors.predict)
 			self.__epmca.evolve(self.__potential, self.__quantity.mass, self.__quantity.dt, self.__predictors.predict)
 			self.__scale = self.__pts.rescale_factor
-			self.__predictors.update(self.__pts.center, self.__pts.density, self.__pts.num_center, self.__scale)
+			self.__predictors.update(self.__pts.center, self.__pts.density, self.__pts.num_center)
 			self.__print_parameter_scale_loss()
 		# update and predict
 		self.__update_and_train(iTick)

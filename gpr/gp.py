@@ -2,92 +2,300 @@ r"""gp
 ==
 Implementation for gaussian process (gp) regression.
 """
+import abc
+import enum
 import collections.abc
-import copy
 import math
 import typing
 
-import gpytorch
-import gpytorch.constraints
 import linear_operator
 import numpy as np
 import torch
+import torch_kmeans
 
 import constant
+import evolve
 import pes
 import plot
-import point
 
 torch.set_default_dtype(constant.DTYPE)
 torch.set_default_device(constant.DEVICE)
-torch.manual_seed(point.SEED)
-DEBUG_MODE: bool = False
+torch.manual_seed(constant.SEED)
 
 
-@typing.final
-class GP(gpytorch.models.ExactGP):
-	r"""Gaussian process regression
+class Optimizer(abc.ABC):
+	r"""Base class of callable optimizer
 
 	Parameters
 	----------
-	x : torch.Tensor
-		Training inputs
-	y : torch.Tensor
-		Training targets
-	likelihood : gpytorch.likelihoods.Likelihood
-		Likelihood for gaussian
-	kernel : gpytorch.kernels.Kernel
-		The kernel for gaussian
+	param : torch.Tensor
+		Initial parameter
+	loss_func : collections.abc.Callable[[torch.Tensor], torch.Tensor]
+		Loss function to minimize, whose parameter is `param` and return a 0-dim Tensor
+
+	Attributes
+	----------
+	MAX_ITER : typing.Literal[15000]
+		Maximum iteration of optimization
+	FTOL : float
+		Absolute and relative tolerance of function in optimization
+	GTOL : float
+		Tolerance of gradient in optimization
 
 	Methods
-	----------
-	cov()
-		The kernel function
-	forward(x)
-		The implementation of GPR
+	-------
+	print_model(param, grad, hessian)
+		To print the parameters of the model
+	print_stuff(loss, param, lr, grad, hessian, extra_start_str, extra_model_str)
+		To print all stuffs needed
 	"""
-	__slots__: typing.Final[tuple] = ("__mean", "__cov")
-	__mean: typing.Final[gpytorch.means.Mean]
-	__cov: typing.Final[gpytorch.kernels.Kernel]
+	MAX_ITER: typing.Final = 15000
+	FTOL: typing.Final = 2.2204460492503131e-09
+	GTOL: typing.Final = 1e-5
 
-	def __init__(
-		self,
-		x: torch.Tensor,
-		y: torch.Tensor,
-		likelihood: gpytorch.likelihoods.GaussianLikelihood | gpytorch.likelihoods.FixedNoiseGaussianLikelihood,
-		kernel: gpytorch.kernels.Kernel
-	):
-		super().__init__(x, y, likelihood)
-		self.__mean = gpytorch.means.ZeroMean()
-		self.__cov = kernel
+	class ResultMessage(enum.StrEnum):
+		GRAD = "Convergence: |Gradient| <= GTOL"
+		FVAL = "Convergence: |f_i - f_{i+1}| <= FTOL"
+		ITER = "Stop: Total No. iterations reached limit."
+		STUCK = "No stepping forward"
 
-	@property
-	def cov(self) -> gpytorch.kernels.Kernel:
-		r"""The kernel function
+	class Result(typing.NamedTuple):
+		param: torch.Tensor
+		grad: torch.Tensor
+		hessian: torch.Tensor | None
+		lr: float
+		func_value: float
+		num_iter: int
+		message: "Optimizer.ResultMessage"
 
-		Returns
-		-------
-		gpytorch.kernels.Kernel
-			`gpytorch` kernel which is callable
-		"""
-		return self.__cov
-
-	def forward(self, x: torch.Tensor) -> gpytorch.distributions.MultivariateNormal:
-		r"""The implementation of GPR
+	@staticmethod
+	def print_model(param: torch.Tensor, grad: torch.Tensor | None = None, hessian: torch.Tensor | None = None) -> None:
+		r"""To print the parameters of the model
 
 		Parameters
 		----------
-		x : torch.Tensor
-			Training inputs
-
-		Returns
-		-------
-		gpytorch.distributions.MultivariateNormal
-			A gaussian process with certain mean and covariance
+		param : torch.Tensor
+			Parameters
+		grad : torch.Tensor | None
+			Gradient of the parameters
+		hessian : torch.Tensor | None, optional
+			Hessian matrix of the parameters, by default None
 		"""
-		Mean = self.__mean(x)
-		assert isinstance(Mean, torch.Tensor)
-		return gpytorch.distributions.MultivariateNormal(Mean, self.__cov(x))
+		print(f"param = {plot.format_array(param)}{f" grad = {plot.format_array(grad)}" if grad is not None else ""}{f" hessian = {plot.format_array(hessian)}" if hessian is not None else ""}")
+
+	@staticmethod
+	def print_stuff(
+		loss: float,
+		param: torch.Tensor,
+		lr: float | None,
+		grad: torch.Tensor | None = None,
+		hessian: torch.Tensor | None = None,
+		extra_start_str: str = "\t\t\t",
+		extra_model_str: str | None = None,
+	) -> None:
+		r"""To print all stuffs needed
+
+		Parameters
+		----------
+		loss : float
+			Loss from error function
+		param : torch.Tensor
+			Parameters
+		lr : float | None
+			Learning rate
+		grad : torch.Tensor
+			Gradient of the parameters
+		hessian : torch.Tensor | None, optional
+			Hessian matrix of the parameters, by default None
+		extra_str : str, optional
+			An extra string added at the front, by default "\t"
+		extra_start_str : str | None, optional
+			An extra string added at the front of model printing, by default None
+		"""
+		if extra_model_str is None:
+			extra_model_str = extra_start_str
+		print(f"{extra_start_str}loss = {loss:.15e}{f" - lr = {lr}" if lr is not None else ""}\n{extra_model_str}raw ", end="")
+		Optimizer.print_model(param, grad, hessian)
+
+	@abc.abstractmethod
+	def __new__(
+		cls,
+		param: torch.Tensor,
+		loss_func: collections.abc.Callable[[torch.Tensor], torch.Tensor],
+		*args,
+		**kwargs
+	) -> Result:
+		...
+
+class GradientDescend(Optimizer):
+	r"""Gradient Descend
+
+	Parameters
+	----------
+	param : torch.Tensor
+		Initial parameter
+	loss_func : collections.abc.Callable[[torch.Tensor], torch.Tensor]
+		Loss function to minimize, whose parameter is `param` and return a 0-dim Tensor
+	lr : float, optional
+		Initial learning rate, by default 1.0
+	print_log : bool, optional
+		Whether to print log or not, by default constant.DEBUG_MODE
+
+	Returns
+	-------
+	Optimizer.Result
+		Optimization result
+	"""
+	def __new__(
+		cls,
+		param: torch.Tensor,
+		loss_func: collections.abc.Callable[[torch.Tensor], torch.Tensor],
+		lr: float = 1.0,
+		print_log: bool = constant.DEBUG_MODE
+	) -> Optimizer.Result:
+		param = param.reshape(-1).detach().requires_grad_()
+		loss: torch.Tensor = loss_func(param)
+		grad: torch.Tensor = torch.autograd.grad(loss, param, allow_unused=True, materialize_grads=True)[0]
+		lr = min(lr, (param.abs() / grad.abs()).max().item())
+		last_value: float = loss.item()
+		Optimizer.print_stuff(loss.item(), param, lr, grad, None, "\tInit ")
+		for i in range(1, Optimizer.MAX_ITER + 1):
+			if torch.norm(grad).item() < Optimizer.GTOL:
+				return Optimizer.Result(param, grad, None, lr, loss.item(), i - 1, Optimizer.ResultMessage.GRAD)
+			# adjust lr
+			loss = loss_func((param - lr * grad).detach())
+			if print_log:
+				Optimizer.print_stuff(loss.item(), param - lr * grad, lr, grad)
+			if loss < last_value:
+				param = (param - lr * grad).detach().requires_grad_()
+				lr *= 2.0
+				if print_log:
+					print("\t\t\tloss < last_value")
+			else:
+				if print_log:
+					print("\t\t\tloss > last_value or loss is NaN")
+				while loss >= last_value or loss.isnan().item():
+					last_loop_value: float = loss.item()
+					lr /= 2.0
+					loss = loss_func((param - lr * grad).detach())
+					if print_log:
+						Optimizer.print_stuff(loss.item(), param - lr * grad, lr, grad, None, "\t\t\t\t")
+					if last_loop_value == loss.item():
+						# no stepping forward, but still larger than last, meaning last is the best
+						return Optimizer.Result(param, grad, None, lr, loss_func(param).item(), i, Optimizer.ResultMessage.STUCK)
+				param = (param - lr * grad).detach().requires_grad_()
+			if i % (Optimizer.MAX_ITER // 1000) == 0 or print_log:
+				Optimizer.print_stuff(loss.item(), param, lr, grad, None, f"\tIter {i} - last = {last_value} - ", "\t\t")
+			# stopping criteria
+			if (last_value - loss.item()) / max(abs(last_value), abs(loss.item()), 1.0) < Optimizer.FTOL:
+				return Optimizer.Result(param, grad, None, lr, loss.item(), i, Optimizer.ResultMessage.FVAL)
+			# update parameter and loss
+			last_value = loss.item()
+			loss = loss_func(param) # in fact this has been updated. Here is just for gradient
+			grad = torch.autograd.grad(loss, param, allow_unused=True, materialize_grads=True)[0]
+		return Optimizer.Result(param, grad, None, lr, loss.item(), Optimizer.MAX_ITER, Optimizer.ResultMessage.ITER)
+
+
+class NewtonMethod(Optimizer):
+	def __new__(
+		cls,
+		param: torch.Tensor,
+		loss_func: collections.abc.Callable[[torch.Tensor], torch.Tensor],
+		print_log: bool = constant.DEBUG_MODE
+	) -> Optimizer.Result:
+		param = param.reshape(-1).detach().requires_grad_()
+		loss: torch.Tensor = loss_func(param)
+		grad: torch.Tensor = torch.autograd.grad(loss, param, retain_graph=True, create_graph=True, allow_unused=True, materialize_grads=True)[0] + 0.0 * param
+		hessian: torch.Tensor = torch.autograd.grad(grad, param, torch.eye(param.numel()), allow_unused=True, is_grads_batched=True, materialize_grads=True)[0].detach()
+		hessian = (hessian + hessian.mH) / 2.0
+		mu: float = 1e-6 * torch.max(torch.diag(hessian)).item()
+		v: float = 2.0 # rate to adjust mu
+		last_value: float = loss.item()
+		Optimizer.print_stuff(loss.item(), param, mu, grad, hessian, "\tInit ")
+		for i in range(1, Optimizer.MAX_ITER + 1):
+			if torch.norm(grad).item() < Optimizer.GTOL:
+				return Optimizer.Result(param, grad, None, mu, loss.item(), i - 1, Optimizer.ResultMessage.GRAD)
+			# adjust lr
+			while True:
+				try:
+					L = torch.linalg.cholesky(hessian + mu * torch.eye(param.numel()))
+					break
+				except RuntimeError:
+					mu *= v
+					if math.isinf(mu) or math.isnan(mu):
+						return Optimizer.Result(param, grad, None, mu, loss.item(), i, Optimizer.ResultMessage.STUCK)
+			update = torch.cholesky_solve(grad.reshape(-1, 1), L).reshape(-1)
+			loss = loss_func((param - update).detach())
+			if print_log:
+				Optimizer.print_stuff(loss.item(), param - update, mu, grad, hessian + mu * torch.eye(param.numel()))
+			if loss.item() < last_value:
+				param = (param - update).detach().requires_grad_()
+				rho: float = (last_value - loss.item()) / (grad @ update - 0.5 * update @ hessian @ update + 1e-12).item()
+				mu = mu * max(1.0 / 3.0, 1.0 - (2.0 * rho - 1.0) ** 3)
+				v = 2.0
+				if print_log:
+					print("\t\t\tloss < last_value")
+			else:
+				if print_log:
+					print("\t\t\tloss > last_value or loss is NaN")
+				while loss >= last_value or loss.isnan().item():
+					last_loop_value: float = loss.item()
+					mu = mu * v
+					v *= 2.0
+					while True:
+						try:
+							L = torch.linalg.cholesky(hessian + mu * torch.eye(param.numel()))
+							break
+						except RuntimeError:
+							mu *= v
+							if math.isinf(mu) or math.isnan(mu):
+								return Optimizer.Result(param, grad, None, mu, loss.item(), i, Optimizer.ResultMessage.STUCK)
+					update = torch.cholesky_solve(grad.reshape(-1, 1), L).reshape(-1)
+					loss = loss_func((param - update).detach())
+					if print_log:
+						Optimizer.print_stuff(loss.item(), param - update, mu, grad, hessian + mu * torch.eye(param.numel()), "\t\t\t\t")
+					if last_loop_value == loss.item():
+						# no stepping forward, but still larger than last, meaning last is the best
+						return Optimizer.Result(param, grad, hessian, mu, loss_func(param).item(), i, Optimizer.ResultMessage.STUCK)
+				# once loss is less than last, change the parameter
+				param = (param - update).detach().requires_grad_()
+				rho: float = (last_value - loss.item()) / (grad @ update - 0.5 * update @ hessian @ update + 1e-12).item()
+				mu = mu * max(1.0 / 3.0, 1.0 - (2.0 * rho - 1.0) ** 3)
+				v = 2.0
+			if i % (Optimizer.MAX_ITER // 1000) == 0 or print_log:
+				Optimizer.print_stuff(loss.item(), param, mu, grad, hessian, f"\t\tIter {i} - last = {last_value} - ", "\t\t")
+			# stopping criteria
+			if (last_value - loss.item()) / max(abs(last_value), abs(loss.item()), 1.0) < Optimizer.FTOL:
+				return Optimizer.Result(param, grad, hessian, mu, loss.item(), i, Optimizer.ResultMessage.FVAL)
+			# update parameter and loss
+			last_value = loss.item()
+			loss = loss_func(param) # in fact this has been updated. Here is just for gradient
+			grad = torch.autograd.grad(loss, param, retain_graph=True, create_graph=True, allow_unused=True, materialize_grads=True)[0] + 0.0 * param
+			hessian = torch.autograd.grad(grad, param, torch.eye(param.numel()), allow_unused=True, is_grads_batched=True, materialize_grads=True)[0].detach()
+			hessian = (hessian + hessian.mH) / 2.0
+		return Optimizer.Result(param, grad, hessian, mu, loss.item(), Optimizer.MAX_ITER, Optimizer.ResultMessage.ITER)
+
+
+def rbf(lengthscale: torch.Tensor, x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
+	r"""To calculate the covariance matrix using RBF kernel
+
+	Parameters
+	----------
+	lengthscale : torch.Tensor, shape of (D,)
+		The characteristic lengths
+	x1 : torch.Tensor, shape of (...., M, D)
+		The first feature set
+	x2 : torch.Tensor, shape of (..., N, D)
+		The second feature set
+
+	Returns
+	-------
+	torch.Tensor, shape of (..., M, N)
+		The covariance matrix
+	"""
+	assert x1.shape[-1] == x2.shape[-1] == lengthscale.numel()
+	assert x1.ndim >= 2 and x2.ndim >= 2
+	return torch.exp(-torch.square((x1[..., torch.newaxis, :] - x2[..., torch.newaxis, :, :]) / lengthscale.reshape(-1)).sum(-1) / 2.0)
 
 
 @typing.final
@@ -96,10 +304,16 @@ class SinglePredictor:
 
 	Parameters
 	----------
-	PHASEDIM : int
-		The dimensions of the kernel (and features)
-	kernel_initial_value : torch.Tensor | None
-		Initial value of kernel
+	x_ind : torch.Tensor, of shape (N_IND, PHASEDIM)
+		Coordinates of inducing points
+	x_all : torch.Tensor, of shape (N_ALL, PHASEDIM)
+		All training inputs
+	y_all : torch.Tensor, of shape (N_ALL)
+		All training targets
+	scale : float
+		The scaling factor
+	lengthscale_initial_value : torch.Tensor
+		Initial value of lengthscale
 
 	Attributes
 	----------
@@ -109,8 +323,12 @@ class SinglePredictor:
 		Absolute and relative tolerance of function in optimization
 	GTOL : float
 		Tolerance of gradient in optimization
-	NOISE: float
-		Extra noise term added for numerical stability in matrix inversion
+	x_ind : torch.Tensor, of shape (N_IND, PHASEDIM)
+		Coordinates of inducing points
+	x_all : torch.Tensor, of shape (N_ALL, PHASEDIM)
+		All training inputs
+	y_all : torch.Tensor, of shape (N_ALL)
+		All training targets
 
 	Methods
 	-------
@@ -131,187 +349,56 @@ class SinglePredictor:
 	train()
 		To train the parameters
 	"""
-	@typing.final
-	class __NoConstraint(gpytorch.constraints.Interval):
-		r"""No constraint on the parameter, the value could be any float value
-
-		Parameters
-		----------
-		initial_value : torch.Tensor | None, optional
-			Initial value for the parameter, by default None
-
-		Methods
-		-------
-		transform(tensor)
-			To transform the raw value to the actual value
-		inverse_transform(transformed_tensor)
-			To transform the actual value to the raw value
-		"""
-		def __init__(self, initial_value: torch.Tensor | None = None):
-			super().__init__(
-				lower_bound=-math.inf,
-				upper_bound=math.inf,
-				transform=lambda x: x,
-				inv_transform=lambda x: x,
-				initial_value=initial_value,
-			)
-
-		def __repr__(self) -> str:
-			r"""The official string representation of an object
-
-			Returns
-			-------
-			str
-				The name of the class with an empty parenthesis
-			"""
-			return __class__.__name__ + "()"
-
-		def transform(self, tensor: torch.Tensor) -> torch.Tensor:
-			r"""To transform the raw value to the actual value
-
-			Parameters
-			----------
-			tensor : torch.Tensor
-				The raw value
-
-			Returns
-			-------
-			torch.Tensor
-				The transformed, actual value
-			"""
-			return tensor
-
-		def inverse_transform(self, transformed_tensor: torch.Tensor) -> torch.Tensor:
-			r"""To transform the actual value to the raw value
-
-			Parameters
-			----------
-			transformed_tensor : torch.Tensor
-				The transformed, actual value
-
-			Returns
-			-------
-			torch.Tensor
-				The raw value
-			"""
-			return transformed_tensor
-
-	@typing.final
-	class __GradientDescend(torch.optim.Optimizer):
-		r"""Implementation of the simple gradient descend optimization algorithm
-
-		Parameters
-		----------
-		params : collections.abc.Iterable[torch.Tensor] | collections.abc.Iterable[dict[str, typing.Any]] | collections.abc.Iterable[tuple[str, torch.Tensor]]
-			Parameters
-		lr : float
-			Learning rate
-
-		Methods
-		-------
-		step(closure)
-
-		"""
-		def __init__(
-			self,
-			params: collections.abc.Iterable[torch.Tensor] | collections.abc.Iterable[dict[str, typing.Any]] | collections.abc.Iterable[tuple[str, torch.Tensor]],
-			lr: float
-		) -> None:
-			super().__init__(params, dict(lr=lr))
-
-		def step(self, closure: collections.abc.Callable[[], torch.Tensor] | None = None) -> torch.Tensor | None:
-			r"""Performs a single optimization step.
-
-			Parameters
-			----------
-			closure : collections.abc.Callable[[], torch.Tensor] | None, optional
-				A closure that reevaluates the model and returns the loss, by default None
-
-			Returns
-			-------
-			torch.Tensor | None
-				The loss if `closure` is provided
-			"""
-			loss = None
-			if closure is not None:
-				self.zero_grad()
-				loss = closure()
-				loss.backward()
-
-			for group in self.param_groups:
-				lr: float = group["lr"]
-				p: torch.Tensor
-				for p in group["params"]:
-					if p.grad is None:
-						continue
-					p.data.add_(p.grad.data, alpha=-lr)
-			return loss
-
-	MAX_ITER: typing.Final = 15000
-	FTOL: typing.Final = 2.2204460492503131e-09
-	GTOL: typing.Final = 1e-5
-	NOISE: typing.Final = float(gpytorch.settings.min_fixed_noise.value(torch.double) or 1e-8)
-	__slots__: typing.Final[tuple] = ("__kernel", "__x_all", "__y_all", "__scale", "__model", "__model_param", "__k_inv_y", "__weights_updated", "__optimizer")
-	__kernel: typing.Final[gpytorch.kernels.Kernel]
-	__x_all: torch.Tensor
-	__y_all: torch.Tensor
-	__scale: float
-	__model: typing.Final[GP]
-	__model_param: dict[str, torch.Tensor]
+	__slots__: typing.Final[tuple] = ("x_all", "x_ind", "y_all", "scale", "__raw_to_real", "__raw_lengthscale", "__lr", "__k_inv_y", "__weights_updated")
+	x_all: torch.Tensor
+	x_ind: torch.Tensor
+	y_all: torch.Tensor
+	__raw_to_real: typing.Final[collections.abc.Callable[[torch.Tensor], torch.Tensor]]
+	__raw_lengthscale: torch.Tensor
+	scale: float
+	__lr: float | None
 	__k_inv_y: torch.Tensor
 	__weights_updated: bool
-	__optimizer: __GradientDescend
 
-	def __init__(self, PHASEDIM: int, kernel_initial_value: torch.Tensor | None):
-		self.__kernel = gpytorch.kernels.RBFKernel(PHASEDIM, lengthscale_constraint=SinglePredictor.__NoConstraint(kernel_initial_value))
-		likelihood: typing.Final = gpytorch.likelihoods.FixedNoiseGaussianLikelihood(torch.full((2,), SinglePredictor.NOISE))
-		self.__x_all = torch.Tensor()
-		self.__y_all = torch.Tensor()
-		self.__scale: float = 1.0
-		self.__model = GP(torch.zeros((2, PHASEDIM)), torch.zeros((2,)), likelihood, self.__kernel)
-		self.__model_param: dict[str, torch.Tensor] = copy.deepcopy(self.__model.state_dict())
-		self.__k_inv_y = torch.Tensor()
-		self.__weights_updated = False
-		self.__optimizer = SinglePredictor.__GradientDescend(self.__model.parameters(), lr=1.0)
+	def __init__(
+		self,
+		x_ind: torch.Tensor,
+		x_all: torch.Tensor,
+		y_all: torch.Tensor,
+		scale: float,
+		lengthscale_initial_value: torch.Tensor
+	) -> None:
+		self.x_ind = x_ind.detach().clone()
+		self.x_all = x_all.detach().clone()
+		self.y_all = y_all.detach().clone()
+		self.__raw_to_real = torch.nn.Softplus()
+		self.__raw_lengthscale = torch.where(
+			lengthscale_initial_value * self.__raw_to_real.beta > self.__raw_to_real.threshold,
+			lengthscale_initial_value,
+			lengthscale_initial_value + torch.log(-torch.expm1(-lengthscale_initial_value)) # num stable inv softplus
+		).detach()
+		self.scale = scale
+		self.__lr = 1.0 if self.__raw_lengthscale.numel() >= 10 else None
+		self.train()
+		self.__k_inv_y = (linear_operator.utils.stable_pinverse(rbf(self.__raw_to_real(self.__raw_lengthscale), self.x_all, self.x_ind)) @ self.y_all).detach()
+		self.__weights_updated = True
 
 	@property
-	def model(self) -> GP:
-		r"""The exact GPR model
-
-		Returns
-		-------
-		GP
-			The model
-		"""
-		return self.__model
-
-	@property
-	def x_all(self) -> torch.Tensor:
-		r"""All features for approximate method
-
-		Returns
-		-------
-		torch.Tensor, dtype of `torch.double`, shape of (N, PHASEDIM)
-			Features
-		"""
-		return self.__x_all
-
-	def get_training_features(self) -> torch.Tensor:
-		r"""To get the training features of the core subset
+	def lengthscale(self) -> torch.Tensor:
+		r"""To access the real lengthscale
 
 		Returns
 		-------
 		torch.Tensor
-			The training features
+			Lengthscale in kernel function
 		"""
-		assert self.__model.train_inputs is not None
-		return self.__model.train_inputs[0]
+		return self.__raw_to_real(self.__raw_lengthscale)
 
 	def __update_weights(self) -> None:
 		r"""To update the weights, :math:`K^{-1}y`
 		"""
 		if not self.__weights_updated:
-			self.__k_inv_y = (linear_operator.utils.stable_pinverse(self.__model.cov(self.__x_all, self.get_training_features()).to_dense()) @ self.__y_all).to_dense().detach()
+			self.__k_inv_y = (linear_operator.utils.stable_pinverse(rbf(self.__raw_to_real(self.__raw_lengthscale), self.x_all, self.x_ind)) @ self.y_all).detach()
 			self.__weights_updated = True
 
 	@property
@@ -339,9 +426,9 @@ class SinglePredictor:
 		torch.Tensor, shape of (N,)
 			Corresponding validation/test targets based on noise-free SR/PP mean.
 		"""
-		return (self.__model.cov(x_test, self.get_training_features()) @ self.k_inv_y).to_dense().detach()
+		return (rbf(self.lengthscale, x_test, self.x_ind) @ self.k_inv_y).detach()
 
-	def error(self, use_weight: bool = True) -> torch.Tensor:
+	def error(self) -> torch.Tensor:
 		r"""Error function of subset of regressor (SR) / projected process (PP)
 
 		This function gives the sum of squared error
@@ -351,173 +438,81 @@ class SinglePredictor:
 		torch.Tensor
 			The sum of squared prediction error
 		"""
-		if use_weight:
-			return torch.sum((self.__y_all - self.predict(self.__x_all)) ** 2) * (self.__scale ** 2)
-		else:
-			kmn: torch.Tensor = self.__model.cov(self.__x_all, self.get_training_features()).to_dense()
-			return torch.sum((self.__y_all - (kmn @ (linear_operator.utils.stable_pinverse(kmn) @ self.__y_all)).to_dense()) ** 2) * (self.__scale ** 2)
+		return torch.sum((self.y_all - self.predict(self.x_all)) ** 2) * (self.scale ** 2)
 
 	def update(
 		self,
+		x_ind: torch.Tensor,
 		x_all: torch.Tensor,
 		y_all: torch.Tensor,
 		scale: float,
-		num_points: int
 	) -> None:
 		r"""To update the training features and labels of the model
 
 		Parameters
 		----------
+		x_ind : torch.Tensor, of shape (N_IND_PT, PHASEDIM)
+			Inducing Points
 		x_all : torch.Tensor, of shape (N_ALL_PT, PHASEDIM)
 			All training inputs
 		y_all : torch.Tensor, of shape (N_ALL_PT)
 			All training targets
 		scale : float
-			The scaling factor to increase
-		num_points : int
-			The number of points located at the front of all points that is used as the subset
+			The scaling factor
 		"""
-		self.__x_all = x_all.reshape(-1, x_all.shape[-1]).clone().detach()
-		self.__y_all = y_all.reshape(-1).clone().detach()
-		self.__scale = scale
-		self.__model.set_train_data(self.__x_all[:num_points].detach(), self.__y_all[:num_points].detach(), False)
+		self.x_ind = x_ind.reshape(-1, x_ind.shape[-1]).detach().clone()
+		self.x_all = x_all.reshape(-1, x_all.shape[-1]).detach().clone()
+		self.y_all = y_all.reshape(-1).detach().clone()
+		self.scale = scale
 		self.__weights_updated = False
 
-	def train(self, print_log: bool = DEBUG_MODE) -> None:
+	def train(self, print_log: bool = constant.DEBUG_MODE) -> None:
 		r"""To train the parameters
+
 		Parameters
 		----------
 		print_log : bool, optional
-			Whether to print the log to console, by default `DEBUG_MODE`
+			Whether to print the log to console, by default `constant.DEBUG_MODE`
 		"""
-		def print_model(model: gpytorch.models.ExactGP, print_grad: bool = False) -> None:
-			r"""To print the parameters of the model
-
-			Parameters
-			----------
-			model : gpytorch.models.ExactGP
-				Gaussian process model, containing mean and covariances and their parameters
-			print_grad : bool, optional
-				Whether to print the gradient or not, by default False
-			"""
-			for param_name, param, constraint in model.named_parameters_and_constraints():
-				if print_grad and param.grad is not None:
-					print(f"Parameter name: {param_name:42} value = {plot.format_array(param)} grad = {plot.format_array(param.grad)}")
-				else:
-					print(f"Parameter name: {"".join(param_name.split("raw_")):42} value = {plot.format_array(constraint.transform(param) if isinstance(constraint, gpytorch.constraints.Interval) else param)}")
-
-		def get_lr(optimizer: torch.optim.Optimizer) -> float:
-			r"""To get the learning rate of the optimizer
-
-			Parameters
-			----------
-			optimizer : torch.optim.Optimizer
-				The optimizer, which contains learning rate
-
-			Returns
-			-------
-			float
-				Learning rate
-			"""
-			return optimizer.param_groups[0]["lr"]
-
-		def print_stuff(
-			loss: torch.Tensor,
-			optimizer: torch.optim.Optimizer,
-			model: gpytorch.models.ExactGP,
-			print_grad: bool = False,
-			extra_str: str = "\t"
-		) -> None:
-			r"""To print all stuffs needed
-
-			Parameters
-			----------
-			loss : torch.Tensor
-				Loss by error function
-			optimizer : torch.optim.Optimizer
-				The optimizer, containing learning rate
-			model : gpytorch.models.ExactGP
-				Gaussian process model, containing mean and covariances and their parameters
-			print_grad : bool, optional
-				Whether to print gradient in the model or not, by default False
-			extra_str : str, optional
-				An extra string added at the front, by default "\t"
-			"""
-			print(f"{extra_str}loss = {loss.item():.15e}, lr = {get_lr(optimizer)}\n{extra_str}", end="")
-			print_model(model, print_grad)
+		def loss_func(length: torch.Tensor) -> torch.Tensor:
+			kmn: torch.Tensor = rbf(self.__raw_to_real(length), self.x_all, self.x_ind)
+			return torch.sum((self.y_all - (kmn @ (linear_operator.utils.stable_pinverse(kmn) @ self.y_all)).to_dense()) ** 2) * (self.scale ** 2)
 
 		self.__weights_updated = False
-		assert isinstance(self.__model.train_targets, torch.Tensor)
 		# train model
-		self.__model.likelihood = gpytorch.likelihoods.FixedNoiseGaussianLikelihood(torch.full((self.get_training_features().shape[0],), SinglePredictor.NOISE))
-		self.__model.train()
-		self.__model.likelihood.train()
-		self.__model.load_state_dict(self.__model_param)
-		if print_log:
-			print_model(self.__model)
-		finish_early: bool = False
-		self.__optimizer.zero_grad()
-		loss: torch.Tensor = self.error(False)
-		loss.backward()
-		last_value: float = loss.item()
-		print_stuff(loss, self.__optimizer, self.__model, True, "Init")
-		for i in range(1, SinglePredictor.MAX_ITER + 1):
-			if math.sqrt(sum(torch.sum(param.grad ** 2).item() if param.grad is not None else math.nan for param in self.__model.parameters())) < SinglePredictor.GTOL:
-				finish_early = True
-				print("Convergence: |Gradient| <= GTOL")
-				i -= 1
-				break
-			# adjust lr
-			old_prm: dict[str, torch.Tensor] = copy.deepcopy(self.__model.state_dict())
-			self.__optimizer.step()
-			loss = self.error(False)
-			if print_log:
-				print_stuff(loss, self.__optimizer, self.__model, True)
-			if loss < last_value:
-				self.__optimizer = SinglePredictor.__GradientDescend(self.__model.parameters(), lr=get_lr(self.__optimizer) * 2.0)
-				if print_log:
-					print("loss < last_value")
-					print_stuff(loss, self.__optimizer, self.__model, True)
-			else:
-				if print_log:
-					print("loss > last_value or loss is NaN")
-				while loss >= last_value or loss.isnan().item():
-					last_loop_value: float = loss.item()
-					self.__model.load_state_dict(old_prm)
-					self.__optimizer = SinglePredictor.__GradientDescend(self.__model.parameters(), lr=get_lr(self.__optimizer) / 2.0)
-					self.__optimizer.step()
-					loss = self.error(False)
-					if print_log:
-						print_stuff(loss, self.__optimizer, self.__model, True)
-					if last_loop_value == loss.item():
-						print("No stepping forward")
-						# no stepping forward, but still larger than last, meaning last is the best
-						self.__model.load_state_dict(old_prm)
-						loss = self.error(False)
-						break
-			if i % (SinglePredictor.MAX_ITER // 1000) == 0 or DEBUG_MODE:
-				print(f"Iter {i} - Loss: {loss.item():.15e} - lr: {get_lr(self.__optimizer)}")
-				print_model(self.__model, True)
-				print_model(self.__model)
-			# stopping criteria
-			if (last_value - loss.item()) / max(abs(last_value), abs(loss.item()), 1.0) < SinglePredictor.FTOL:
-				finish_early = True
-				print("Convergence: |f_i - f_{i+1}| <= FTOL")
-				break
-			self.__optimizer = SinglePredictor.__GradientDescend(self.__model.parameters(), lr=get_lr(self.__optimizer))
-			self.__optimizer.zero_grad()
-			last_value = loss.item()
-			loss.backward()
-			if print_log:
-				print_stuff(loss, self.__optimizer, self.__model, True, f"\tlast = {last_value}, ")
-		if not finish_early:
-			print("Stop: Total No. iterations reached limit.")
-		print(f"Iter {i} - Loss: {loss.item():.15e} - lr: {get_lr(self.__optimizer)}")
-		print_model(self.__model)
-		print("", flush=True)
-		self.__model.eval()
-		self.__model.likelihood.eval()
-		self.__model_param = copy.deepcopy(self.__model.state_dict())
+		with torch.no_grad():
+			self.__raw_lengthscale.requires_grad = True
+		print(f"\tscale = {self.scale}\n\t", end="")
+		Optimizer.print_model(self.lengthscale)
+		if self.__lr is None:
+			loss: float = math.inf
+			param: torch.Tensor = self.__raw_lengthscale
+			while True:
+				result = NewtonMethod(param, loss_func, print_log)
+				print(f"\tIter = {result.num_iter} - {result.message}")
+				Optimizer.print_stuff(result.func_value, self.__raw_to_real(result.param), None, extra_start_str="\t")
+				if result.message in (Optimizer.ResultMessage.FVAL, Optimizer.ResultMessage.GRAD) or result.func_value >= loss:
+					break
+				else:
+					loss = result.func_value
+					param = result.param
+				result = GradientDescend(param, loss_func, print_log=print_log)
+				print(f"\tIter = {result.num_iter} - {result.message}")
+				Optimizer.print_stuff(result.func_value, self.__raw_to_real(result.param), result.lr, extra_start_str="\t")
+				if result.message in (Optimizer.ResultMessage.FVAL, Optimizer.ResultMessage.GRAD) or result.func_value >= loss:
+					break
+				else:
+					loss = result.func_value
+					param = result.param
+		else:
+			result = GradientDescend(self.__raw_lengthscale, loss_func, self.__lr, print_log)
+			print(f"\tIter = {result.num_iter} - {result.message}")
+			Optimizer.print_stuff(result.func_value, self.__raw_to_real(result.param), result.lr, extra_start_str="\t")
+		with torch.no_grad():
+			self.__raw_lengthscale.requires_grad = False
+			self.__raw_lengthscale = result.param.detach().clone()
+			if self.__lr is not None:
+				self.__lr = result.lr
 
 	def get_marginal(self, dimensions: collections.abc.Sequence[int], x_test: torch.Tensor) -> torch.Tensor:
 		r"""To get the marginal distribution of current gaussian process regression
@@ -534,10 +529,9 @@ class SinglePredictor:
 		torch.Tensor, shape of (N,)
 			Corresponding validation/test targets based on noise-free SR/PP mean.
 		"""
-		phasedim: typing.Final[int] = self.__x_all.shape[-1]
-		marginal_kernel: typing.Final[gpytorch.kernels.RBFKernel] = gpytorch.kernels.RBFKernel(len(dimensions), lengthscale_constraint=SinglePredictor.__NoConstraint(self.__model.cov.lengthscale.reshape(1, phasedim)[:, dimensions]))
-		prefactor: typing.Final[float] = math.sqrt((2.0 * torch.pi) ** (phasedim - len(dimensions))) * self.__model.cov.lengthscale[:, [i for i in range(phasedim) if i not in dimensions]].prod().item()
-		return prefactor * marginal_kernel(x_test, self.get_training_features()[:, dimensions]).to_dense() @ self.k_inv_y
+		phasedim: typing.Final[int] = self.x_all.shape[-1]
+		prefactor: typing.Final[float] = math.sqrt((2.0 * torch.pi) ** (phasedim - len(dimensions))) * self.lengthscale[[i for i in range(phasedim) if i not in dimensions]].prod().item()
+		return prefactor * rbf(self.lengthscale[dimensions], x_test, self.x_ind[:, dimensions]).to_dense() @ linear_operator.utils.stable_pinverse(rbf(self.lengthscale[dimensions], self.x_all[:, dimensions], self.x_ind[:, dimensions])) @ self.y_all
 
 
 @typing.final
@@ -546,19 +540,39 @@ class GPRPredictors:
 
 	Parameters
 	----------
-	kernel : gpytorch.kernels.Kernel, optional
-		The kernel of predictors, by default gpytorch.kernels.RBFKernel(pes.PHASEDIM)
+	config : pes.ModelConfig
+		Configuration of the model
+	init_dist : pes.InitialDistribution
+		Initial distribution to generate points, density, and weights
+	x_all : list[torch.Tensor], len of NUM_TRIG, each of shape (num_points * NUM_XTR_RATIO, PHASEDIM)
+		All training inputs
+	y_all : list[torch.Tensor], len of NUM_TRIG, each of shape (num_points * NUM_XTR_RATIO,)
+		All training targets
+	num_ind : int
+		The number of inducing points
+	kernel_initial_value : torch.Tensor
+		The initial value of lengthscale for all predictors
+	model : pes.Potential
+		Quantities derived from potential
+	mass : torch.Tensor, shape of (DIM,)
+		Mass of classical degree of freedom
+	dt : float
+		Time interval
 
 	Methods
 	-------
-	__check_predictor(predictor)
-		To check if the predictor could be used for training / predicting
-	update(x_all, y_all, num_pt, scale)
+	inducing_points()
+		To get all inducing points
+	scale()
+		The rescaling factor of each predictor
+	predict(x_input, ElementIndex, num_dt)
+		To predict test targets based on input and corresponding density matrix element
+	get_marginal(dimensions, x_input, ElementIndex, num_dt)
+		To get the marginal distribution of current gaussian process regressions
+	update(x_all, y_all, num_ind, num_pt)
 		To update the training inputs and targets, as well as the rescale factor
 	train()
 		To train each predictor
-	predict(x_input, ElementIndex)
-		To predict test targets based on input and corresponding density matrix element
 	print(f)
 		To print hyperparameters to file
 	"""
@@ -578,15 +592,58 @@ class GPRPredictors:
 		bool
 			Availability of training / predicting
 		"""
-		return isinstance(predictor.model.train_targets, torch.Tensor) and not torch.all(predictor.model.train_targets == 0).item() # pyright: ignore[reportArgumentType, reportCallIssue]
+		return not torch.all(predictor.y_all == 0).item()
 
-	__slots__: typing.Final[tuple] = ("__config", "__predictors",)
+	drc: typing.Final = evolve.Direction.BACKWARD
+	__JUDGE_INCLUDE_THRESHOLD: typing.Final = 0.1
+	__JUDGE_REGISTER_THRESHOLD: typing.Final = 0.1
+	__slots__: typing.Final[tuple] = ("__config", "__predictors", "__kmeans", "__x_inds", "__lengths", "__k_inv_y", "__num_dt", "__model", "__mass", "__dt")
 	__config: typing.Final[pes.ModelConfig]
-	__predictors: typing.Final[tuple[SinglePredictor, ...]]
+	__predictors: typing.Final[list[SinglePredictor]]
+	__kmeans: typing.Final[torch_kmeans.KMeans]
+	__x_inds: typing.Final[tuple[list[torch.Tensor], ...]]
+	__lengths: typing.Final[tuple[list[torch.Tensor], ...]]
+	__k_inv_y: typing.Final[tuple[list[torch.Tensor], ...]]
+	__num_dt: typing.Final[tuple[list[int], ...]]
+	__model: typing.Final[pes.Potential]
+	__mass: typing.Final[torch.Tensor]
+	__dt: typing.Final[float]
 
-	def __init__(self, config: pes.ModelConfig, kernel_initial_value: torch.Tensor | None):
+	def __init__(
+		self,
+		config: pes.ModelConfig,
+		x_all: list[torch.Tensor],
+		y_all: list[torch.Tensor],
+		num_ind: int,
+		kernel_initial_value: torch.Tensor,
+		model: pes.Potential,
+		mass: torch.Tensor,
+		dt: float,
+	):
+		KMEANS_THRESHOLD: typing.Final = 0.1
 		self.__config = config
-		self.__predictors = tuple(SinglePredictor(config.PHASEDIM, kernel_initial_value) for _ in config.ELEMENT_RANGE)
+		self.__predictors = []
+		self.__kmeans = torch_kmeans.KMeans(init_method="k-means++", n_clusters=num_ind, seed=constant.SEED, verbose=constant.DEBUG_MODE)
+		ind_pts: typing.Final[torch.Tensor] = torch.cat([self.__kmeans(x[torch.newaxis, y.abs() > KMEANS_THRESHOLD * y.abs().max()]).centers for x, y in zip(x_all, y_all)])
+		self.__x_inds = tuple([] for _ in config.TRIG_RANGE) # same for real and imag, since they have the same inducing points
+		self.__num_dt = tuple([] for _ in config.TRIG_RANGE) # same for real and imag
+		for iElement in config.ELEMENT_RANGE:
+			print("Initial Training " + plot.get_RI_label(iElement, config.NUM_PES))
+			TrilIndex: int = self.__config.FLATTEN_TRIL_INDEX[iElement]
+			y: torch.Tensor = y_all[TrilIndex].real if iElement // config.NUM_PES <= iElement % config.NUM_PES else y_all[TrilIndex].imag
+			self.__predictors.append(SinglePredictor(
+				ind_pts[TrilIndex],
+				x_all[TrilIndex],
+				y,
+				1.0 / y.abs().max().item(),
+				kernel_initial_value
+			)) # this includes training of initial distribution
+		self.__lengths = tuple([] for _ in config.ELEMENT_RANGE)
+		self.__k_inv_y = tuple([] for _ in config.ELEMENT_RANGE)
+		self.train(y_all, 0) # to save the initial fitting, and take the residue to re-fit
+		self.__model = model
+		self.__mass = mass
+		self.__dt = dt
 
 	def __getitem__(self, ElementIndex: int) -> SinglePredictor:
 		r"""To get corresponding predictor
@@ -604,51 +661,27 @@ class GPRPredictors:
 		assert 0 <= ElementIndex < self.__config.NUM_ELM
 		return self.__predictors[ElementIndex]
 
-	def update(
-		self,
-		x_all: list[torch.Tensor],
-		y_all: list[torch.Tensor],
-		num_points: int | list[int],
-		scale: torch.Tensor
-	) -> None:
-		r"""To update the training inputs and targets, as well as the rescale factor
+	@property
+	def inducing_points(self) -> torch.Tensor:
+		r"""To get all inducing points
 
-		Parameters
-		----------
-		x_all : list[torch.Tensor], len of NUM_TRIG, each of shape (num_points * (1 + NUM_XTR_RATIO), PHASEDIM)
-			All training inputs
-		y_all : list[torch.Tensor], len of NUM_TRIG, each of shape (num_points * (1 + NUM_XTR_RATIO))
-			All training targets
-		num_points : int | torch.Tensor, shape of (NUM_TRIG,)
-			The number of points located at the front of all points that is used as the subset
-		scale : torch.Tensor, shape of (NUM_ELM,)
-			The rescale factor
+		Returns
+		-------
+		torch.Tensor, shape of (NUM_TRIG, num_ind, PHASEDIM)
+			Inducing points of independent, lower triangular elements
 		"""
-		if isinstance(num_points, int):
-			num_points = [num_points] * self.__config.NUM_TRIG
-		for iElement, pred in enumerate(self.__predictors):
-			RowIndex: int = iElement // self.__config.NUM_PES
-			ColIndex: int = iElement % self.__config.NUM_PES
-			TrilIndex: int = self.__config.FLATTEN_TRIL_INDEX[iElement]
-			pred.update(
-				x_all[TrilIndex],
-				y_all[TrilIndex].real if RowIndex <= ColIndex else y_all[TrilIndex].imag,
-				scale[iElement].item(),
-				num_points[TrilIndex]
-			)
+		return torch.stack([self.__predictors[iTrig].x_ind for iTrig in self.__config.TRIL_ELEMENT_INDICES], 0)
 
-	def train(self, print_log: bool = DEBUG_MODE) -> None:
-		r"""To train each predictor
+	@property
+	def scale(self) -> torch.Tensor:
+		r"""The rescaling factor of each predictor
 
-		Parameters
-		----------
-		print_log : bool, optional
-			Whether to print the log to console, by default `DEBUG_MODE`
+		Returns
+		-------
+		torch.Tensor, shape of (NUM_ELM,)
+			The rescaling factor
 		"""
-		for iElement in self.__config.ELEMENT_RANGE:
-			if __class__.__check_predictor(self.__predictors[iElement]):
-				print("Training " + plot.get_RI_label(iElement, self.__config.NUM_PES))
-				self.__predictors[iElement].train(print_log)
+		return torch.tensor([pred.scale for pred in self.__predictors])
 
 	def __combine_to_complex[**P](
 		self,
@@ -686,8 +719,8 @@ class GPRPredictors:
 		else: # RowIndex < ColIndex
 			return tuple((real - 1.j * imag).reshape(x_input.shape[:-1] + real.shape[1:]) for real, imag in zip(call_single_predictor(self.__predictors[RowIndex * self.__config.NUM_PES + ColIndex], x_test, *args, **kwargs), call_single_predictor(self.__predictors[ColIndex * self.__config.NUM_PES + RowIndex], x_test, *args, **kwargs)))
 
-	def predict(self, x_input: torch.Tensor, ElementIndex: int) -> torch.Tensor:
-		r"""To predict test targets based on input and corresponding density matrix element
+	def __residue_predict(self, x_input: torch.Tensor, ElementIndex: int) -> torch.Tensor:
+		r"""To predict test targets residue based on input and corresponding density matrix element
 
 		Parameters
 		----------
@@ -708,11 +741,99 @@ class GPRPredictors:
 			lambda pred, x_test: (pred.predict(x_test),) if GPRPredictors.__check_predictor(pred) else (torch.zeros(x_test.shape[0]),)
 		)[0]
 
+	def __non_residue_predict(
+		self,
+		x_input: torch.Tensor,
+		ElementIndex: int,
+		num_dt: int
+	) -> torch.Tensor:
+		r"""To predict main part by back propagation to each saved predictors
+
+		Parameters
+		----------
+		x_input : torch.Tensor, shape of (..., PHASEDIM)
+			Test inputs
+		ElementIndex : int
+			Index of the element
+		num_dt : int
+			The number of time steps since epoch
+
+		Returns
+		-------
+		torch.Tensor, shape of (...)
+			Density of the element of all test inputs
+		"""
+		TrilIndex: typing.Final[int] = self.__config.FLATTEN_TRIL_INDEX[ElementIndex]
+		result: torch.Tensor = torch.zeros(x_input.shape[:-1], dtype=torch.cdouble)
+		next_idx: int = len(self.__num_dt[TrilIndex]) - 1
+		if next_idx >= 0: # only back-propagate when there are saved predictors
+			RowIndex: typing.Final[int] = ElementIndex // self.__config.NUM_PES
+			ColIndex: typing.Final[int] = ElementIndex % self.__config.NUM_PES
+			RealElmIdx: typing.Final[int] = min(RowIndex, ColIndex) * self.__config.NUM_PES + max(RowIndex, ColIndex)
+			ImagElmIdx: typing.Final[int] = max(RowIndex, ColIndex) * self.__config.NUM_PES + min(RowIndex, ColIndex)
+			phase_factor: torch.Tensor = torch.ones_like(result)
+			r0: torch.Tensor = x_input[..., :self.__config.DIM] # M * D
+			p0: torch.Tensor = x_input[..., self.__config.DIM:] # M * D
+			if self.__num_dt[TrilIndex][next_idx] == num_dt: # meet last one first
+				# GP predict
+				if RowIndex == ColIndex:
+					result += rbf(self.__lengths[ElementIndex][next_idx], x_input, self.__x_inds[TrilIndex][next_idx]) @ self.__k_inv_y[ElementIndex][next_idx]
+				else:
+					result += torch.complex(rbf(self.__lengths[RealElmIdx][next_idx], x_input, self.__x_inds[TrilIndex][next_idx]) @ self.__k_inv_y[RealElmIdx][next_idx], rbf(self.__lengths[ImagElmIdx][next_idx], x_input, self.__x_inds[TrilIndex][next_idx]) @ self.__k_inv_y[ImagElmIdx][next_idx])
+				next_idx -= 1
+				if next_idx < 0: # no more saved predictor, break to save time
+					return result
+			for iTick in range(num_dt - 1, -1, -1): # n-1, n-2, ..., 0
+				# evolve back
+				r2, p1 = evolve.evolve_coordinates_adiabatically(self.__model, r0, p0, self.__mass, self.__dt / 2.0, GPRPredictors.drc, RowIndex, ColIndex)
+				r4, p2 = evolve.evolve_coordinates_adiabatically(self.__model, r2, p1, self.__mass, self.__dt / 2.0, GPRPredictors.drc, RowIndex, ColIndex)
+				if RowIndex != ColIndex:
+					# accumulate phase factor
+					evolve.evolve_density_adiabatically(self.__model, phase_factor, r4, r2, r0, evolve.Direction.FORWARD, self.__dt, RowIndex, ColIndex)
+				r0 = r4
+				p0 = p2
+				if next_idx >= 0 and self.__num_dt[TrilIndex][next_idx] == iTick: # meet last one first
+					# GP predict
+					x0: torch.Tensor = torch.cat((r0, p0), -1)
+					if RowIndex == ColIndex:
+						result += rbf(self.__lengths[ElementIndex][next_idx], x0, self.__x_inds[TrilIndex][next_idx]) @ self.__k_inv_y[ElementIndex][next_idx]
+					else:
+						result += torch.complex(rbf(self.__lengths[RealElmIdx][next_idx], x0, self.__x_inds[TrilIndex][next_idx]) @ self.__k_inv_y[RealElmIdx][next_idx], rbf(self.__lengths[ImagElmIdx][next_idx], x0, self.__x_inds[TrilIndex][next_idx]) @ self.__k_inv_y[ImagElmIdx][next_idx]) * phase_factor
+					next_idx -= 1
+					if next_idx < 0: # no more saved predictor, break to save time
+						return result
+		return result
+
+	def predict(
+		self,
+		x_input: torch.Tensor,
+		ElementIndex: int,
+		num_dt: int
+	) -> torch.Tensor:
+		r"""To predict test targets based on input and corresponding density matrix element
+
+		Parameters
+		----------
+		x_input : torch.Tensor, shape of (..., PHASEDIM)
+			Test inputs
+		ElementIndex : int
+			Index of the element
+		num_dt : int
+			The number of time steps since epoch
+
+		Returns
+		-------
+		torch.Tensor, shape of (...)
+			Density of the element of all test inputs
+		"""
+		return self.__residue_predict(x_input, ElementIndex) + self.__non_residue_predict(x_input, ElementIndex, num_dt)
+
 	def get_marginal(
 		self,
 		dimensions: int | collections.abc.Iterable[int],
 		x_input: torch.Tensor,
-		ElementIndex: int
+		ElementIndex: int,
+		num_dt: int
 	) -> torch.Tensor:
 		r"""To get the marginal distribution of current gaussian process regressions
 
@@ -724,10 +845,12 @@ class GPRPredictors:
 			Test inputs
 		ElementIndex : int
 			Index of the element
+		num_dt : int
+			The number of time steps since epoch
 
 		Returns
 		-------
-		torch.Tensor, shape of (N,)
+		torch.Tensor, shape of (...)
 			Marginal distribution on the inputs
 		"""
 		def call_single_predictor(pred: SinglePredictor, x_test: torch.Tensor, dims: collections.abc.Sequence[int]) -> tuple[torch.Tensor]:
@@ -758,6 +881,29 @@ class GPRPredictors:
 			dimensions = tuple(set(dimensions)) # remove duplicate
 		assert all(0 <= dim <= self.__config.PHASEDIM for dim in dimensions)
 		assert x_input.shape[-1] == len(dimensions)
+		# RowIndex: typing.Final[int] = ElementIndex // self.__config.NUM_PES
+		# ColIndex: typing.Final[int] = ElementIndex % self.__config.NUM_PES
+		# TrilIndex: typing.Final[int] = self.__config.FLATTEN_TRIL_INDEX[ElementIndex]
+		# result: torch.Tensor = torch.zeros(x_input.shape[:-1], dtype=torch.cdouble)
+		# next_idx: int = len(self.__num_dt[TrilIndex]) - 1
+		# r0: torch.Tensor = x_input[..., :self.__config.DIM] # M * D
+		# p0: torch.Tensor = x_input[..., self.__config.DIM:] # M * D
+		# for iTick in range(num_dt):
+		# 	# evolve back
+		# 	r2, p1 = evolve.evolve_coordinates_adiabatically(self.__model, r0, p0, self.__mass, self.__dt / 2.0, GPRPredictors.drc, RowIndex, ColIndex)
+		# 	r0, p0 = evolve.evolve_coordinates_adiabatically(self.__model, r2, p1, self.__mass, self.__dt / 2.0, GPRPredictors.drc, RowIndex, ColIndex)
+		# 	if next_idx >= 0 and self.__num_dt[TrilIndex][next_idx] == num_dt - 1 - iTick: # meet last one first
+		# 		# GP predict
+		# 		x0: torch.Tensor = torch.cat((r0, p0), -1)
+		# 		if RowIndex == ColIndex:
+		# 			result += rbf(self.__lengths[ElementIndex][next_idx][dimensions], x0[..., dimensions], self.__x_inds[TrilIndex][next_idx][..., dimensions]) @ self.__k_inv_y[ElementIndex][next_idx]
+		# 		else:
+		# 			RealElmIdx: int = min(RowIndex, ColIndex) * self.__config.NUM_PES + max(RowIndex, ColIndex)
+		# 			ImagElmIdx: int = max(RowIndex, ColIndex) * self.__config.NUM_PES + min(RowIndex, ColIndex)
+		# 			result += (rbf(self.__lengths[RealElmIdx][next_idx][dimensions], x0[..., dimensions], self.__x_inds[TrilIndex][next_idx][..., dimensions]) @ self.__k_inv_y[RealElmIdx][next_idx]) + 1.j * (rbf(self.__lengths[ImagElmIdx][next_idx][dimensions], x0[..., dimensions], self.__x_inds[TrilIndex][next_idx][..., dimensions]) @ self.__k_inv_y[ImagElmIdx][next_idx])
+		# 		next_idx -= 1
+		# # back to origin, using initial distribution
+		# return result + self.__combine_to_complex(
 		return self.__combine_to_complex(
 			x_input,
 			ElementIndex // self.__config.NUM_PES,
@@ -765,6 +911,86 @@ class GPRPredictors:
 			call_single_predictor,
 			dimensions
 		)[0]
+
+	def update(
+		self,
+		x_ind: list[torch.Tensor],
+		x_all: list[torch.Tensor],
+		y_all: list[torch.Tensor],
+		num_dt: int
+	) -> None:
+		r"""To update the training inputs and targets, as well as the rescale factor, and to judge whether to register the predictor with current num_dt
+
+		Parameters
+		----------
+		x_ind : list[torch.Tensor], len of NUM_TRIG, each of shape (num_inducing, PHASEDIM)
+			All inducing points
+		x_all : list[torch.Tensor], len of NUM_TRIG, each of shape (num_points, PHASEDIM)
+			All training inputs
+		y_all : list[torch.Tensor], len of NUM_TRIG, each of shape (num_points,)
+			All training targets
+		num_dt : int
+			The number of time steps since epoch
+		"""
+		# update the predictor
+		for iPES, jPES, iElement, int_pt, x, y in zip(self.__config.TRIL_ROW_INDICES, self.__config.TRIL_COL_INDICES, self.__config.TRIL_ELEMENT_INDICES, x_ind, x_all, y_all):
+			# predict sample points, and choose the inducing points
+			y_res: torch.Tensor = y - self.__non_residue_predict(x, iElement, num_dt) # residue of all training points
+			if iPES == jPES:
+				self.__predictors[iElement].update(int_pt, x, y_res.real, 1.0 / y_res.real.abs().max().item())
+			else: # if iPES != jPES
+				SymElmIdx: int = jPES * self.__config.NUM_PES + iPES
+				self.__predictors[iElement].update(int_pt, x, y_res.imag, 1.0 / y_res.imag.abs().max().item())
+				self.__predictors[SymElmIdx].update(int_pt, x, y_res.real, 1.0 / y_res.real.abs().max().item())
+
+	def train(
+		self,
+		y_all: list[torch.Tensor],
+		num_dt: int,
+		print_log: bool = constant.DEBUG_MODE
+	) -> None:
+		r"""To train each predictor, and to extract old predictor if necessary
+
+		Parameters
+		----------
+		y_all : list[torch.Tensor], len of NUM_TRIG, each of shape (num_points,)
+			All training targets
+		num_dt : int
+			The number of time steps since epoch
+		print_log : bool, optional
+			Whether to print the log to console, by default `constant.DEBUG_MODE`
+		"""
+		for iTrig, iPES, jPES, iElement, y in zip(self.__config.TRIG_RANGE, self.__config.TRIL_ROW_INDICES, self.__config.TRIL_COL_INDICES, self.__config.TRIL_ELEMENT_INDICES, y_all):
+			SymElmIdx: int = jPES * self.__config.NUM_PES + iPES
+			x_all: torch.Tensor = self.__predictors[iElement].x_all
+			# two cases: if no predictors is saved, residue is exact - predict; if there is predictor, residue is y_all in predictors
+			y_res: torch.Tensor # residue of all training points
+			if len(self.__num_dt[iTrig]) == 0:
+				y_res = y - self.__residue_predict(x_all, iElement) # use predict instead of y_all since y_all is exact
+			else:
+				y_res = (self.__predictors[iElement].y_all + 0.0j) if iPES == jPES else (self.__predictors[SymElmIdx].y_all + 1.j * self.__predictors[iElement].y_all)
+			pts_include: torch.Tensor = y.abs() > y.abs().max() * GPRPredictors.__JUDGE_INCLUDE_THRESHOLD
+			if torch.any(y_res[pts_include].abs() > GPRPredictors.__JUDGE_REGISTER_THRESHOLD * y[pts_include].abs()).item():
+				y_res_res: torch.Tensor = y - y_res # the new residue to fit
+				print(f"Register the residue predictor for {plot.get_element_label(iPES, jPES)} at {num_dt} dt; now maximum residue is {y_res_res.abs().max()} at {plot.format_array(x_all[y_res_res.abs().argmax()])}")
+				# register predictor
+				self.__x_inds[iTrig].append(self.__predictors[iElement].x_ind.detach().clone())
+				self.__lengths[iElement].append(self.__predictors[iElement].lengthscale.detach().clone())
+				self.__k_inv_y[iElement].append(self.__predictors[iElement].k_inv_y.detach().clone())
+				self.__num_dt[iTrig].append(num_dt)
+				# then choose the inducing points, and clear the predictor
+				x_ind: torch.Tensor = self.__kmeans(x_all[torch.newaxis]).centers[0]
+				if iPES == jPES:
+					self.__predictors[iElement].update(x_ind, x_all, y_res_res.real, 1.0 / y_res_res.real.abs().max().item())
+				else: # if iPES < jPES:
+					self.__lengths[SymElmIdx].append(self.__predictors[SymElmIdx].lengthscale.detach().clone())
+					self.__k_inv_y[SymElmIdx].append(self.__predictors[SymElmIdx].k_inv_y.detach().clone())
+					self.__predictors[SymElmIdx].update(x_ind, x_all, y_res_res.real, 1.0 / y_res_res.real.abs().max().item())
+					self.__predictors[iElement].update(x_ind, x_all, y_res_res.imag, 1.0 / y_res_res.imag.abs().max().item())
+		for iElement, pred in zip(self.__config.ELEMENT_RANGE, self.__predictors):
+			if __class__.__check_predictor(pred):
+				print("Training " + plot.get_RI_label(iElement, self.__config.NUM_PES))
+				pred.train(print_log)
 
 	def print(self, f: typing.IO) -> None:
 		r"""To print the parameters to file
@@ -775,5 +1001,5 @@ class GPRPredictors:
 			The file to save the parameters
 		"""
 		for predictor in self.__predictors:
-			np.savetxt(f, predictor.model.cov.lengthscale.detach().cpu().numpy().reshape(1, -1))
+			np.savetxt(f, predictor.lengthscale.detach().cpu().numpy().reshape(1, -1))
 		print("\n", file=f)

@@ -10,6 +10,8 @@ import torch
 
 HBAR: typing.Final = 1.0
 
+SEED: typing.Final = 0
+
 DTYPE: typing.Final = torch.double
 DEVICE: typing.Final = "cuda" if torch.cuda.is_available() else "cpu"
 ENC: typing.Final = "latin1"
@@ -17,6 +19,8 @@ BYTE_ENC: typing.Final = "utf-8"
 FMT: typing.Final = r"%.18e"
 
 type Predictor = collections.abc.Callable[[torch.Tensor, int], torch.Tensor]
+
+DEBUG_MODE: bool = True
 
 INPUT_FILENAME: typing.Final = "input"
 

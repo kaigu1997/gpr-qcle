@@ -206,6 +206,10 @@ class Quantity:
 		The number of dt between outputs
 	output_interval : float
 		The time interval between outputs
+	reopt_ticks : int
+		The number of outputs between hyperparameter reoptimization
+	reopt_inteval : float
+		The time interval between hyperparameter reoptimization
 	total_ticks : int
 		The upper bound of the number of outputs to finish the evolution, estimated by :math:`t=\frac{|x_0|-(-|x_0|)}{p_0/m}*coe`
 	"""
@@ -263,6 +267,7 @@ class Quantity:
 	dt: typing.Final[float]
 	output_ticks: typing.Final[int]
 	output_interval: typing.Final[float]
+	reopt_ticks: typing.Final[int]
 	reopt_interval: typing.Final[float]
 	total_ticks: typing.Final[int]
 
@@ -314,8 +319,10 @@ class Quantity:
 			dt,
 			constant.HBAR / (self.model.max_potential() + 0.5 * (1.0 / self.mass * (constant.HBAR * math.pi / self.dx) ** 2).sum().item()) # hbar/E
 		))
-		self.output_ticks = int(round(self.output_interval / self.dt))
+		self.output_ticks = max(int(round(self.output_interval / self.dt)), 1)
 		self.output_interval = self.output_ticks * self.dt
+		self.reopt_ticks = max(int(round(self.reopt_interval / self.output_interval)), 1)
+		self.reopt_interval = self.reopt_ticks * self.output_interval
 		self.total_ticks = int((self.x_range / (self.p0 / self.mass)).max().item() * 1.5 / self.output_interval) if self.output_ticks != 0 else 0
 		# assume a gaussian wavepacket, widening as :math:`\sigma_x^2(t)=\sigma_{x}^2(0)+(\sigma_{p}(0)*t/m)^2`
 		# after widening, 5sigma should still be within the box

@@ -202,7 +202,6 @@ class evolve_density_non_adiabatically:
 		mass: torch.Tensor,
 		dt: float,
 		predictor: constant.Predictor,
-		variance: constant.Predictor,
 		RowIndex: int,
 		ColIndex: int
 	) -> torch.Tensor:
@@ -285,7 +284,7 @@ class evolve_density_non_adiabatically:
 def evolve(
 	model: pes.Potential,
 	points: list[torch.Tensor],
-	densities: list[torch.Tensor],
+	densities: list[torch.Tensor] | None,
 	mass: torch.Tensor,
 	dt: float,
 	predictor: constant.Predictor
@@ -298,7 +297,7 @@ def evolve(
 		Quantities derived from potential
 	points : list[torch.Tensor], len of NUM_TRIG, each of shape (NUM_PTS, PHASEDIM)
 		Phase space coordinates of selected points for each density matrix element
-	densities : list[torch.Tensor], len of NUM_TRIG, each of shape (NUM_PTS,)
+	densities : list[torch.Tensor], len of NUM_TRIG, each of shape (NUM_PTS,) | None
 		Density matrix element of the points
 	mass : torch.Tensor, shape of (DIM,)
 		Mass of classical degree of freedom
@@ -319,7 +318,8 @@ def evolve(
 		x4: torch.Tensor # M * D
 		p2: torch.Tensor # M * D
 		x4, p2 = evolve_coordinates_adiabatically(model, x2, p1, mass, dt / 2.0, evolve.drc, iPES, jPES)
-		densities[iTrig][...] = evolve_density_non_adiabatically(model, densities[iTrig], x4, p2, x2, p1, mass, dt, predictor, iPES, jPES)
+		if densities is not None:
+			densities[iTrig][...] = evolve_density_non_adiabatically(model, densities[iTrig], x4, p2, x2, p1, mass, dt, predictor, iPES, jPES)
 		# finally set up the point coordinates and density
 		points[iTrig][:, :model.config.DIM] = x4
 		points[iTrig][:, model.config.DIM:] = p2

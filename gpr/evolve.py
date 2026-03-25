@@ -37,7 +37,8 @@ def evolve_coordinates_adiabatically(
 	dt: float,
 	drc: Direction,
 	RowIndex: int,
-	ColIndex: int
+	ColIndex: int,
+	two_semi_steps: bool = False
 ) -> tuple[torch.Tensor, torch.Tensor]:
 	r"""To evolve the phase space coordinates adiabatically of given element for given interval along given direction
 
@@ -59,6 +60,8 @@ def evolve_coordinates_adiabatically(
 		Index of row of the element in density matrix
 	ColIndex : int
 		Index of column of the element in density matrix
+	two_semi_steps : bool, optional
+		Whether to evolve with two semi steps, by default False
 
 	Returns
 	-------
@@ -102,7 +105,13 @@ def evolve_coordinates_adiabatically(
 
 	x1: typing.Final[torch.Tensor] = position_evolve(x0, p0)
 	p1: typing.Final[torch.Tensor] = momentum_diagonal_nonbranch_evolve(x1, p0)
-	return position_evolve(x1, p1), p1
+	if two_semi_steps:
+		x2: typing.Final[torch.Tensor] = position_evolve(x1, p1)
+		x3: typing.Final[torch.Tensor] = position_evolve(x2, p1)
+		p2: typing.Final[torch.Tensor] = momentum_diagonal_nonbranch_evolve(x3, p1)
+		return position_evolve(x3, p2), p2
+	else:
+		return position_evolve(x1, p1), p1
 
 
 def evolve_density_adiabatically(

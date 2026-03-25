@@ -21,7 +21,6 @@ import scipy.interpolate
 import constant
 import evolve
 import expectation
-import gp
 import param
 import pes
 import plot
@@ -50,7 +49,7 @@ class Main:
 	NUM_XTR_RATIO: typing.Final = 50
 	NUM_MC_PTS: typing.Final = 1_000_000
 	NUM_EVL_MC_PTS: typing.Final = 10_000
-	__slots__: typing.Final[tuple] = ("__quantity", "__potential", "__grid_file", "__grid_data", "__grid_coord", "__pred_all_grids", "__pred_marginal", "__init_dist", "__pts", "__predictors", "__mca", "__aia", "__epmca", "__dm_drawer", "__wfn_plotter", "__pts_f", "__bln_f", "__all_f", "__mgn_f", "__ave_f", "__den_f", "__err_f", "__prm_f", "__scl_f", "__lss_f", "__start_time", "__end_time", "__quantity", "__grid_file", "__grid_data", "__grid_coord", "__pred_all_grids", "__pred_marginal", "__init_dist", "__pts", "__predictors", "__mca", "__aia", "__epmca", "__dm_drawer", "__wfn_plotter", "__pts_f", "__bln_f", "__all_f", "__mgn_f", "__ave_f", "__den_f", "__err_f", "__prm_f", "__scl_f", "__lss_f", "__start_time", "__end_time")
+	__slots__: typing.Final[tuple] = ("__quantity", "__potential", "__grid_file", "__grid_data", "__grid_coord", "__pred_all_grids", "__pred_marginal", "__init_dist", "__predictors", "__mca", "__dm_drawer", "__wfn_plotter", "__pts_f", "__bln_f", "__all_f", "__mgn_f", "__ave_f", "__den_f", "__err_f", "__prm_f", "__scl_f", "__lss_f", "__start_time", "__end_time")
 	__quantity: typing.Final[param.Quantity]
 	__potential: typing.Final[pes.Potential]
 	__grid_file: typing.Final[plot.FromFile | None]
@@ -59,11 +58,8 @@ class Main:
 	__pred_all_grids: typing.Final[torch.Tensor | None]
 	__pred_marginal: typing.Final[tuple[torch.Tensor, ...]]
 	__init_dist: typing.Final[pes.InitialDistribution]
-	__pts: typing.Final[expectation.Points]
-	__predictors: typing.Final[gp.GPRPredictors]
+	__predictors: typing.Final[expectation.GPRPredictors]
 	__mca: typing.Final[expectation.MonteCarloAverage]
-	__aia: typing.Final[expectation.AnalyticalAverager]
-	__epmca: typing.Final[expectation.EvolvingPointsMCAverage]
 	__dm_drawer: typing.Final[plot.DensityMatrixDrawer | None]
 	__wfn_plotter: typing.Final[plot.DensityMatrixMarginalPlotter | None]
 	__pts_f: typing.Final[io.TextIOWrapper]
@@ -111,31 +107,20 @@ class Main:
 			if self.__grid_file is None:
 				self.__grid_data = None
 		self.__pred_marginal = tuple(torch.empty(self.__quantity.config.NUM_PES, self.__quantity.config.NUM_PES, int(n.item())) for n in self.__quantity.num_grids_on_each_dimension) + tuple(torch.empty(self.__quantity.config.NUM_PES, self.__quantity.config.NUM_PES, int(n.item())) for n in self.__quantity.num_grids_on_each_dimension)
-		# sampling. Initial point from gaussian directly
+		# sampling. Initial point from gaussian directly; and the regressor
 		self.__init_dist = pes.InitialDistribution(self.__potential, self.__quantity.r0, self.__quantity.sigma_r0, self.__quantity.init_ppl_and_phase)
-		self.__pts = expectation.Points(
+		self.__predictors = expectation.GPRPredictors(
 			self.__quantity.config,
 			Main.NUM_PTS * Main.NUM_XTR_RATIO,
 			self.__init_dist,
 			torch.std(torch.cat([expectation.normal_sample(Main.NUM_XTR_RATIO, pt, self.__quantity.sigma_r0) for pt in expectation.normal_sample(Main.NUM_PTS, self.__quantity.r0, self.__quantity.sigma_r0)]), 0),
-			self.__potential,
-			self.__quantity.mass
-		)
-		# the regressor
-		self.__predictors = gp.GPRPredictors(
-			self.__quantity.config,
-			[pt for pt in self.__pts.point_set],
-			[den for den in self.__pts.density],
 			Main.NUM_PTS,
 			self.__quantity.sigma_r0,
 			self.__potential,
 			self.__quantity.mass,
-			self.__quantity.dt
 		) # training of initial data included
 		# average evaluators
 		self.__mca = expectation.MonteCarloAverage(self.__quantity.config, Main.NUM_MC_PTS)
-		self.__aia = expectation.AnalyticalAverager(self.__quantity.config, self.__predictors)
-		self.__epmca = self.__pts
 		# files for output
 		self.__pts_f = open(constant.POINTS_FILENAME + constant.DATA_EXTENSION, "w", encoding=constant.ENC)
 		self.__bln_f = open(constant.BELONGING_FILENAME + constant.DATA_EXTENSION, "w", encoding=constant.ENC)
@@ -162,8 +147,8 @@ class Main:
 					self.__quantity.total_ticks,
 					self.__pred_all_grids,
 					self.__grid_data,
-					[pt.detach().cpu().numpy() for pt in self.__predictors.inducing_points] + [pt.detach().cpu().numpy() for pt in self.__pts.point_set],
-					self.__pts.scale.detach().cpu().numpy()
+					[pt.detach().cpu().numpy() for pt in self.__predictors.inducing_points] + [pt.detach().cpu().numpy() for pt in self.__predictors.epmca.point_set],
+					self.__predictors.scale.detach().cpu().numpy()
 				)
 			self.__wfn_plotter = plot.DensityMatrixMarginalPlotter(
 				self.__quantity,
@@ -204,11 +189,11 @@ class Main:
 		print(f"Tick {iTick}, {plot.format_array(self.__predictors.scale, "scales")}, {datetime.datetime.now()}", flush=constant.DEBUG_MODE)
 		# save points
 		ind_pts: typing.Final[torch.Tensor] = self.__predictors.inducing_points
-		np.savetxt(self.__pts_f, torch.cat((ind_pts, self.__pts.point_set), 1).reshape(-1, self.__quantity.config.PHASEDIM).T.detach().cpu().numpy(), constant.FMT, footer='\n', comments="", encoding=constant.ENC)
+		np.savetxt(self.__pts_f, torch.cat((ind_pts, self.__predictors.epmca.point_set), 1).reshape(-1, self.__quantity.config.PHASEDIM).T.detach().cpu().numpy(), constant.FMT, footer='\n', comments="", encoding=constant.ENC)
 		print("", end="", file=self.__pts_f, flush=constant.DEBUG_MODE)
 		np.savetxt(
 			self.__bln_f,
-			np.repeat(np.concatenate([[idx, idx + self.__quantity.config.NUM_ELM] for idx in self.__quantity.config.TRIL_ELEMENT_INDICES]), np.concatenate([[ind_pts.shape[1], self.__pts.point_set.shape[1]] * self.__quantity.config.NUM_TRIG]))[np.newaxis],
+			np.repeat(np.concatenate([[idx, idx + self.__quantity.config.NUM_ELM] for idx in self.__quantity.config.TRIL_ELEMENT_INDICES]), np.concatenate([[ind_pts.shape[1], self.__predictors.epmca.point_set.shape[1]] * self.__quantity.config.NUM_TRIG]))[np.newaxis],
 			footer="\n",
 			comments="",
 			encoding=constant.ENC
@@ -216,7 +201,7 @@ class Main:
 		print("", end="", file=self.__bln_f, flush=constant.DEBUG_MODE)
 		# fit
 		if to_train:
-			self.__predictors.train([den for den in self.__pts.density], iTick * self.__quantity.output_ticks)
+			self.__predictors.save_train(self.__potential, self.__quantity.mass)
 
 	def __predict_and_save_to_file(self, iTick: int) -> None:
 		r"""To make predictions on marginal/grids
@@ -244,20 +229,20 @@ class Main:
 			pred_element: torch.Tensor | None = None
 			if self.__grid_coord is not None and self.__pred_all_grids is not None and success_pred_all:
 				try:
-					pred_element = self.__predictors.predict(self.__grid_coord, iElement, iTick * self.__quantity.output_ticks).reshape(self.__pred_all_grids.shape[2:])
+					pred_element = self.__predictors.predict(self.__grid_coord, iElement).reshape(self.__pred_all_grids.shape[2:])
 				finally:
 					success_pred_all = success_pred_all and pred_element is not None
 			if iPES == jPES:
 				if self.__pred_all_grids is not None and pred_element is not None:
 					self.__pred_all_grids[iPES, jPES] = pred_element.real
 				for iDim in self.__quantity.config.PHASEDIM_RANGE:
-					self.__pred_marginal[iDim][iPES, jPES, :] = self.__predictors.get_marginal(iDim, self.__quantity.r_grids_each_dim[iDim].reshape(-1, 1), iElement, iTick * self.__quantity.output_ticks).real
+					self.__pred_marginal[iDim][iPES, jPES, :] = self.__predictors.get_marginal(self.__quantity.r_grids_each_dim[iDim].reshape(-1, 1), iElement, iDim).real
 			else:
 				if self.__pred_all_grids is not None and pred_element is not None:
 					self.__pred_all_grids[jPES, iPES] = pred_element.real
 					self.__pred_all_grids[iPES, jPES] = pred_element.imag
 				for iDim in self.__quantity.config.PHASEDIM_RANGE:
-					marginal_pred_element: torch.Tensor = self.__predictors.get_marginal(iDim, self.__quantity.r_grids_each_dim[iDim].reshape(-1, 1), iElement, iTick * self.__quantity.output_ticks)
+					marginal_pred_element: torch.Tensor = self.__predictors.get_marginal(self.__quantity.r_grids_each_dim[iDim].reshape(-1, 1), iElement, iDim)
 					self.__pred_marginal[iDim][jPES, iPES, :] = marginal_pred_element.real
 					self.__pred_marginal[iDim][iPES, jPES, :] = marginal_pred_element.imag
 		if self.__pred_all_grids is not None and success_pred_all:
@@ -268,9 +253,9 @@ class Main:
 		print("", end="", file=self.__mgn_f, flush=constant.DEBUG_MODE)
 		# calculate averages
 		print(iTick * self.__quantity.output_interval, end=" ", file=self.__ave_f)
-		self.__mca.update_pts([pt for pt in self.__pts.point_set], lambda x, i: self.__predictors.predict(x, i, iTick * self.__quantity.output_ticks))
+		self.__mca.update_pts([*self.__predictors.epmca.point_set], self.__predictors.predict)
 		aver: expectation.Averager
-		for aver in [self.__mca, self.__aia, self.__epmca]:
+		for aver in [self.__mca, self.__predictors, self.__predictors.epmca]:
 			print(
 				*aver.population().detach().cpu().numpy(),
 				*aver.coordinates().detach().cpu().numpy(),
@@ -283,7 +268,7 @@ class Main:
 			)
 		print("", file=self.__ave_f, flush=constant.DEBUG_MODE)
 		# calculate error, and predict density
-		evolving_density: typing.Final[list[torch.Tensor]] = [den for den in self.__pts.density]
+		evolving_density: typing.Final[list[torch.Tensor]] = [*self.__predictors.epmca.density]
 		if self.__grid_data is not None: # interpolate the data
 			grid_interpolate: list[npt.NDArray[np.cdouble]] = [np.array([], dtype=np.cdouble) for _ in self.__quantity.config.TRIG_RANGE]
 			evolving_errors: npt.NDArray[np.double] = np.empty((self.__quantity.config.NUM_PES, self.__quantity.config.NUM_PES), np.double)
@@ -295,7 +280,7 @@ class Main:
 					False,
 					0.0
 				)
-				grid_interpolate[iTrig] = interpolator_re(self.__pts.point_set[iTrig].detach().cpu().numpy()).astype(np.cdouble)
+				grid_interpolate[iTrig] = interpolator_re(self.__predictors.epmca.point_set[iTrig].detach().cpu().numpy()).astype(np.cdouble)
 				if iPES == jPES:
 					evolving_errors[iPES, jPES] = np.sum((grid_interpolate[iTrig].real - evolving_density[iTrig].real.detach().cpu().numpy()) ** 2) / evolving_density[iTrig].numel()
 				else:
@@ -306,7 +291,7 @@ class Main:
 						False,
 						0.0
 					)
-					grid_interpolate[iTrig].imag = interpolator_im(self.__pts.point_set[iTrig].detach().cpu().numpy())
+					grid_interpolate[iTrig].imag = interpolator_im(self.__predictors.epmca.point_set[iTrig].detach().cpu().numpy())
 					evolving_errors[jPES, iPES] = np.sum((grid_interpolate[iTrig].real - evolving_density[iTrig].real.detach().cpu().numpy()) ** 2) / evolving_density[iTrig].numel()
 					evolving_errors[iPES, jPES] = np.sum((grid_interpolate[iTrig].imag - evolving_density[iTrig].imag.detach().cpu().numpy()) ** 2) / evolving_density[iTrig].numel()
 			evolving_errors = evolving_errors.reshape(-1)
@@ -320,7 +305,7 @@ class Main:
 		else:
 			np.savetxt(self.__den_f, torch.cat(evolving_density).detach().cpu().numpy().view(np.double).reshape(-1, 2).T, constant.FMT, comments="", encoding=constant.ENC)
 		np.savetxt(self.__den_f, torch.cat(evolving_density).detach().cpu().numpy().view(np.double).reshape(-1, 2).T, constant.FMT, comments="", encoding=constant.ENC)
-		np.savetxt(self.__den_f, torch.cat([self.__predictors.predict(pt, idx, iTick * self.__quantity.output_ticks) for pt, idx in zip(self.__pts.point_set, self.__quantity.config.TRIL_ELEMENT_INDICES)]).detach().cpu().numpy().view(np.double).reshape(-1, 2).T, constant.FMT, footer="\n", comments="", encoding=constant.ENC)
+		np.savetxt(self.__den_f, torch.cat([self.__predictors.predict(pt, idx) for pt, idx in zip(self.__predictors.epmca.point_set, self.__quantity.config.TRIL_ELEMENT_INDICES)]).detach().cpu().numpy().view(np.double).reshape(-1, 2).T, constant.FMT, footer="\n", comments="", encoding=constant.ENC)
 		print("", end="", file=self.__den_f, flush=constant.DEBUG_MODE)
 
 	def __draw(self, iTick: int) -> None:
@@ -336,8 +321,8 @@ class Main:
 				iTick,
 				self.__pred_all_grids,
 				self.__grid_data,
-				[pt.detach().cpu().numpy() for pt in self.__predictors.inducing_points] + [pt.detach().cpu().numpy() for pt in self.__pts.point_set],
-				self.__pts.scale.detach().cpu().numpy()
+				[pt.detach().cpu().numpy() for pt in self.__predictors.inducing_points] + [pt.detach().cpu().numpy() for pt in self.__predictors.epmca.point_set],
+				self.__predictors.scale.detach().cpu().numpy()
 			)
 		if self.__wfn_plotter is not None:
 			self.__wfn_plotter(iTick, [m.detach().cpu().numpy() for m in self.__pred_marginal], self.__grid_data)
@@ -366,12 +351,9 @@ class Main:
 			Whether to stop evolution or not
 		"""
 		# evolve
-		ind_pts: list[torch.Tensor] = [pt for pt in self.__predictors.inducing_points]
-		for iStep in range(self.__quantity.output_ticks):
+		for _ in range(self.__quantity.output_ticks):
 			# here num_dt is the number of steps used in the back-propagator
-			self.__pts.evolve(self.__potential, self.__quantity.mass, self.__quantity.dt, lambda x, i: self.__predictors.predict(x, i, (iTick - 1) * self.__quantity.output_ticks + iStep))
-			evolve.evolve(self.__potential, ind_pts, None, self.__quantity.mass, self.__quantity.dt, lambda x, i: self.__predictors.predict(x, i, (iTick - 1) * self.__quantity.output_ticks + iStep))
-			self.__predictors.update(ind_pts, [pt for pt in self.__pts.point_set], [den for den in self.__pts.density], (iTick - 1) * self.__quantity.output_ticks + iStep + 1)
+			self.__predictors.evolve_update(self.__potential, self.__quantity.mass, self.__quantity.dt)
 			self.__print_parameter_scale_loss()
 		# update and predict
 		self.__train(iTick, iTick % self.__quantity.reopt_ticks == 0)
@@ -380,7 +362,7 @@ class Main:
 		self.__print_parameter_scale_loss()
 		# check stopping criteria, when grid solution is not given
 		# use predictors (aia) with old points
-		if self.__grid_data is None and torch.any(self.__epmca.coordinates()[:self.__quantity.config.DIM] > torch.abs(self.__quantity.x0)).item():
+		if self.__grid_data is None and torch.any(self.__predictors.epmca.coordinates()[:self.__quantity.config.DIM] > torch.abs(self.__quantity.x0)).item():
 			return True
 		if self.__end_time is not None:
 			current_time: int = int(time.time())

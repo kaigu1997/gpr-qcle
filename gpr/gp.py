@@ -86,7 +86,7 @@ class Optimizer(abc.ABC):
 		lr: float | None,
 		grad: torch.Tensor | None = None,
 		hessian: torch.Tensor | None = None,
-		extra_start_str: str = "\t\t\t",
+		extra_start_str: str = "\t\t\t\t",
 		extra_model_str: str | None = None,
 	) -> None:
 		r"""To print all stuffs needed
@@ -104,7 +104,7 @@ class Optimizer(abc.ABC):
 		hessian : torch.Tensor | None, optional
 			Hessian matrix of the parameters, by default None
 		extra_str : str, optional
-			An extra string added at the front, by default "\t"
+			An extra string added at the front, by default "\t"s
 		extra_start_str : str | None, optional
 			An extra string added at the front of model printing, by default None
 		"""
@@ -154,7 +154,7 @@ class GradientDescend(Optimizer):
 		grad: torch.Tensor = torch.autograd.grad(loss, param, allow_unused=True, materialize_grads=True)[0]
 		lr = min(lr, (param.abs() / grad.abs()).max().item())
 		last_value: float = loss.item()
-		Optimizer.print_stuff(loss.item(), param, lr, grad, None, "\tInit ")
+		Optimizer.print_stuff(loss.item(), param, lr, grad, None, "\t\tInit ")
 		for i in range(1, Optimizer.MAX_ITER + 1):
 			if torch.norm(grad).item() < Optimizer.GTOL:
 				return Optimizer.Result(param, grad, None, lr, loss.item(), i - 1, Optimizer.ResultMessage.GRAD)
@@ -166,22 +166,22 @@ class GradientDescend(Optimizer):
 				param = (param - lr * grad).detach().requires_grad_()
 				lr *= 2.0
 				if print_log:
-					print("\t\t\tloss < last_value")
+					print("\t\t\t\tloss < last_value")
 			else:
 				if print_log:
-					print("\t\t\tloss > last_value or loss is NaN")
+					print("\t\t\t\tloss > last_value or loss is NaN")
 				while loss >= last_value or loss.isnan().item():
 					last_loop_value: float = loss.item()
 					lr /= 2.0
 					loss = loss_func((param - lr * grad).detach())
 					if print_log:
-						Optimizer.print_stuff(loss.item(), param - lr * grad, lr, grad, None, "\t\t\t\t")
+						Optimizer.print_stuff(loss.item(), param - lr * grad, lr, grad, None, "\t\t\t\t\t")
 					if last_loop_value == loss.item():
 						# no stepping forward, but still larger than last, meaning last is the best
 						return Optimizer.Result(param, grad, None, lr, loss_func(param).item(), i, Optimizer.ResultMessage.STUCK)
 				param = (param - lr * grad).detach().requires_grad_()
 			if i % (Optimizer.MAX_ITER // 1000) == 0 or print_log:
-				Optimizer.print_stuff(loss.item(), param, lr, grad, None, f"\tIter {i} - last = {last_value} - ", "\t\t")
+				Optimizer.print_stuff(loss.item(), param, lr, grad, None, f"\t\t\tIter {i} - last = {last_value} - ", "\t\t\t")
 			# stopping criteria
 			if (last_value - loss.item()) / max(abs(last_value), abs(loss.item()), 1.0) < Optimizer.FTOL:
 				return Optimizer.Result(param, grad, None, lr, loss.item(), i, Optimizer.ResultMessage.FVAL)
@@ -207,7 +207,7 @@ class NewtonMethod(Optimizer):
 		mu: float = 1e-6 * torch.max(torch.diag(hessian)).item()
 		v: float = 2.0 # rate to adjust mu
 		last_value: float = loss.item()
-		Optimizer.print_stuff(loss.item(), param, mu, grad, hessian, "\tInit ")
+		Optimizer.print_stuff(loss.item(), param, mu, grad, hessian, "\t\tInit ")
 		for i in range(1, Optimizer.MAX_ITER + 1):
 			if torch.norm(grad).item() < Optimizer.GTOL:
 				return Optimizer.Result(param, grad, None, mu, loss.item(), i - 1, Optimizer.ResultMessage.GRAD)
@@ -230,10 +230,10 @@ class NewtonMethod(Optimizer):
 				mu = mu * max(1.0 / 3.0, 1.0 - (2.0 * rho - 1.0) ** 3)
 				v = 2.0
 				if print_log:
-					print("\t\t\tloss < last_value")
+					print("\t\t\t\tloss < last_value")
 			else:
 				if print_log:
-					print("\t\t\tloss > last_value or loss is NaN")
+					print("\t\t\t\tloss > last_value or loss is NaN")
 				while loss >= last_value or loss.isnan().item():
 					last_loop_value: float = loss.item()
 					mu = mu * v
@@ -249,7 +249,7 @@ class NewtonMethod(Optimizer):
 					update = torch.cholesky_solve(grad.reshape(-1, 1), L).reshape(-1)
 					loss = loss_func((param - update).detach())
 					if print_log:
-						Optimizer.print_stuff(loss.item(), param - update, mu, grad, hessian + mu * torch.eye(param.numel()), "\t\t\t\t")
+						Optimizer.print_stuff(loss.item(), param - update, mu, grad, hessian + mu * torch.eye(param.numel()), "\t\t\t\t\t")
 					if last_loop_value == loss.item():
 						# no stepping forward, but still larger than last, meaning last is the best
 						return Optimizer.Result(param, grad, hessian, mu, loss_func(param).item(), i, Optimizer.ResultMessage.STUCK)
@@ -259,7 +259,7 @@ class NewtonMethod(Optimizer):
 				mu = mu * max(1.0 / 3.0, 1.0 - (2.0 * rho - 1.0) ** 3)
 				v = 2.0
 			if i % (Optimizer.MAX_ITER // 1000) == 0 or print_log:
-				Optimizer.print_stuff(loss.item(), param, mu, grad, hessian, f"\t\tIter {i} - last = {last_value} - ", "\t\t")
+				Optimizer.print_stuff(loss.item(), param, mu, grad, hessian, f"\t\t\tIter {i} - last = {last_value} - ", "\t\t\t")
 			# stopping criteria
 			if (last_value - loss.item()) / max(abs(last_value), abs(loss.item()), 1.0) < Optimizer.FTOL:
 				return Optimizer.Result(param, grad, hessian, mu, loss.item(), i, Optimizer.ResultMessage.FVAL)
@@ -380,6 +380,39 @@ class SinglePredictor:
 		self.__k_inv_y = (linear_operator.utils.stable_pinverse(rbf(self.raw_to_real(self._raw_lengthscale), self.x_all, self.x_ind)) @ self.y_all).detach()
 		self.__weights_updated = True
 
+	def get_chunk_size(self, x_test: torch.Tensor, print_log: bool = constant.DEBUG_MODE) -> int:
+		with torch.no_grad():
+			x_ind = self.x_ind.detach().requires_grad_()
+			x_all = self.x_all.detach().requires_grad_()
+			y_all = self.y_all.detach().requires_grad_()
+			raw_lengthscale: typing.Final[torch.Tensor] = self._raw_lengthscale.detach().requires_grad_()
+		predict: typing.Final[torch.Tensor] = rbf(self.raw_to_real(raw_lengthscale), x_test.detach(), x_ind) @ linear_operator.utils.stable_pinverse(rbf(self.raw_to_real(raw_lengthscale), x_all, x_ind)) @ y_all
+		N: typing.Final[int] = predict.numel()
+		eye: typing.Final[torch.Tensor] = torch.eye(predict.numel())
+		chunk_size: int = N
+		chunk_range: range = range(0, N, chunk_size)
+		change_to_2_power: bool = False
+		power_of_2_max: typing.Final[int] = 64 # wavefront of 64 on AMD and warps of 32 on NV
+		while chunk_size > 1:
+			try:
+				if print_log:
+					print("\tChunk size for autograd test:", chunk_size)
+				SinglePredictor.InternalDerivativeReturn(
+					feature_derivative=torch.cat([torch.autograd.grad(predict, x_all, eye[i:min(i+chunk_size, N)], True, False, True, True, True, True)[0].detach() for i in chunk_range], dim=0),
+					inducing_derivative=torch.cat([torch.autograd.grad(predict, x_ind, eye[i:min(i+chunk_size, N)], True, False, True, True, True, True)[0].detach() for i in chunk_range], dim=0),
+					label_derivative=torch.cat([torch.autograd.grad(predict, y_all, eye[i:min(i+chunk_size, N)], True, False, True, True, True, True)[0].detach() for i in chunk_range], dim=0),
+					raw_param_derivative=torch.cat([torch.autograd.grad(predict, raw_lengthscale, eye[i:min(i+chunk_size, N)], True, False, True, True, True, True)[0].detach() for i in chunk_range], dim=0)
+				)
+				break
+			except torch.OutOfMemoryError:
+				chunk_size //= 2
+				if chunk_size < power_of_2_max and not change_to_2_power:
+					chunk_size = power_of_2_max
+					change_to_2_power = True
+				chunk_range = range(0, N, chunk_size)
+		print(f"Chunk size for autograd: {chunk_size}")
+		return chunk_size
+
 	@property
 	def lengthscale(self) -> torch.Tensor:
 		r"""To access the real lengthscale
@@ -424,7 +457,7 @@ class SinglePredictor:
 		self.__update_weights()
 		return self.__k_inv_y.detach()
 
-	def predict(self, x_test: torch.Tensor) -> torch.Tensor:
+	def predict(self, x_test: torch.Tensor, requires_grad: bool = False) -> torch.Tensor:
 		r"""Instance of prediction of subset of regressor (SR) / projected process (PP)
 
 		Parameters
@@ -437,7 +470,11 @@ class SinglePredictor:
 		torch.Tensor, shape of (N,)
 			Corresponding validation/test targets based on noise-free SR/PP mean.
 		"""
-		return (rbf(self.lengthscale, x_test, self.x_ind) @ self.k_inv_y).detach()
+		result: typing.Final[torch.Tensor] = rbf(self.lengthscale, x_test, self.x_ind) @ self.k_inv_y
+		if requires_grad:
+			return result
+		else:
+			return result.detach()
 
 	def predict_derivative_over_input(self, x_test: torch.Tensor) -> InputDerivativeReturn:
 		r"""To give the derivative of prediction over the input
@@ -454,16 +491,18 @@ class SinglePredictor:
 		"""
 		with torch.no_grad():
 			x_test = x_test.reshape(-1, x_test.shape[-1]).detach().requires_grad_()
-		predict: typing.Final[torch.Tensor] = self.predict(x_test)
+		predict: typing.Final[torch.Tensor] = self.predict(x_test, True)
 		return SinglePredictor.InputDerivativeReturn(predict=predict.detach(), derivative=torch.autograd.grad(predict, x_test, torch.ones_like(predict), False, False, True, True, False, True)[0].detach())
 
-	def predict_derivative_over_internal(self, x_test: torch.Tensor) -> InternalDerivativeReturn:
+	def predict_derivative_over_internal(self, x_test: torch.Tensor, chunk_size: int = 1) -> InternalDerivativeReturn:
 		r"""To calculate the derivative of prediction over all related quantities
 
 		Parameters
 		----------
 		x_test : torch.Tensor, shape of (N, PHASEDIM)
 			Validation/Test inputs
+		chunk_size : int, optional
+			The number of VJP in parallel, used to avoid OOM, by default 1 (least OOM)
 
 		Returns
 		-------
@@ -479,11 +518,14 @@ class SinglePredictor:
 			y_all: typing.Final[torch.Tensor] = self.y_all.detach().requires_grad_()
 			raw_lengthscale: typing.Final[torch.Tensor] = self._raw_lengthscale.detach().requires_grad_()
 		predict: typing.Final[torch.Tensor] = rbf(self.raw_to_real(raw_lengthscale), x_test, x_ind) @ linear_operator.utils.stable_pinverse(rbf(self.raw_to_real(raw_lengthscale), x_all, x_ind)) @ y_all
+		N: typing.Final[int] = predict.numel()
+		eye: typing.Final[torch.Tensor] = torch.eye(predict.numel())
+		chunk_range: typing.Final[range] = range(0, N, chunk_size)
 		return SinglePredictor.InternalDerivativeReturn(
-			inducing_derivative=torch.autograd.grad(predict, x_ind, torch.eye(predict.numel()), False, False, True, True, True, True)[0].detach().reshape(predict.shape + x_ind.shape),
-			feature_derivative=torch.autograd.grad(predict, x_all, torch.eye(predict.numel()), False, False, True, True, True, True)[0].detach().reshape(predict.shape + x_all.shape),
-			label_derivative=torch.autograd.grad(predict, y_all, torch.eye(predict.numel()), False, False, True, True, True, True)[0].detach().reshape(predict.shape + y_all.shape),
-			raw_param_derivative=torch.autograd.grad(predict, raw_lengthscale, torch.eye(predict.numel()), False, False, True, True, True, True)[0].detach().reshape(predict.shape + raw_lengthscale.shape)
+			feature_derivative=torch.cat([torch.autograd.grad(predict, x_all, eye[i:min(i+chunk_size, N)], True, False, True, True, True, True)[0].detach() for i in chunk_range], dim=0),
+			inducing_derivative=torch.cat([torch.autograd.grad(predict, x_ind, eye[i:min(i+chunk_size, N)], True, False, True, True, True, True)[0].detach() for i in chunk_range], dim=0),
+			label_derivative=torch.cat([torch.autograd.grad(predict, y_all, eye[i:min(i+chunk_size, N)], True, False, True, True, True, True)[0].detach() for i in chunk_range], dim=0),
+			raw_param_derivative=torch.cat([torch.autograd.grad(predict, raw_lengthscale, eye[i:min(i+chunk_size, N)], True, False, True, True, True, True)[0].detach() for i in chunk_range], dim=0)
 		)
 
 	def get_marginal(self, x_test: torch.Tensor, dimensions: collections.abc.Sequence[int]) -> torch.Tensor:
@@ -594,32 +636,32 @@ class ResidualPredictor(SinglePredictor):
 		# train model
 		with torch.no_grad():
 			self._raw_lengthscale.requires_grad = True
-		print(f"\tscale = {self.scale}\n\t", end="")
+		print(f"\t\tscale = {self.scale}\n\t\t", end="")
 		Optimizer.print_model(self.lengthscale)
 		if self.__lr is None:
 			loss: float = math.inf
 			param: torch.Tensor = self._raw_lengthscale
 			while True:
 				result = NewtonMethod(param, loss_func, print_log)
-				print(f"\tIter = {result.num_iter} - {result.message}")
-				Optimizer.print_stuff(result.func_value, self.raw_to_real(result.param), None, extra_start_str="\t")
-				if result.message in (Optimizer.ResultMessage.FVAL, Optimizer.ResultMessage.GRAD) or result.func_value >= loss:
+				print(f"\t\tIter = {result.num_iter} - {result.message}")
+				Optimizer.print_stuff(result.func_value, self.raw_to_real(result.param), None, extra_start_str="\t\t")
+				if result.message in (Optimizer.ResultMessage.GRAD,) or result.func_value >= loss:
 					break
 				else:
 					loss = result.func_value
 					param = result.param
 				result = GradientDescend(param, loss_func, print_log=print_log)
-				print(f"\tIter = {result.num_iter} - {result.message}")
-				Optimizer.print_stuff(result.func_value, self.raw_to_real(result.param), result.lr, extra_start_str="\t")
-				if result.message in (Optimizer.ResultMessage.FVAL, Optimizer.ResultMessage.GRAD) or result.func_value >= loss:
+				print(f"\t\tIter = {result.num_iter} - {result.message}")
+				Optimizer.print_stuff(result.func_value, self.raw_to_real(result.param), result.lr, extra_start_str="\t\t")
+				if result.message in (Optimizer.ResultMessage.GRAD,) or result.func_value >= loss:
 					break
 				else:
 					loss = result.func_value
 					param = result.param
 		else:
 			result = GradientDescend(self._raw_lengthscale, loss_func, self.__lr, print_log)
-			print(f"\tIter = {result.num_iter} - {result.message}")
-			Optimizer.print_stuff(result.func_value, self.raw_to_real(result.param), result.lr, extra_start_str="\t")
+			print(f"\t\tIter = {result.num_iter} - {result.message}")
+			Optimizer.print_stuff(result.func_value, self.raw_to_real(result.param), result.lr, extra_start_str="\t\t")
 		with torch.no_grad():
 			self._raw_lengthscale.requires_grad = False
 			self._raw_lengthscale = result.param.detach().clone()

@@ -7,9 +7,7 @@ import collections.abc
 import math
 import typing
 
-import linear_operator
 import numpy as np
-import test
 import torch
 import torch_kmeans
 
@@ -449,14 +447,12 @@ class GPRPredictors(Averager):
 	drc: typing.Final = evolve.Direction.FORWARD
 	__JUDGE_INCLUDE_THRESHOLD: typing.Final = 0.1
 	__JUDGE_REGISTER_THRESHOLD: typing.Final = 0.1
-	__slots__: typing.Final[tuple] = ("__AVERAGE_CONSTANT", "epmca", "__last_purity_lambda", "__init_E", "__kmeans", "__residual_predictors", "__saved_predictors")
+	__slots__: typing.Final[tuple] = ("__AVERAGE_CONSTANT", "epmca", "__kmeans", "__saved_predictors", "chunk_size")
 	__AVERAGE_CONSTANT: typing.Final[float]
 	epmca: typing.Final[EvolvingPointsMCAverage]
-	__last_purity_lambda: float
-	__init_E: typing.Final[float]
 	__kmeans: typing.Final[torch_kmeans.KMeans]
-	__residual_predictors: typing.Final[list[gp.ResidualPredictor]]
 	__saved_predictors: typing.Final[tuple[list[gp.SinglePredictor], ...]]
+	chunk_size: typing.Final[int]
 
 	def __init__(
 		self,
@@ -466,63 +462,34 @@ class GPRPredictors(Averager):
 		init_stddev: torch.Tensor,
 		num_ind: int,
 		kernel_initial_value: torch.Tensor,
-		model: pes.Potential,
-		mass: torch.Tensor,
 	):
 		super().__init__(config)
 		self.__AVERAGE_CONSTANT = (2.0 * math.pi) ** self.config.DIM
 		self.epmca = EvolvingPointsMCAverage(config, num_pts, init_dist, init_stddev)
-		self.__last_purity_lambda = 0.0
-		self.__init_E = self.epmca.potential(model) + self.epmca.kinetic(mass)
 		self.__kmeans = torch_kmeans.KMeans(init_method="k-means++", n_clusters=num_ind, seed=constant.SEED, verbose=constant.DEBUG_MODE)
 		ind_pt: typing.Final[torch.Tensor] = self.__kmeans(self.epmca.point_set[:1]).centers[0]
-		self.__residual_predictors = []
+		self.__saved_predictors = tuple([] for _ in config.ELEMENT_RANGE)
 		for iElement in config.ELEMENT_RANGE:
-			print("Initial Training " + plot.get_RI_label(iElement, config.NUM_PES))
+			print("\tInitial Training " + plot.get_RI_label(iElement, config.NUM_PES))
 			TrilIndex: int = self.config.FLATTEN_TRIL_INDEX[iElement]
 			y: torch.Tensor = self.epmca.density[TrilIndex].real if iElement // config.NUM_PES <= iElement % config.NUM_PES else self.epmca.density[TrilIndex].imag
-			self.__residual_predictors.append(gp.ResidualPredictor(
+			self.__saved_predictors[iElement].append(gp.ResidualPredictor(
 				ind_pt,
 				self.epmca.point_set[TrilIndex],
 				y,
 				kernel_initial_value
 			)) # this includes training of initial distribution
-		self.__saved_predictors = tuple([] for _ in config.ELEMENT_RANGE)
-		self.save_train(model, mass) # to save the initial fitting, and take the residual to re-fit
+		# then check for chunk size to avoid OOM in autograd
+		self.chunk_size = self.__saved_predictors[0][0].get_chunk_size(normal_sample(num_ind, init_dist.r0, init_dist.sigma_r0))
 
 	def population(self) -> torch.Tensor:
-		result: torch.Tensor = torch.empty(self.config.NUM_PES)
-		for iPES in range(self.config.NUM_PES):
-			ElementIndex: int = iPES * self.config.NUM_PES + iPES
-			pred: gp.SinglePredictor = self.__residual_predictors[ElementIndex]
-			result[iPES] = pred.lengthscale.prod().item() * pred.k_inv_y.sum().item()
-			for pred in self.__saved_predictors[self.config.FLATTEN_TRIL_INDEX[ElementIndex]]:
-				result[iPES] += pred.lengthscale.prod().item() * pred.k_inv_y.sum().item()
-		return result * self.__AVERAGE_CONSTANT
+		return torch.stack([sum((pred.lengthscale.prod() * pred.k_inv_y.sum() for pred in self.__saved_predictors[iPES * self.config.NUM_PES + iPES]), start=torch.tensor(0.)) for iPES in self.config.PES_RANGE]) * self.__AVERAGE_CONSTANT
 
 	def coordinates(self) -> torch.Tensor:
-		result: torch.Tensor = torch.zeros(self.config.PHASEDIM)
-		for iPES in range(self.config.NUM_PES):
-			ElementIndex: int = iPES * self.config.NUM_PES + iPES
-			pred: gp.SinglePredictor = self.__residual_predictors[ElementIndex]
-			result += pred.lengthscale.prod().item() * (pred.k_inv_y[:, None] * pred.x_ind).sum(0)
-			for pred in self.__saved_predictors[self.config.FLATTEN_TRIL_INDEX[ElementIndex]]:
-				result[iPES] += pred.lengthscale.prod().item() * (pred.k_inv_y[:, None] * pred.x_ind).sum(0)
-		return result * self.__AVERAGE_CONSTANT
+		return sum((pred.lengthscale.prod() * (pred.k_inv_y[:, None] * pred.x_ind).sum(0) for iPES in self.config.PES_RANGE for pred in self.__saved_predictors[iPES * self.config.NUM_PES + iPES]), start=torch.zeros(self.config.PHASEDIM)) * self.__AVERAGE_CONSTANT
 
 	def square_coordinates(self) -> torch.Tensor:
-		result: torch.Tensor = torch.zeros((self.config.PHASEDIM, self.config.PHASEDIM))
-		for iPES in range(self.config.NUM_PES):
-			ElementIndex: int = iPES * self.config.NUM_PES + iPES
-			pred: gp.SinglePredictor = self.__residual_predictors[ElementIndex]
-			result += pred.lengthscale.prod().item() * (
-				(pred.k_inv_y[:, None, None] * pred.x_ind[:, :, None] * pred.x_ind[:, None, :]).sum(0)
-				+ pred.k_inv_y.sum() * torch.diagflat(pred.lengthscale ** 2))
-			for pred in self.__saved_predictors[self.config.FLATTEN_TRIL_INDEX[ElementIndex]]:
-				result += pred.lengthscale.prod().item() * (
-					(pred.k_inv_y[:, None, None] * pred.x_ind[:, :, None] * pred.x_ind[:, None, :]).sum(0)
-					+ pred.k_inv_y.sum() * torch.diagflat(pred.lengthscale ** 2))
-		return result * self.__AVERAGE_CONSTANT
+		return sum((pred.lengthscale.prod() * ((pred.k_inv_y[:, None, None] * pred.x_ind[:, :, None] * pred.x_ind[:, None, :]).sum(0) + pred.k_inv_y.sum() * torch.diagflat(pred.lengthscale ** 2)) for iPES in self.config.PES_RANGE for pred in self.__saved_predictors[iPES * self.config.NUM_PES + iPES]), start=torch.zeros((self.config.PHASEDIM, self.config.PHASEDIM))) * self.__AVERAGE_CONSTANT
 
 	def covariance(self) -> torch.Tensor:
 		return super().covariance()
@@ -531,17 +498,32 @@ class GPRPredictors(Averager):
 		return math.nan
 
 	def purity(self) -> torch.Tensor:
+		def purity_from_preds(pred_left: gp.SinglePredictor, pred_right: gp.SinglePredictor) -> float:
+			r"""To calculate the contribution to purity from two predictors
+
+			Parameters
+			----------
+			pred_left : gp.SinglePredictor
+				The first predictor
+			pred_right : gp.SinglePredictor
+				The second predictor
+
+			Returns
+			-------
+			float
+				The contribution to purity from the two predictors
+			"""
+			length_ij: typing.Final[torch.Tensor] = (pred_left.lengthscale ** 2 + pred_right.lengthscale ** 2).sqrt()
+			return pred_left.lengthscale.prod().item() * pred_right.lengthscale.prod().item() / length_ij.prod().item() * (pred_left.k_inv_y @ gp.rbf(length_ij, pred_left.x_ind, pred_right.x_ind) @ pred_right.k_inv_y).item()
+
 		result: torch.Tensor = torch.empty(self.config.NUM_PES, self.config.NUM_PES)
 		for iPES in range(self.config.NUM_PES):
 			for jPES in range(self.config.NUM_PES):
 				ElementIndex: int = iPES * self.config.NUM_PES + jPES
-				for pred_left in self.__saved_predictors[ElementIndex] + [self.__residual_predictors[ElementIndex]]:
-					for pred_right in self.__saved_predictors[ElementIndex] + [self.__residual_predictors[ElementIndex]]:
-						length_ij = (pred_left.lengthscale ** 2 + pred_right.lengthscale ** 2).sqrt()
-						result[iPES, jPES] += pred_left.lengthscale.prod().item() * pred_right.lengthscale.prod().item() / length_ij.prod().item() * (pred_left.k_inv_y @ gp.rbf(length_ij, pred_left.x_ind, pred_right.x_ind) @ pred_right.k_inv_y).item()
-		return self.PURITY_FACTOR * (math.pi ** self.config.DIM) * (result + result.T - torch.diag(torch.diag(result)))
+				result[iPES, jPES] = sum(purity_from_preds(pred_left, pred_right) for pred_left in self.__saved_predictors[ElementIndex] for pred_right in self.__saved_predictors[ElementIndex])
+		return self.PURITY_FACTOR * (2.0 * math.pi) ** self.config.DIM * (result + result.T - torch.diag(torch.diag(result)))
 
-	def __getitem__(self, ElementIndex: int) -> gp.ResidualPredictor:
+	def __getitem__(self, ElementIndex: int) -> gp.SinglePredictor:
 		r"""To get corresponding predictor
 
 		Parameters
@@ -555,7 +537,7 @@ class GPRPredictors(Averager):
 			Predictor corresponding to the index in density supervector
 		"""
 		assert 0 <= ElementIndex < self.config.NUM_ELM
-		return self.__residual_predictors[ElementIndex]
+		return self.__saved_predictors[ElementIndex][-1]
 
 	@property
 	def inducing_points(self) -> torch.Tensor:
@@ -566,7 +548,7 @@ class GPRPredictors(Averager):
 		torch.Tensor, shape of (NUM_TRIG, num_ind, PHASEDIM)
 			Inducing points of independent, lower triangular elements
 		"""
-		return torch.stack([self.__residual_predictors[iTrig].x_ind for iTrig in self.config.TRIL_ELEMENT_INDICES], 0)
+		return torch.stack([self.__saved_predictors[iTrig][-1].x_ind for iTrig in self.config.TRIL_ELEMENT_INDICES], 0)
 
 	@property
 	def scale(self) -> torch.Tensor:
@@ -595,44 +577,14 @@ class GPRPredictors(Averager):
 		torch.Tensor, shape of (NUM_ELM,)
 			The rescaling factor
 		"""
-		return torch.tensor([pred.scale for pred in self.__residual_predictors])
+		return torch.tensor([pred[-1].scale for pred in self.__saved_predictors])
 
-	def __non_residual_predict(self, x_input: torch.Tensor, ElementIndex: int) -> torch.Tensor:
-		r"""To predict main part by back propagation to each saved predictors
-
-		Parameters
-		----------
-		x_input : torch.Tensor, shape of (..., PHASEDIM)
-			Test inputs
-		ElementIndex : int
-			Index of the element
-
-		Returns
-		-------
-		torch.Tensor, shape of (...)
-			Density of the element of all test inputs
-		"""
-		result: torch.Tensor = torch.zeros(x_input.shape[:-1], dtype=torch.cdouble)
-		if self.__saved_predictors[ElementIndex]: # if there are saved predictors, use them to predict
-			RowIndex: typing.Final[int] = ElementIndex // self.config.NUM_PES
-			ColIndex: typing.Final[int] = ElementIndex % self.config.NUM_PES
-			if RowIndex == ColIndex:
-				for pred in self.__saved_predictors[ElementIndex]:
-					result += pred.predict(x_input)
-			elif RowIndex > ColIndex:
-				for pred_real, pred_imag in zip(self.__saved_predictors[ElementIndex], self.__saved_predictors[ColIndex * self.config.NUM_PES + RowIndex]):
-					result += pred_real.predict(x_input) + 1.j * pred_imag.predict(x_input)
-			else: # RowIndex < ColIndex
-				for pred_real, pred_imag in zip(self.__saved_predictors[ColIndex * self.config.NUM_PES + RowIndex], self.__saved_predictors[ElementIndex]):
-					result += pred_real.predict(x_input) - 1.j * pred_imag.predict(x_input)
-		return result
-
-	def __residual_combine_to_complex[**P](
+	def __combine_to_complex[**P](
 		self,
 		x_input: torch.Tensor,
 		RowIndex: int,
 		ColIndex: int,
-		call_single_predictor: collections.abc.Callable[typing.Concatenate[gp.ResidualPredictor, torch.Tensor, P], collections.abc.Iterable[torch.Tensor]],
+		call_single_predictor: collections.abc.Callable[typing.Concatenate[gp.SinglePredictor, torch.Tensor, P], collections.abc.Iterable[torch.Tensor]],
 		*args: P.args,
 		**kwargs: P.kwargs
 	) -> tuple[torch.Tensor, ...]:
@@ -656,34 +608,13 @@ class GPRPredictors(Averager):
 		"""
 		assert 0 <= RowIndex < self.config.NUM_PES and 0 <= ColIndex < self.config.NUM_PES
 		x_test: typing.Final[torch.Tensor] = x_input.reshape(-1, x_input.shape[-1])
+		pred_call: typing.Final[collections.abc.Callable[[gp.SinglePredictor], collections.abc.Iterable[torch.Tensor]]] = lambda pred: call_single_predictor(pred, x_test, *args, **kwargs)
 		if RowIndex == ColIndex:
-			return tuple(item.reshape(x_input.shape[:-1] + item.shape[1:]) + 0.j for item in call_single_predictor(self.__residual_predictors[RowIndex * self.config.NUM_PES + ColIndex], x_test, *args, **kwargs))
+			return tuple(sum(items, start=torch.zeros_like(items[0])).reshape(x_input.shape[:-1] + items[0].shape[1:]) + 0.j for items in zip(*map(pred_call, self.__saved_predictors[RowIndex * self.config.NUM_PES + ColIndex])))
 		elif RowIndex > ColIndex:
-			return tuple((real + 1.j * imag).reshape(x_input.shape[:-1] + real.shape[1:]) for real, imag in zip(call_single_predictor(self.__residual_predictors[ColIndex * self.config.NUM_PES + RowIndex], x_test, *args, **kwargs), call_single_predictor(self.__residual_predictors[RowIndex * self.config.NUM_PES + ColIndex], x_test, *args, **kwargs)))
+			return tuple((sum(real, start=torch.zeros_like(real[0])) + 1.j * sum(imag, start=torch.zeros_like(imag[0]))).reshape(x_input.shape[:-1] + real[0].shape[1:]) for real, imag in zip(zip(*map(pred_call, self.__saved_predictors[ColIndex * self.config.NUM_PES + RowIndex])), zip(*map(pred_call, self.__saved_predictors[RowIndex * self.config.NUM_PES + ColIndex]))))
 		else: # RowIndex < ColIndex
-			return tuple((real - 1.j * imag).reshape(x_input.shape[:-1] + real.shape[1:]) for real, imag in zip(call_single_predictor(self.__residual_predictors[RowIndex * self.config.NUM_PES + ColIndex], x_test, *args, **kwargs), call_single_predictor(self.__residual_predictors[ColIndex * self.config.NUM_PES + RowIndex], x_test, *args, **kwargs)))
-
-	def __residual_predict(self, x_input: torch.Tensor, ElementIndex: int) -> torch.Tensor:
-		r"""To predict test targets residual based on input and corresponding density matrix element
-
-		Parameters
-		----------
-		x_input : torch.Tensor, shape of (..., PHASEDIM)
-			Test inputs
-		ElementIndex : int
-			Index of the element
-
-		Returns
-		-------
-		torch.Tensor, shape of (...)
-			Density of the element of all test inputs
-		"""
-		return self.__residual_combine_to_complex(
-			x_input,
-			ElementIndex // self.config.NUM_PES,
-			ElementIndex % self.config.NUM_PES,
-			lambda pred, x_test: (pred.predict(x_test),) if GPRPredictors.__check_predictor(pred) else (torch.zeros(x_test.shape[0]),)
-		)[0]
+			return tuple((sum(real, start=torch.zeros_like(real[0])) - 1.j * sum(imag, start=torch.zeros_like(imag[0]))).reshape(x_input.shape[:-1] + real[0].shape[1:]) for real, imag in zip(zip(*map(pred_call, self.__saved_predictors[RowIndex * self.config.NUM_PES + ColIndex])), zip(*map(pred_call, self.__saved_predictors[ColIndex * self.config.NUM_PES + RowIndex]))))
 
 	def predict(
 		self,
@@ -706,7 +637,12 @@ class GPRPredictors(Averager):
 		torch.Tensor, shape of (...)
 			Density of the element of all test inputs
 		"""
-		return self.__residual_predict(x_input, ElementIndex) + self.__non_residual_predict(x_input, ElementIndex)
+		return self.__combine_to_complex(
+			x_input,
+			ElementIndex // self.config.NUM_PES,
+			ElementIndex % self.config.NUM_PES,
+			lambda pred, x_test: (pred.predict(x_test),) if GPRPredictors.__check_predictor(pred) else (torch.zeros(x_test.shape[0]),)
+		)[0]
 
 	def get_marginal(
 		self,
@@ -732,7 +668,7 @@ class GPRPredictors(Averager):
 		torch.Tensor, shape of (...)
 			Marginal distribution on the inputs
 		"""
-		def call_single_predictor(pred: gp.ResidualPredictor, x_test: torch.Tensor, dims: collections.abc.Sequence[int]) -> tuple[torch.Tensor]:
+		def call_single_predictor(pred: gp.SinglePredictor, x_test: torch.Tensor, dims: collections.abc.Sequence[int]) -> tuple[torch.Tensor]:
 			r"""To do prediction of a single predictor
 
 			Parameters
@@ -760,22 +696,7 @@ class GPRPredictors(Averager):
 			dimensions = tuple(set(dimensions)) # remove duplicate
 		assert all(0 <= dim <= self.config.PHASEDIM for dim in dimensions)
 		assert x_input.shape[-1] == len(dimensions)
-		# non_residual part
-		non_residual: torch.Tensor = torch.zeros(x_input.shape[:-1], dtype=torch.cdouble)
-		if self.__saved_predictors[ElementIndex]: # if there are saved predictors, use them to predict
-			RowIndex: typing.Final[int] = ElementIndex // self.config.NUM_PES
-			ColIndex: typing.Final[int] = ElementIndex % self.config.NUM_PES
-			if RowIndex == ColIndex:
-				for pred in self.__saved_predictors[ElementIndex]:
-					non_residual += pred.get_marginal(x_input, dimensions)
-			elif RowIndex > ColIndex:
-				for pred_real, pred_imag in zip(self.__saved_predictors[ElementIndex], self.__saved_predictors[ColIndex * self.config.NUM_PES + RowIndex]):
-					non_residual += pred_real.get_marginal(x_input, dimensions) + 1.j * pred_imag.get_marginal(x_input, dimensions)
-			else: # RowIndex < ColIndex
-				for pred_real, pred_imag in zip(self.__saved_predictors[ColIndex * self.config.NUM_PES + RowIndex], self.__saved_predictors[ElementIndex]):
-					non_residual += pred_real.get_marginal(x_input, dimensions) - 1.j * pred_imag.get_marginal(x_input, dimensions)
-		# add residual part
-		return non_residual + self.__residual_combine_to_complex(
+		return self.__combine_to_complex(
 			x_input,
 			ElementIndex // self.config.NUM_PES,
 			ElementIndex % self.config.NUM_PES,
@@ -854,7 +775,7 @@ class GPRPredictors(Averager):
 			torch.Tensor
 				drho_ij/dt, shape of (...)
 			"""
-			def residual_predict_derivative_over_input(x_input: torch.Tensor, RowIndex: int, ColIndex: int) -> gp.SinglePredictor.InputDerivativeReturn:
+			def predict_derivative_over_input_all(x_input: torch.Tensor, RowIndex: int, ColIndex: int) -> gp.SinglePredictor.InputDerivativeReturn:
 				r"""To combine the prediction and its derivative of the single predictor into complex arrays
 
 				Parameters
@@ -871,7 +792,7 @@ class GPRPredictors(Averager):
 				gp.SinglePredictor.InputDerivativeReturn
 					The prediction, and the derivative of the prediction over input
 				"""
-				return gp.SinglePredictor.InputDerivativeReturn(*self.__residual_combine_to_complex(
+				return gp.SinglePredictor.InputDerivativeReturn(*self.__combine_to_complex(
 					x_input,
 					RowIndex,
 					ColIndex,
@@ -891,7 +812,7 @@ class GPRPredictors(Averager):
 					pred = pred + 0.j
 					grad_input = grad_input + 0.j
 			else:
-				pred, grad_input = residual_predict_derivative_over_input(x, RowIndex, ColIndex)
+				pred, grad_input = predict_derivative_over_input_all(x, RowIndex, ColIndex)
 			# drho/dt at x_test
 			time_deriv: torch.Tensor = -(dXdt * grad_input).sum(-1)
 			if RowIndex != ColIndex:
@@ -899,10 +820,10 @@ class GPRPredictors(Averager):
 			if pred_real is None:
 				for iPES in self.config.PES_RANGE:
 					if iPES != RowIndex:
-						pred_kj, grad_kj = residual_predict_derivative_over_input(x, iPES, ColIndex)
+						pred_kj, grad_kj = predict_derivative_over_input_all(x, iPES, ColIndex)
 						time_deriv -= (D[..., RowIndex, iPES] * (v * pred_kj[..., np.newaxis] + (E[..., RowIndex] - E[..., iPES])[..., np.newaxis] / 2.0 * grad_kj[..., self.config.DIM:])).sum(-1)
 					if iPES != ColIndex:
-						pred_ik, grad_ik = residual_predict_derivative_over_input(x, RowIndex, iPES)
+						pred_ik, grad_ik = predict_derivative_over_input_all(x, RowIndex, iPES)
 						time_deriv += (D[..., iPES, ColIndex] * (v * pred_ik[..., np.newaxis] + (E[..., ColIndex] - E[..., iPES])[..., np.newaxis] / 2.0 * grad_ik[..., self.config.DIM:])).sum(-1)
 			return time_deriv
 
@@ -955,7 +876,7 @@ class GPRPredictors(Averager):
 			damp_c: typing.Final = 1.0
 			damp_epsilon: typing.Final = 1e-6 # gamma(t)=c*||d(param)/dt||/(||param(t)-param_ref(t)||+epsilon*||param(t)||)
 			residual: typing.Final[torch.Tensor] = test_den_time_deriv - grad_inducing.reshape(grad_inducing.shape[0], -1) @ inducing_time_deriv.reshape(-1) - grad_feature.reshape(grad_feature.shape[0], -1) @ feature_time_deriv.reshape(-1) - grad_label @ label_time_deriv
-			time_depend: typing.Final[torch.Tensor] = torch.linalg.ldl_solve(*torch.linalg.ldl_factor((grad_param.T * grad_param.T[:, torch.newaxis] / weight).mean(-1)), (grad_param.T * residual / weight).mean(-1)) # it times dt gives Euler
+			time_depend: typing.Final[torch.Tensor] = torch.linalg.ldl_solve(*torch.linalg.ldl_factor((grad_param.T * grad_param.T[:, torch.newaxis] / weight).mean(-1)), (grad_param.T * residual / weight).mean(-1, True))[..., 0] # it times dt gives Euler
 			param_ref: typing.Final[torch.Tensor] = param_old + param_ref_epsilon * (param_now - param_old)
 			param_ref_diff: typing.Final[torch.Tensor] = param_now - param_ref
 			damp_coe: typing.Final[float] = damp_c * time_depend.norm().item() / (param_ref_diff.norm().item() + damp_epsilon * param_now.norm().item())
@@ -978,35 +899,42 @@ class GPRPredictors(Averager):
 			x4, p2 = evolve.evolve_coordinates_adiabatically(model, x2, p1, mass, dt / 2.0, GPRPredictors.drc, iPES, jPES)
 			x_all_new: torch.Tensor = torch.cat((x4, p2), -1)
 			dx_all_dt: torch.Tensor = coord_derivative(x_all, iPES, jPES)
+			pt_ctr: torch.Tensor = torch.mean(x_all, 0)
+			pt_std: torch.Tensor = torch.std(self.__saved_predictors[iElement][-1].x_ind, 0)
+			pt_for_param_evo: torch.Tensor = normal_sample(self.__saved_predictors[iElement][-1].x_ind.shape[0], pt_ctr, pt_std)
+			pt_wt: torch.Tensor = self.epmca._gaussian_weight(pt_for_param_evo, pt_ctr, pt_std)
+			dpt_dt: torch.Tensor = coord_derivative(pt_for_param_evo, iPES, jPES)
 			# accumulate d(residual))/dt and residual from each predictor
-			d_res_dt: torch.Tensor = density_derivative(x_all, dx_all_dt, None, None, iPES, jPES)
-			res: torch.Tensor = self.epmca.density[iTrig]
+			d_res_dt: torch.Tensor = density_derivative(pt_for_param_evo, dpt_dt, None, None, iPES, jPES)
+			d_res_label_dt: torch.Tensor = density_derivative(x_all, dx_all_dt, None, None, iPES, jPES)
+			res_label: torch.Tensor = torch.zeros_like(self.epmca.density[iTrig])
 			# evolve each saved predictor of the element
-			for pred_real, pred_imag in zip(self.__saved_predictors[SymElmIndex], self.__saved_predictors[iElement]):
+			for pred_real, pred_imag in zip(self.__saved_predictors[SymElmIndex][:-1], self.__saved_predictors[iElement][:-1]):
 				# evolve parameter first
 				dx_ind_dt: torch.Tensor = coord_derivative(pred_real.x_ind, iPES, jPES) # num_ind * PHASEDIM
-				test_den_time_deriv: torch.Tensor = density_derivative(x_all, dx_all_dt, pred_real, None if iPES == jPES else pred_imag, iPES, jPES)
+				test_den_time_deriv: torch.Tensor = density_derivative(pt_for_param_evo, dpt_dt, pred_real, None if iPES == jPES else pred_imag, iPES, jPES)
+				label_den_time_deriv: torch.Tensor = density_derivative(x_all, dx_all_dt, pred_real, None if iPES == jPES else pred_imag, iPES, jPES)
 				d_res_dt -= test_den_time_deriv
-				res -= pred_real.y_all + (0.j if iPES == jPES else 1.j * pred_imag.y_all)
+				d_res_label_dt -= label_den_time_deriv
 				# deal with real and imag part separately
 				pred_real.set_raw_lengthscale(evolve_parameter(
-					self.epmca.weight[iTrig],
+					pt_wt,
 					test_den_time_deriv.real,
-					*pred_real.predict_derivative_over_internal(x_all),
+					*pred_real.predict_derivative_over_internal(pt_for_param_evo, self.chunk_size),
 					dx_ind_dt,
 					dx_all_dt,
-					test_den_time_deriv.real,
+					label_den_time_deriv.real,
 					pred_real._old_raw_lengthscale,
 					pred_real._raw_lengthscale
 				))
 				if iPES != jPES:
 					pred_imag.set_raw_lengthscale(evolve_parameter(
-						self.epmca.weight[iTrig],
+						pt_wt,
 						test_den_time_deriv.imag,
-						*pred_imag.predict_derivative_over_internal(x_all),
+						*pred_imag.predict_derivative_over_internal(pt_for_param_evo, self.chunk_size),
 						dx_ind_dt,
 						dx_all_dt,
-						test_den_time_deriv.imag,
+						label_den_time_deriv.imag,
 						pred_imag._old_raw_lengthscale,
 						pred_imag._raw_lengthscale
 					))
@@ -1018,207 +946,116 @@ class GPRPredictors(Averager):
 					evolve.evolve_density_adiabatically(model, saved_den, x0, x2, x4, GPRPredictors.drc, dt, iPES, jPES)
 					pred_real.update(saved_ind_new, x_all_new, saved_den.real)
 					pred_imag.update(saved_ind_new, x_all_new, saved_den.imag)
+					res_label -= saved_den
 				else:
 					# the same predictor, no density evolution in fact
 					pred_real.update(saved_ind_new, x_all_new, pred_real.y_all)
+					res_label -= pred_real.y_all
 			# evolve parameter of the residual predictor
-			x_ind: torch.Tensor = self.__residual_predictors[iElement].x_ind
+			x_ind: torch.Tensor = self.__saved_predictors[iElement][-1].x_ind
 			dx_ind_dt: torch.Tensor = coord_derivative(x_ind, iPES, jPES)
 			if iPES == jPES:
-				self.__residual_predictors[iElement].set_raw_lengthscale(evolve_parameter(
-					self.epmca.weight[iTrig],
+				self.__saved_predictors[iElement][-1].set_raw_lengthscale(evolve_parameter(
+					pt_wt,
 					d_res_dt.real,
-					*self.__residual_predictors[iElement].predict_derivative_over_internal(x_all),
+					*self.__saved_predictors[iElement][-1].predict_derivative_over_internal(pt_for_param_evo, self.chunk_size),
 					dx_ind_dt,
 					dx_all_dt,
-					d_res_dt.real,
-					self.__residual_predictors[iElement]._old_raw_lengthscale,
-					self.__residual_predictors[iElement]._raw_lengthscale
+					d_res_label_dt.real,
+					self.__saved_predictors[iElement][-1]._old_raw_lengthscale,
+					self.__saved_predictors[iElement][-1]._raw_lengthscale
 				))
 			else:
-				self.__residual_predictors[iElement].set_raw_lengthscale(evolve_parameter(
-					self.epmca.weight[iTrig],
+				self.__saved_predictors[iElement][-1].set_raw_lengthscale(evolve_parameter(
+					pt_wt,
 					d_res_dt.imag,
-					*self.__residual_predictors[iElement].predict_derivative_over_internal(x_all),
+					*self.__saved_predictors[iElement][-1].predict_derivative_over_internal(pt_for_param_evo, self.chunk_size),
 					dx_ind_dt,
 					dx_all_dt,
-					d_res_dt.imag,
-					self.__residual_predictors[iElement]._old_raw_lengthscale,
-					self.__residual_predictors[iElement]._raw_lengthscale
+					d_res_label_dt.imag,
+					self.__saved_predictors[iElement][-1]._old_raw_lengthscale,
+					self.__saved_predictors[iElement][-1]._raw_lengthscale
 				))
-				self.__residual_predictors[SymElmIndex].set_raw_lengthscale(evolve_parameter(
-					self.epmca.weight[iTrig],
+				self.__saved_predictors[SymElmIndex][-1].set_raw_lengthscale(evolve_parameter(
+					pt_wt,
 					d_res_dt.real,
-					*self.__residual_predictors[SymElmIndex].predict_derivative_over_internal(x_all),
+					*self.__saved_predictors[SymElmIndex][-1].predict_derivative_over_internal(pt_for_param_evo, self.chunk_size),
 					dx_ind_dt,
 					dx_all_dt,
-					d_res_dt.real,
-					self.__residual_predictors[SymElmIndex]._old_raw_lengthscale,
-					self.__residual_predictors[SymElmIndex]._raw_lengthscale
+					d_res_label_dt.real,
+					self.__saved_predictors[SymElmIndex][-1]._old_raw_lengthscale,
+					self.__saved_predictors[SymElmIndex][-1]._raw_lengthscale
 				))
 			# evolve inducing points
-			x_ind[:, :self.config.DIM], x_ind[:, self.config.DIM:] = evolve.evolve_coordinates_adiabatically(model, x_ind[:, :self.config.DIM], x_ind[:, self.config.DIM:], mass, dt, GPRPredictors.drc, iPES, jPES, True)
+			x_ind[:, :self.config.DIM], x_ind[:, self.config.DIM:] = evolve.evolve_coordinates_adiabatically(
+				model,
+				x_ind[:, :self.config.DIM],
+				x_ind[:, self.config.DIM:],
+				mass,
+				dt,
+				GPRPredictors.drc,
+				iPES,
+				jPES,
+				True
+			)
 			# evolve y_all
 			self.epmca.density[iTrig] = evolve.evolve_density_non_adiabatically(model, self.epmca.density[iTrig], x4, p2, x2, p1, mass, dt, self.predict, iPES, jPES)
 			# finally set up the point coordinates
 			self.epmca.point_set[iTrig] = x_all_new
 			# and update the predictor
 			if iPES == jPES:
-				self.__residual_predictors[iElement].update(x_ind, x_all_new, self.epmca.density[iTrig].real)
+				self.__saved_predictors[iElement][-1].update(x_ind, x_all_new, self.epmca.density[iTrig].real + res_label.real)
 			else:
-				self.__residual_predictors[iElement].update(x_ind, x_all_new, self.epmca.density[iTrig].imag)
-				self.__residual_predictors[SymElmIndex].update(x_ind, x_all_new, self.epmca.density[iTrig].real)
-
-	def __global_density_adjustment(
-		self,
-		model: pes.Potential,
-		mass: torch.Tensor,
-		print_log: bool = constant.DEBUG_MODE
-	) -> None:
-		r"""To adjust the trajectory density by conservation constraints
-
-		Parameters
-		----------
-		model : pes.Potential
-			Quantities derived from potential
-		mass : torch.Tensor, shape of (DIM,)
-			Mass of classical degree of freedom
-		print_log : bool, optional
-			Whether to print the log to console, by default `constant.DEBUG_MODE`
-		"""
-		print("Adjusting density by conservation constraints...")
-		vec_ppl: typing.Final[torch.Tensor] = 1.0 / self.epmca.num_pts / self.epmca.weight[self.epmca.DIAGONAL_TRIL_INDEX, ...] # shape of (NUM_PES, NUM_PT)
-		vec_eng: typing.Final[torch.Tensor] = (
-			model.adiabatic_potential(self.epmca.point_set[self.epmca.DIAGONAL_TRIL_INDEX, :, :self.config.DIM])[self.config.PES_RANGE, :, self.config.PES_RANGE] # potential
-			+ (torch.square(self.epmca.point_set[self.epmca.DIAGONAL_TRIL_INDEX, :, self.config.DIM:]) / mass).sum(-1) # kinetic energy
-		) / self.epmca.weight[self.epmca.DIAGONAL_TRIL_INDEX, ...] / self.epmca.num_pts # shape of (NUM_PES, NUM_PT)
-		if print_log:
-			print(f"\t||w_1|| = {vec_ppl.norm().item()}, ||w_E|| = {vec_eng.norm().item()}")
-		tril_diag: typing.Final[torch.Tensor] = torch.tensor(self.config.TRIL_ROW_INDICES) == torch.tensor(self.config.TRIL_COL_INDICES)
-		mat_prt: typing.Final[torch.Tensor] = self.PURITY_FACTOR / self.epmca.num_pts * torch.where(tril_diag, 1.0, 2.0)[:, torch.newaxis] / self.epmca.weight # off-diagonal has a factor of 2, shape of (NUM_TRIL, NUM_PT)
-
-		# solve for lambda_S
-		def equation(lambda_S: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-			r"""The purity equation, solve for lambda_S from this equation
-
-			Parameters
-			----------
-			lambda_S : torch.Tensor
-				Lagrange multiplier for purity conservation
-
-			Returns
-			-------
-			tuple[torch.Tensor, torch.Tensor]
-				Error of the equation, and the updated density
-			"""
-			# solve for lambda_1, and lambda_E:
-			mat_inv: typing.Final[torch.Tensor] = torch.diag_embed(1.0 / (torch.ones(self.epmca.num_pts) - lambda_S * mat_prt)) # reverse diagonal, shape of (NUM_TRIL, NUM_PT, NUM_PT)
-			A: typing.Final[torch.Tensor] = torch.stack((
-				torch.stack(((vec_ppl[:, torch.newaxis, :] @ mat_inv[tril_diag] @ vec_ppl[:, :, torch.newaxis]).sum(), (vec_ppl[:, torch.newaxis, :] @ mat_inv[tril_diag] @ vec_eng[:, :, torch.newaxis]).sum())),
-				torch.stack(((vec_eng[:, torch.newaxis, :] @ mat_inv[tril_diag] @ vec_ppl[:, :, torch.newaxis]).sum(), (vec_eng[:, torch.newaxis, :] @ mat_inv[tril_diag] @ vec_eng[:, :, torch.newaxis]).sum())),
-			))
-			b: typing.Final[torch.Tensor] = torch.stack((1.0 - (vec_ppl[:, torch.newaxis, :] @ mat_inv[tril_diag] @ self.epmca.density[self.epmca.DIAGONAL_TRIL_INDEX, :, torch.newaxis].real).sum(), self.__init_E - (vec_eng[:, torch.newaxis, :] @ mat_inv[tril_diag] @ self.epmca.density[self.epmca.DIAGONAL_TRIL_INDEX, :, torch.newaxis].real).sum()))
-			if print_log:
-				print(f"\t\t\tSolving purity equation: lambda_S = {lambda_S.item()} - A = {plot.format_array(A)} - b = {plot.format_array(b)}")
-			lambda_1E: typing.Final[torch.Tensor] = torch.linalg.solve(A, b)
-			# solve for update z:
-			updated_den: typing.Final[torch.Tensor] = (mat_inv.to(torch.cdouble) @ self.epmca.density.index_add(0, torch.arange(self.config.NUM_PES) * (torch.arange(self.config.NUM_PES) + 3) // 2, lambda_1E[0] * vec_ppl + lambda_1E[1] * vec_eng + 0.j)[..., torch.newaxis])[..., 0] # shape of (NUM_TRIL, NUM_PT)
-			return (updated_den.conj()[:, torch.newaxis, :] @ torch.diag_embed(mat_prt.to(torch.cdouble)) @ updated_den[:, :, torch.newaxis]).real.sum() - 1.0, updated_den
-
-		# use Newton downhill method
-		lambda_S: torch.Tensor = torch.full((1,), self.__last_purity_lambda, requires_grad=True)
-		loss, updated_den = equation(lambda_S)
-		print(f"Initial purity error is {loss.item()}")
-		for i in range(gp.Optimizer.MAX_ITER):
-			if loss.abs().item() <= gp.Optimizer.FTOL:
-				print("Convergence: |loss| <= FTOL")
-				break
-			grad: torch.Tensor = torch.autograd.grad(loss, lambda_S)[0]
-			change: float = loss.item() / grad.item()
-			lr = 1.0
-			new_loss, _ = equation((lambda_S - lr * change).detach())
-			while new_loss.abs().item() > loss.abs().item():
-				lr /= 2.0
-				new_loss, _ = equation((lambda_S - lr * change).detach())
-				if print_log:
-					print(f"\t\tline search: lr = {lr} - loss = {new_loss.item()}")
-				if new_loss.item() == loss.item(): # if no improvement, break to avoid infinite loop
-					print("No stepping forward")
-					break
-			lambda_S = (lambda_S - lr * change).detach().requires_grad_()
-			if i % (gp.Optimizer.MAX_ITER // 1000) == 0 or print_log:
-				print(f"\tIter {i} - error = {loss.item()} - grad = {grad.item()} - lambda_S = {lambda_S.item()} - lr = {lr}")
-			loss, updated_den = equation(lambda_S)
-
-		print(f"Final purity error = {loss.item()}, lambda_S = {lambda_S.item()}\n||density change|| = {(updated_den - self.epmca.density).norm().item()}, max change = {(updated_den - self.epmca.density).abs().max()} at {plot.format_array(self.epmca.point_set.reshape(-1)[(updated_den - self.epmca.density).abs().reshape(-1).argmax()])}")
-		self.__last_purity_lambda = lambda_S.item()
-		self.epmca.density = updated_den.detach()
-
-	def save_train(
-		self,
-		model: pes.Potential,
-		mass: torch.Tensor,
-		print_log: bool = constant.DEBUG_MODE
-	) -> None:
-		r"""To train each predictor, and to extract old predictor if necessary
-
-		Parameters
-		----------
-		model : pes.Potential
-			Quantities derived from potential
-		mass : torch.Tensor, shape of (DIM,)
-			Mass of classical degree of freedom
-		print_log : bool, optional
-			Whether to print the log to console, by default `constant.DEBUG_MODE`
-		"""
-		# check whether to save the current residual predictor
+				self.__saved_predictors[iElement][-1].update(x_ind, x_all_new, self.epmca.density[iTrig].imag + res_label.imag)
+				self.__saved_predictors[SymElmIndex][-1].update(x_ind, x_all_new, self.epmca.density[iTrig].real + res_label.real)
+		# then check whether to save the current residual predictor
 		for iPES, jPES, iElement, y in zip(self.config.TRIL_ROW_INDICES, self.config.TRIL_COL_INDICES, self.config.TRIL_ELEMENT_INDICES, self.epmca.density):
 			SymElmIdx: int = jPES * self.config.NUM_PES + iPES
-			x_all: torch.Tensor = self.__residual_predictors[iElement].x_all
-			# two cases: if no predictors is saved, residual is exact - predict; if there is predictor, residual is y_all in predictorsresidual
+			x_all: torch.Tensor = self.__saved_predictors[iElement][-1].x_all
 			y_res: torch.Tensor = y - self.predict(x_all, iElement)
 			pts_include: torch.Tensor = y.abs() > y.abs().max() * GPRPredictors.__JUDGE_INCLUDE_THRESHOLD
 			if torch.any(y_res[pts_include].abs() > GPRPredictors.__JUDGE_REGISTER_THRESHOLD * y[pts_include].abs()).item():
-				y_res_res: torch.Tensor = y_res if not self.__saved_predictors[iElement] else y - y_res # the new residual to fit
-				print(f"Register the residual predictor for {plot.get_element_label(iPES, jPES)}; now maximum residual is {y_res_res.abs().max()} at {plot.format_array(x_all[y_res_res.abs().argmax()])}")
-				# register predictor
-				self.__saved_predictors[iElement].append(gp.SinglePredictor(
-					self.__residual_predictors[iElement].x_ind,
-					self.__residual_predictors[iElement].x_all,
-					self.__residual_predictors[iElement].y_all,
-					self.__residual_predictors[iElement].lengthscale
-				))
-				# then choose the inducing points, and clear the predictor
+				print(f"Register the residual predictor for {plot.get_element_label(iPES, jPES)}; now maximum residual is {y_res.abs().max()} at {plot.format_array(x_all[y_res.abs().argmax()])}")
+				# adjust predictor
+				self.__saved_predictors[iElement][-1] = super(gp.ResidualPredictor, typing.cast(gp.ResidualPredictor, self.__saved_predictors[iElement][-1])) # update the predictor to `gp.SinglePredictor`, whose lengthscale mapping is now the base one
+				# then choose the inducing points
 				x_ind: torch.Tensor = self.__kmeans(x_all[torch.newaxis]).centers[0]
+				# and add the new predictor (where the parameter is trained)
 				if iPES == jPES:
-					self.__residual_predictors[iElement].update(x_ind, x_all, y_res_res.real)
-				else: # if iPES < jPES:
-					self.__saved_predictors[SymElmIdx].append(gp.SinglePredictor(
-						self.__residual_predictors[SymElmIdx].x_ind,
-						self.__residual_predictors[SymElmIdx].x_all,
-						self.__residual_predictors[SymElmIdx].y_all,
-						self.__residual_predictors[SymElmIdx].lengthscale
+					self.__saved_predictors[iElement].append(gp.ResidualPredictor(
+						x_ind,
+						x_all,
+						y_res.real,
+						self.__saved_predictors[iElement][-1].lengthscale
 					))
-					self.__residual_predictors[SymElmIdx].update(x_ind, x_all, y_res_res.real)
-					self.__residual_predictors[iElement].update(x_ind, x_all, y_res_res.imag)
-		# then a global adjustment with constraints
-		self.__global_density_adjustment(model, mass, print_log)
-		for iPES, jPES, iElement, y in zip(self.config.TRIL_ROW_INDICES, self.config.TRIL_COL_INDICES, self.config.TRIL_ELEMENT_INDICES, self.epmca.density):
-			SymElmIdx: int = jPES * self.config.NUM_PES + iPES
-			x_ind: torch.Tensor = self.__residual_predictors[iElement].x_ind
-			x_all: torch.Tensor = self.__residual_predictors[iElement].x_all
-			y_res: torch.Tensor = y.detach().clone()
-			for pred_real, pred_imag in zip(self.__saved_predictors[iElement], self.__saved_predictors[SymElmIdx]):
-				y_res -= pred_real.y_all + 1.j * pred_imag.y_all # imaginary part is unused if iPES == jPES
-			if iPES == jPES:
-				self.__residual_predictors[iElement].update(x_ind, x_all, y_res.real)
-			else:
-				self.__residual_predictors[iElement].update(x_ind, x_all, y_res.imag)
-				self.__residual_predictors[SymElmIdx].update(x_ind, x_all, y_res.real)
+				else: # if iPES < jPES:
+					self.__saved_predictors[SymElmIdx][-1] = super(gp.ResidualPredictor, typing.cast(gp.ResidualPredictor, self.__saved_predictors[SymElmIdx][-1])) # update the predictor to `gp.SinglePredictor`
+					self.__saved_predictors[iElement].append(gp.ResidualPredictor(
+						x_ind,
+						x_all,
+						y_res.imag,
+						self.__saved_predictors[iElement][-1].lengthscale
+					))
+					self.__saved_predictors[SymElmIdx].append(gp.ResidualPredictor(
+						x_ind,
+						x_all,
+						y_res.real,
+						self.__saved_predictors[SymElmIdx][-1].lengthscale
+					))
+
+	def train(self, print_log: bool = constant.DEBUG_MODE) -> None:
+		r"""To train each residual predictor
+
+		Parameters
+		----------
+		print_log : bool, optional
+			Whether to print the log to console, by default `constant.DEBUG_MODE`
+		"""
 		# then train the residual predictors
-		for iElement, pred in zip(self.config.ELEMENT_RANGE, self.__residual_predictors):
+		for iElement in self.config.ELEMENT_RANGE:
+			pred = typing.cast(gp.ResidualPredictor, self.__saved_predictors[iElement][-1])
 			if __class__.__check_predictor(pred):
-				print("Training " + plot.get_RI_label(iElement, self.config.NUM_PES))
+				print("\tTraining " + plot.get_RI_label(iElement, self.config.NUM_PES))
 				pred.train(print_log)
 
 	def print(self, f: typing.IO) -> None:
@@ -1229,6 +1066,8 @@ class GPRPredictors(Averager):
 		f : io.TextIOWrapper
 			The file to save the parameters
 		"""
-		for predictor in self.__residual_predictors:
-			np.savetxt(f, predictor.lengthscale.detach().cpu().numpy().reshape(1, -1))
-		print("\n", file=f)
+		for preds in self.__saved_predictors:
+			for pred in preds:
+				np.savetxt(f, pred.lengthscale.detach().cpu().numpy().reshape(1, -1), constant.FMT, footer="", comments="", encoding=constant.ENC)
+			print("", file=f)
+		print("\n", file=f, flush=constant.DEBUG_MODE)

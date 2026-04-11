@@ -20,7 +20,7 @@ FMT: typing.Final = r"%.18e"
 
 type Predictor = collections.abc.Callable[[torch.Tensor, int], torch.Tensor]
 
-DEBUG_MODE: bool = True
+DEBUG_MODE: typing.Final[typing.Literal[True, False]] = False
 
 INPUT_FILENAME: typing.Final = "input"
 

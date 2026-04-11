@@ -68,6 +68,9 @@ def evolve_coordinates_adiabatically(
 	tuple[torch.Tensor, torch.Tensor]
 		The destination positions and momenta
 	"""
+	if two_semi_steps:
+		dt /= 2.0 # half dt
+
 	def position_evolve(x: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
 		r"""To evolve positions for half step
 

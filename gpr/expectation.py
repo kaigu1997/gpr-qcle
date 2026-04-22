@@ -3,17 +3,44 @@ r"""expectation
 This module evaluates the expectation values (population, <x> and <p>, energy, etc)
 """
 import abc
-import copy
 import math
 import typing
 
+import numpy as np
 import torch
 
 import constant
 import evolve
-import gp
 import pes
-import point
+
+torch.set_default_dtype(constant.DTYPE)
+torch.set_default_device(constant.DEVICE)
+torch.manual_seed(constant.SEED)
+
+
+def normal_sample(
+	num_points: int,
+	mean: torch.Tensor,
+	stddev: torch.Tensor
+) -> torch.Tensor:
+	r"""To create normally distributed point set based on given mean and variance
+
+	Parameters
+	----------
+	num_points : int
+		The number of points needed
+	mean : torch.Tensor, shape of (PHASEDIM,)
+		The center of the points
+	stddev : torch.Tensor, shape of (PHASEDIM,)
+		The standard deviation of the points
+
+	Returns
+	-------
+	torch.Tensor, shape of (NUM_PTS, PHASEDIM)
+		Normally distributed point test
+	"""
+	return torch.randn((num_points, mean.numel()), device=stddev.device) * stddev + mean
+
 
 
 class Averager(abc.ABC):
@@ -183,6 +210,37 @@ class MonteCarloAverage(Averager):
 		self.weight = torch.empty((self.config.NUM_TRIG, self.__num_pts))
 		self.density = torch.empty((self.config.NUM_TRIG, self.__num_pts), dtype=torch.cdouble)
 
+	def _gaussian_weight(self, coord: torch.Tensor, center: torch.Tensor, stddev: torch.Tensor) -> torch.Tensor:
+		r"""The multi-dimensional gaussian function
+
+		Parameters
+		----------
+		coord : torch.Tensor, shape of (..., N)
+			The coordinates whose weights are calculated
+		center : torch.Tensor, shape of (N,)
+			Centers of the normal distributions
+		stddev : torch.Tensor, shape of (N,)
+			Standard deviation of the normal distributions.
+			This function assumes no correlation
+
+		Returns
+		-------
+		torch.Tensor, shape of (..., N)
+			Density at the given coordinates
+		"""
+		return torch.exp(-torch.sum(((coord - center) / stddev) ** 2, -1) / 2.0) / ((2.0 * math.pi) ** self.config.DIM * stddev.prod())
+
+	@property
+	def num_pts(self) -> int:
+		r"""The number of points for Monte Carlo
+
+		Returns
+		-------
+		int
+			The number of points for Monte Carlo
+		"""
+		return self.__num_pts
+
 	def update_pts(
 		self,
 		ref_pts: list[torch.Tensor],
@@ -200,8 +258,8 @@ class MonteCarloAverage(Averager):
 		for iPES, jPES, iTrig in zip(self.config.TRIL_ROW_INDICES, self.config.TRIL_COL_INDICES, self.config.TRIG_RANGE):
 			center: torch.Tensor = torch.mean(ref_pts[iTrig], 0)
 			stddev: torch.Tensor = 1.5 * torch.std(ref_pts[iTrig], 0)
-			self.point_set[iTrig] = point.normal_sample(self.__num_pts, center, stddev)
-			self.weight[iTrig] = torch.exp(-torch.sum(((self.point_set[iTrig] - center) / stddev) ** 2, -1) / 2.0) / ((2.0 * math.pi) ** self.config.DIM * stddev.prod()) # N
+			self.point_set[iTrig] = normal_sample(self.__num_pts, center, stddev)
+			self.weight[iTrig] = self._gaussian_weight(self.point_set[iTrig], center, stddev) # N
 			self.density[iTrig] = predictor(self.point_set[iTrig], iPES * self.config.NUM_PES + jPES)
 
 	def population(self) -> torch.Tensor:
@@ -257,7 +315,6 @@ class MonteCarloAverage(Averager):
 		return self.PURITY_FACTOR * (flatten_lower_trig + torch.tril(flatten_lower_trig, -1).T)
 
 
-@typing.final
 class EvolvingPointsMCAverage(MonteCarloAverage):
 	r"""To calculate average by Monte Carlo estimate too,
 	but using points evolving forward with same weights
@@ -268,10 +325,8 @@ class EvolvingPointsMCAverage(MonteCarloAverage):
 		Configuration of the model
 	num_pts : int
 		The number of points for monte carlo
-	init_dist : self.config.InitialDistribution
+	init_dist : pes.InitialDistribution
 		Initial distribution to generate points, density, and weights
-	evolve_coordinates_only : bool, optional
-		Whether to evolve phase space coordinates only or with its density as well, by default False
 
 	Methods
 	-------
@@ -280,22 +335,23 @@ class EvolvingPointsMCAverage(MonteCarloAverage):
 	update_density(predictor)
 		To update the density using the predictor if the density is not evolved
 	"""
-	__slots__: tuple = ("__evolve_coordinates_only",)
+	__slots__: tuple = ()
 
 	def __init__(
 		self,
 		config: pes.ModelConfig,
 		num_pts: int,
 		init_dist: pes.InitialDistribution,
-		evolve_coordinates_only: bool = False
+		stddev: torch.Tensor | None = None
 	):
 		super().__init__(config, num_pts)
-		self.__evolve_coordinates_only: typing.Final[bool] = evolve_coordinates_only
-		pts: typing.Final[torch.Tensor] = point.normal_sample(num_pts, init_dist.r0, init_dist.sigma_r0)
+		if stddev is None:
+			stddev = init_dist.sigma_r0
+		pts: typing.Final[torch.Tensor] = normal_sample(num_pts, init_dist.r0, stddev)
 		den: typing.Final[torch.Tensor] = init_dist(pts)
 		self.point_set[:] = pts
 		self.density = den[:, self.config.TRIL_ROW_INDICES, self.config.TRIL_COL_INDICES].T
-		self.weight = torch.abs(self.density) / init_dist.weight[self.config.TRIL_ROW_INDICES, self.config.TRIL_COL_INDICES, torch.newaxis]
+		self.weight[:] = self._gaussian_weight(pts, init_dist.r0, stddev)
 
 	def evolve(
 		self,
@@ -304,7 +360,7 @@ class EvolvingPointsMCAverage(MonteCarloAverage):
 		dt: float,
 		predictor: constant.Predictor
 	) -> None:
-		r"""To evolve the coordinates, and density if applicable
+		r"""To evolve the coordinates and density
 
 		Parameters
 		----------
@@ -317,93 +373,4 @@ class EvolvingPointsMCAverage(MonteCarloAverage):
 		predictor : constant.Predictor
 			It predicts the density matrix element based on given coordinates and element index
 		"""
-		if self.__evolve_coordinates_only:
-			for pts, row_idx, col_idx in zip(self.point_set, self.config.TRIL_ROW_INDICES, self.config.TRIL_COL_INDICES):
-				pts[:, :self.config.DIM], pts[:, self.config.DIM:] = evolve.evolve_coordinates_adiabatically(
-					model,
-					pts[:, :self.config.DIM],
-					pts[:, self.config.DIM:],
-					mass,
-					dt,
-					evolve.Direction.FORWARD,
-					row_idx,
-					col_idx
-				)
-		else:
-			evolve.evolve(model, [ps for ps in self.point_set], [den for den in self.density], mass, dt, predictor)
-
-	def update_density(self, predictor: constant.Predictor) -> None:
-		r"""To update the density using the predictor if the density is not evolved
-
-		Parameters
-		----------
-		predictor : self.config.Predictor
-			It predicts the density matrix element based on given coordinates and element index
-		"""
-		if self.__evolve_coordinates_only:
-			for i, ElementIndex in enumerate(self.config.TRIL_ELEMENT_INDICES):
-				self.density[i] = predictor(self.point_set[i], ElementIndex)
-
-
-@typing.final
-class AnalyticalAverager(Averager):
-	r"""Using analytical integral of GPR to estimate averages
-
-	Parameters
-	----------
-	config : pes.ModelConfig
-		Configuration of the model
-	pred : gp.GPRPredictors
-		GPR predictors
-	"""
-	__slots__: tuple = ("__AVERAGE_CONSTANT", "__predictors",)
-	__AVERAGE_CONSTANT: typing.Final[float]
-	__predictors: typing.Final[gp.GPRPredictors]
-
-	def __init__(self, config: pes.ModelConfig, pred: gp.GPRPredictors):
-		super().__init__(config)
-		self.__AVERAGE_CONSTANT = (2.0 * math.pi) ** self.config.DIM
-		self.__predictors = pred
-
-	def population(self) -> torch.Tensor:
-		result: torch.Tensor = torch.empty(self.config.NUM_PES)
-		for iPES in range(self.config.NUM_PES):
-			ElementIndex: int = iPES * self.config.NUM_PES + iPES
-			pred: gp.SinglePredictor = self.__predictors[ElementIndex]
-			result[iPES] = pred.model.cov.lengthscale.prod().item() * pred.k_inv_y.sum().item()
-		return result * self.__AVERAGE_CONSTANT
-
-	def coordinates(self) -> torch.Tensor:
-		result: torch.Tensor = torch.zeros(self.config.PHASEDIM)
-		for iPES in range(self.config.NUM_PES):
-			ElementIndex: int = iPES * self.config.NUM_PES + iPES
-			pred: gp.SinglePredictor = self.__predictors[ElementIndex]
-			result += pred.model.cov.lengthscale.prod().item() * (pred.k_inv_y[:, None] * pred.get_training_features()).sum(0)
-		return result * self.__AVERAGE_CONSTANT
-
-	def square_coordinates(self) -> torch.Tensor:
-		result: torch.Tensor = torch.zeros((self.config.PHASEDIM, self.config.PHASEDIM))
-		for iPES in range(self.config.NUM_PES):
-			ElementIndex: int = iPES * self.config.NUM_PES + iPES
-			pred: gp.SinglePredictor = self.__predictors[ElementIndex]
-			result += pred.model.cov.lengthscale.prod().item() * (
-				(pred.k_inv_y[:, None, None] * pred.get_training_features()[:, :, None] * pred.get_training_features()[:, None, :]).sum(0)
-				+ pred.k_inv_y.sum() * torch.diagflat(pred.model.cov.lengthscale ** 2))
-		return result * self.__AVERAGE_CONSTANT
-
-	def covariance(self) -> torch.Tensor:
-		return super().covariance()
-
-	def potential(self, model: pes.Potential) -> float:
-		return math.nan
-
-	def purity(self) -> torch.Tensor:
-		result: torch.Tensor = torch.empty(self.config.NUM_PES, self.config.NUM_PES)
-		for iPES in range(self.config.NUM_PES):
-			for jPES in range(self.config.NUM_PES):
-				pred: gp.SinglePredictor = self.__predictors[iPES * self.config.NUM_PES + jPES]
-				model: gp.GP = copy.deepcopy(pred.model)
-				with torch.no_grad():
-					model.cov.lengthscale = model.cov.lengthscale * math.sqrt(2.0)
-				result[iPES, jPES] = (math.pi ** self.config.DIM) * pred.model.cov.lengthscale.prod().item() * (pred.k_inv_y @ model.cov(pred.get_training_features()).to_dense() @ pred.k_inv_y).item()
-		return self.PURITY_FACTOR * (result + result.T - torch.diag(torch.diag(result)))
+		evolve.evolve(model, [*self.point_set], [*self.density], mass, dt, predictor)

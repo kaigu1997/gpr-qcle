@@ -80,14 +80,16 @@ class GPRPredictors(expectation.Averager):
 		bool
 			Availability of training / predicting
 		"""
-		return not torch.all(predictor.y_all == 0).item() if isinstance(predictor, gp.KernelPredictor) else not torch.all(predictor.gp.y_all == 0).item()
+		return not torch.all(predictor.y_ind == 0).item() if isinstance(predictor, gp.KernelPredictor) else not torch.all(predictor.gp.y_all == 0).item()
 
 	drc: typing.Final = evolve.Direction.FORWARD
 	__JUDGE_INCLUDE_THRESHOLD: typing.Final = 0.1
-	__slots__: typing.Final[tuple] = ("__AVERAGE_CONSTANT", "epmca", "__kmeans", "__predictors", "chunk_size")
+	__slots__: typing.Final[tuple] = ("__AVERAGE_CONSTANT", "epmca", "__kmeans", "ind_pts", "ind_den", "__predictors", "chunk_size")
 	__AVERAGE_CONSTANT: typing.Final[float]
 	epmca: typing.Final[expectation.EvolvingPointsMCAverage]
 	__kmeans: typing.Final[torch_kmeans.KMeans]
+	ind_pts: torch.Tensor
+	ind_den: torch.Tensor
 	__predictors: typing.Final[list[gp.GP_NW_Mix]]
 	chunk_size: typing.Final[int]
 
@@ -105,18 +107,33 @@ class GPRPredictors(expectation.Averager):
 		self.epmca = expectation.EvolvingPointsMCAverage(config, num_pts, init_dist, init_stddev)
 		self.__kmeans = torch_kmeans.KMeans(init_method="k-means++", n_clusters=num_ind, seed=constant.SEED, verbose=constant.DEBUG_MODE)
 		ind_pt: typing.Final[torch.Tensor] = self.__kmeans(self.epmca.point_set[:1, self.epmca.density[0].real > GPRPredictors.__JUDGE_INCLUDE_THRESHOLD * self.epmca.density[0].real.max()]).centers[0]
+		self.ind_pts = torch.repeat_interleave(ind_pt[torch.newaxis], self.config.NUM_TRIG, 0)
+		self.ind_den = init_dist(ind_pt)[:, config.TRIL_ROW_INDICES, config.TRIL_COL_INDICES].T
 		self.__predictors = []
 		for iElement in config.ELEMENT_RANGE:
+			RowIndex: int = iElement // config.NUM_PES
+			ColIndex: int = iElement % config.NUM_PES
 			print("\tInitial Training " + plot.get_RI_label(iElement, config.NUM_PES))
 			TrilIndex: int = self.config.FLATTEN_TRIL_INDEX[iElement]
-			y: torch.Tensor = self.epmca.density[TrilIndex].real if iElement // config.NUM_PES <= iElement % config.NUM_PES else self.epmca.density[TrilIndex].imag
-			self.__predictors.append(gp.GP_NW_Mix(
-				ind_pt,
-				self.epmca.point_set[TrilIndex],
-				y,
-				kernel_initial_value,
-				2
-			)) # this includes training of initial distribution
+			# this includes training of initial distribution
+			if RowIndex <= ColIndex:
+				self.__predictors.append(gp.GP_NW_Mix(
+					self.ind_pts[TrilIndex],
+					self.ind_den[TrilIndex].real,
+					self.epmca.point_set[TrilIndex],
+					self.epmca.density[TrilIndex].real,
+					kernel_initial_value,
+					2
+				))
+			else: # RowIndex > ColIndex
+				self.__predictors.append(gp.GP_NW_Mix(
+					self.ind_pts[TrilIndex],
+					self.ind_den[TrilIndex].imag,
+					self.epmca.point_set[TrilIndex],
+					self.epmca.density[TrilIndex].imag,
+					kernel_initial_value,
+					2
+				))
 		# then check for chunk size to avoid OOM in autograd
 		self.chunk_size = self.__predictors[0].gp.get_chunk_size(expectation.normal_sample(num_ind, init_dist.r0, init_dist.sigma_r0))
 
@@ -186,7 +203,7 @@ class GPRPredictors(expectation.Averager):
 		torch.Tensor, shape of (NUM_TRIG, num_ind, PHASEDIM)
 			Inducing points of independent, lower triangular elements
 		"""
-		return torch.stack([self.__predictors[iTrig].gp.x_ind for iTrig in self.config.TRIL_ELEMENT_INDICES], 0)
+		return self.ind_pts
 
 	@property
 	def scale(self) -> torch.Tensor:
@@ -350,28 +367,18 @@ class GPRPredictors(expectation.Averager):
 		predictor : constant.Predictor
 			It predicts the density matrix element based on given coordinates and element index
 		"""
+		# evolve full set
 		self.epmca.evolve(model, mass, dt, self.predict)
+		# evolve inducing points
+		evolve.evolve(model, [*self.ind_pts], [*self.ind_den], mass, dt, self.predict)
 		# evolve saved predictors adiabatically
 		for iPES, jPES, iTrig, iElement in zip(self.config.TRIL_ROW_INDICES, self.config.TRIL_COL_INDICES, self.config.TRIG_RANGE, self.config.TRIL_ELEMENT_INDICES):
-			# evolve inducing points
-			x_ind: torch.Tensor = self.__predictors[iElement].gp.x_ind
-			x_ind[:, :self.config.DIM], x_ind[:, self.config.DIM:] = evolve.evolve_coordinates_adiabatically(
-				model,
-				x_ind[:, :self.config.DIM],
-				x_ind[:, self.config.DIM:],
-				mass,
-				dt,
-				GPRPredictors.drc,
-				iPES,
-				jPES,
-				True
-			)
 			# and update the predictor
 			if iPES == jPES:
-				self.__predictors[iElement].update(x_ind, self.epmca.point_set[iTrig], self.epmca.density[iTrig].real)
+				self.__predictors[iElement].update(self.ind_pts[iTrig], self.ind_den[iTrig].real, self.epmca.point_set[iTrig], self.epmca.density[iTrig].real)
 			else:
-				self.__predictors[iElement].update(x_ind, self.epmca.point_set[iTrig], self.epmca.density[iTrig].imag)
-				self.__predictors[jPES * self.config.NUM_PES + iPES].update(x_ind, self.epmca.point_set[iTrig], self.epmca.density[iTrig].real)
+				self.__predictors[iElement].update(self.ind_pts[iTrig], self.ind_den[iTrig].imag, self.epmca.point_set[iTrig], self.epmca.density[iTrig].imag)
+				self.__predictors[jPES * self.config.NUM_PES + iPES].update(self.ind_pts[iTrig], self.ind_den[iTrig].real, self.epmca.point_set[iTrig], self.epmca.density[iTrig].real)
 
 	def train(self, print_log: bool = constant.DEBUG_MODE) -> None:
 		r"""To train each residual predictor

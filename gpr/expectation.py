@@ -350,7 +350,7 @@ class EvolvingPointsMCAverage(MonteCarloAverage):
 		pts: typing.Final[torch.Tensor] = normal_sample(num_pts, init_dist.r0, stddev)
 		den: typing.Final[torch.Tensor] = init_dist(pts)
 		self.point_set[:] = pts
-		self.density = den[:, self.config.TRIL_ROW_INDICES, self.config.TRIL_COL_INDICES].T
+		self.density = den[:, config.TRIL_ROW_INDICES, config.TRIL_COL_INDICES].T
 		self.weight[:] = self._gaussian_weight(pts, init_dist.r0, stddev)
 
 	def evolve(

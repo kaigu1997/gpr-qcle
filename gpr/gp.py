@@ -47,6 +47,10 @@ class KernelPredictor(abc.ABC):
 
 	Parameters
 	----------
+	x_ind : torch.Tensor, of shape (N_IND_PT, PHASEDIM)
+		Inducing Points
+	y_ind : torch.Tensor, of shape (N_IND_PT)
+		Targets of inducing points
 	x_all : torch.Tensor, of shape (N_ALL, PHASEDIM)
 		All training inputs
 	y_all : torch.Tensor, of shape (N_ALL)
@@ -91,7 +95,9 @@ class KernelPredictor(abc.ABC):
 	NOISE: typing.Final[float] = torch.finfo(torch.float32).eps
 	raw_to_real: collections.abc.Callable[[torch.Tensor], torch.Tensor] = staticmethod(torch.nn.Softplus())
 	real_to_raw: collections.abc.Callable[[torch.Tensor], torch.Tensor] = staticmethod(lambda x: torch.where(x * KernelPredictor.raw_to_real.beta > KernelPredictor.raw_to_real.threshold, x, x + torch.log(-torch.expm1(-x)))) # num stable inv softplus
-	__slots__: tuple = ("x_all", "y_all", "scale", "_old_raw_lengthscale", "_raw_lengthscale", "_lr")
+	__slots__: tuple = ("x_ind", "y_ind", "x_all", "y_all", "scale", "_old_raw_lengthscale", "_raw_lengthscale", "_lr")
+	x_ind: torch.Tensor
+	y_ind: torch.Tensor
 	x_all: torch.Tensor
 	y_all: torch.Tensor
 	scale: float
@@ -101,11 +107,15 @@ class KernelPredictor(abc.ABC):
 
 	def __init__(
 		self,
+		x_ind: torch.Tensor,
+		y_ind: torch.Tensor,
 		x_all: torch.Tensor,
 		y_all: torch.Tensor,
 		lengthscale_initial_value: torch.Tensor,
 		indent: int
 	) -> None:
+		self.x_ind = x_ind.detach().clone()
+		self.y_ind = y_ind.detach().clone()
 		self.x_all = x_all.detach().clone()
 		self.y_all = y_all.detach().clone()
 		self.scale = 1.0 / y_all.abs().max().item()
@@ -121,27 +131,20 @@ class KernelPredictor(abc.ABC):
 			raw_lengthscale: typing.Final[torch.Tensor] = self._raw_lengthscale.detach().requires_grad_()
 		predict: typing.Final[torch.Tensor] = self.predict(x_test, None, True)
 		N: typing.Final[int] = predict.numel()
-		eye: typing.Final[torch.Tensor] = torch.eye(predict.numel())
 		chunk_size: int = N
-		chunk_range: range = range(0, N, chunk_size)
 		change_to_2_power: bool = False
 		power_of_2_max: typing.Final[int] = 64 # wavefront of 64 on AMD and warps of 32 on NV
 		while chunk_size > 1:
 			try:
 				if print_log:
 					print("\tChunk size for autograd test:", chunk_size)
-				self.InternalDerivativeReturn(
-					feature_derivative=torch.cat([torch.autograd.grad(predict, x_all, eye[i:min(i+chunk_size, N)], True, False, True, True, True, True)[0].detach() for i in chunk_range], dim=0),
-					label_derivative=torch.cat([torch.autograd.grad(predict, y_all, eye[i:min(i+chunk_size, N)], True, False, True, True, True, True)[0].detach() for i in chunk_range], dim=0),
-					raw_param_derivative=torch.cat([torch.autograd.grad(predict, raw_lengthscale, eye[i:min(i+chunk_size, N)], True, False, True, True, True, True)[0].detach() for i in chunk_range], dim=0)
-				)
+				self.predict_derivative_over_internal(x_all, chunk_size)
 				break
 			except torch.OutOfMemoryError:
 				chunk_size //= 2
 				if chunk_size < power_of_2_max and not change_to_2_power:
 					chunk_size = power_of_2_max
 					change_to_2_power = True
-				chunk_range = range(0, N, chunk_size)
 		print(f"Chunk size for autograd: {chunk_size}")
 		return chunk_size
 
@@ -232,6 +235,8 @@ class KernelPredictor(abc.ABC):
 
 	def update(
 		self,
+		x_ind: torch.Tensor,
+		y_ind: torch.Tensor,
 		x_all: torch.Tensor,
 		y_all: torch.Tensor
 	) -> None:
@@ -239,11 +244,17 @@ class KernelPredictor(abc.ABC):
 
 		Parameters
 		----------
+		x_ind : torch.Tensor, of shape (N_IND_PT, PHASEDIM)
+			Inducing Points
+		y_ind : torch.Tensor, of shape (N_IND_PT)
+			Targets of inducing points
 		x_all : torch.Tensor, of shape (N_ALL_PT, PHASEDIM)
 			All training inputs
 		y_all : torch.Tensor, of shape (N_ALL_PT)
 			All training targets
 		"""
+		self.x_ind = x_ind.reshape(-1, x_ind.shape[-1]).detach().clone()
+		self.y_ind = y_ind.reshape(-1).detach().clone()
 		self.x_all = x_all.reshape(-1, x_all.shape[-1]).detach().clone()
 		self.y_all = y_all.reshape(-1).detach().clone()
 		self.scale = 1.0 / y_all.abs().max().item()
@@ -337,8 +348,10 @@ class GaussianProcess(KernelPredictor):
 
 	Parameters
 	----------
-	x_ind : torch.Tensor, of shape (N_IND, PHASEDIM)
-		Coordinates of inducing points
+	x_ind : torch.Tensor, of shape (N_IND_PT, PHASEDIM)
+		Inducing Points
+	y_ind : torch.Tensor, of shape (N_IND_PT)
+		Targets of inducing points
 	x_all : torch.Tensor, of shape (N_ALL, PHASEDIM)
 		All training inputs
 	y_all : torch.Tensor, of shape (N_ALL)
@@ -379,7 +392,7 @@ class GaussianProcess(KernelPredictor):
 
 	raw_to_real: collections.abc.Callable[[torch.Tensor], torch.Tensor] = staticmethod(torch.exp)
 	real_to_raw: collections.abc.Callable[[torch.Tensor], torch.Tensor] = staticmethod(torch.log)
-	__slots__: typing.Final[tuple] = ("x_ind", "__k_inv_y", "__weights_updated", "__lr")
+	__slots__: typing.Final[tuple] = ("__k_inv_y", "__weights_updated", "__lr")
 	x_ind: torch.Tensor
 	x_all: torch.Tensor
 	y_all: torch.Tensor
@@ -392,50 +405,16 @@ class GaussianProcess(KernelPredictor):
 	def __init__(
 		self,
 		x_ind: torch.Tensor,
+		y_ind: torch.Tensor,
 		x_all: torch.Tensor,
 		y_all: torch.Tensor,
 		lengthscale_initial_value: torch.Tensor,
 		indent: int
 	) -> None:
-		self.x_ind = x_ind.detach().clone()
 		self.__weights_updated = False
-		super().__init__(x_all, y_all, lengthscale_initial_value, indent)
+		super().__init__(x_ind, y_ind, x_all, y_all, lengthscale_initial_value, indent)
 		self.__k_inv_y = (linear_operator.utils.stable_pinverse(rbf(self.raw_to_real(self._raw_lengthscale), self.x_all, self.x_ind)) @ self.y_all).detach()
 		self._lr = 1.0 if self._raw_lengthscale.numel() >= 10 else None # use gradient descend if dimension is large, otherwise use newton method
-
-	@typing.override
-	def get_chunk_size(self, x_test: torch.Tensor, print_log: bool = constant.DEBUG_MODE) -> int:
-		with torch.no_grad():
-			x_ind = self.x_ind.detach().requires_grad_()
-			x_all = self.x_all.detach().requires_grad_()
-			y_all = self.y_all.detach().requires_grad_()
-			raw_lengthscale: typing.Final[torch.Tensor] = self._raw_lengthscale.detach().requires_grad_()
-		predict: typing.Final[torch.Tensor] = rbf(self.raw_to_real(raw_lengthscale), x_test.detach(), x_ind) @ linear_operator.utils.stable_pinverse(rbf(self.raw_to_real(raw_lengthscale), x_all, x_ind)) @ y_all
-		N: typing.Final[int] = predict.numel()
-		eye: typing.Final[torch.Tensor] = torch.eye(predict.numel())
-		chunk_size: int = N
-		chunk_range: range = range(0, N, chunk_size)
-		change_to_2_power: bool = False
-		power_of_2_max: typing.Final[int] = 64 # wavefront of 64 on AMD and warps of 32 on NV
-		while chunk_size > 1:
-			try:
-				if print_log:
-					print("\tChunk size for autograd test:", chunk_size)
-				GaussianProcess.InternalDerivativeReturn(
-					feature_derivative=torch.cat([torch.autograd.grad(predict, x_all, eye[i:min(i+chunk_size, N)], True, False, True, True, True, True)[0].detach() for i in chunk_range], dim=0),
-					inducing_derivative=torch.cat([torch.autograd.grad(predict, x_ind, eye[i:min(i+chunk_size, N)], True, False, True, True, True, True)[0].detach() for i in chunk_range], dim=0),
-					label_derivative=torch.cat([torch.autograd.grad(predict, y_all, eye[i:min(i+chunk_size, N)], True, False, True, True, True, True)[0].detach() for i in chunk_range], dim=0),
-					raw_param_derivative=torch.cat([torch.autograd.grad(predict, raw_lengthscale, eye[i:min(i+chunk_size, N)], True, False, True, True, True, True)[0].detach() for i in chunk_range], dim=0)
-				)
-				break
-			except torch.OutOfMemoryError:
-				chunk_size //= 2
-				if chunk_size < power_of_2_max and not change_to_2_power:
-					chunk_size = power_of_2_max
-					change_to_2_power = True
-				chunk_range = range(0, N, chunk_size)
-		print(f"Chunk size for autograd: {chunk_size}")
-		return chunk_size
 
 	def set_raw_lengthscale(self, value: torch.Tensor) -> None:
 		r"""To set the lengthscale, which will update the weights
@@ -563,11 +542,8 @@ class GaussianProcess(KernelPredictor):
 		lengthscale: typing.Final[torch.Tensor] = self.lengthscale if raw_lengthscale is None else self.raw_to_real(raw_lengthscale)
 		kxm: typing.Final[torch.Tensor] = rbf(lengthscale, x_test, self.x_ind)
 		kmm: typing.Final[torch.Tensor] = rbf(lengthscale, self.x_ind, self.x_ind) + KernelPredictor.NOISE * torch.eye(self.x_ind.shape[0])
-		# magnitude, from maximum likelihood
-		k_inv_y: typing.Final[torch.Tensor] = self.__calculate_k_inv_y(raw_lengthscale)
-		magnitude_square: typing.Final[torch.Tensor] = k_inv_y @ kmm @ k_inv_y / self.y_all.numel()
 		# diagonal only, k(x, x) = 1.0 for RBF kernel
-		result: typing.Final[torch.Tensor] = (1.0 - torch.einsum("ij,jk,ik->i", kxm, torch.cholesky_inverse(torch.linalg.cholesky_ex(kmm)[0]), kxm)).clamp(0.0, 1.0) * magnitude_square
+		result: typing.Final[torch.Tensor] = (1.0 - torch.einsum("ij,jk,ik->i", kxm, torch.cholesky_inverse(torch.linalg.cholesky_ex(kmm)[0]), kxm)).clamp(0.0, 1.0)
 		if requires_grad:
 			return result
 		else:
@@ -601,9 +577,11 @@ class GaussianProcess(KernelPredictor):
 		prefactor: typing.Final[float] = math.sqrt((2.0 * torch.pi) ** (phasedim - len(dimensions))) * self.lengthscale[[i for i in range(phasedim) if i not in dimensions]].prod().item()
 		return prefactor * rbf(self.lengthscale[dimensions], x_test, self.x_ind[:, dimensions]).to_dense() @ linear_operator.utils.stable_pinverse(rbf(self.lengthscale[dimensions], self.x_all[:, dimensions], self.x_ind[:, dimensions])) @ self.y_all
 
+	@typing.override
 	def update(
 		self,
 		x_ind: torch.Tensor,
+		y_ind: torch.Tensor,
 		x_all: torch.Tensor,
 		y_all: torch.Tensor
 	) -> None:
@@ -613,21 +591,28 @@ class GaussianProcess(KernelPredictor):
 		----------
 		x_ind : torch.Tensor, of shape (N_IND_PT, PHASEDIM)
 			Inducing Points
+		y_ind : torch.Tensor, of shape (N_IND_PT)
+			Targets of inducing points
 		x_all : torch.Tensor, of shape (N_ALL_PT, PHASEDIM)
 			All training inputs
 		y_all : torch.Tensor, of shape (N_ALL_PT)
 			All training targets
 		"""
-		self.x_ind = x_ind.reshape(-1, x_ind.shape[-1]).detach().clone()
-		super().update(x_all, y_all)
+		super().update(x_ind, y_ind, x_all, y_all)
 		self.__weights_updated = False
 
 
 class NadarayaWatson(KernelPredictor):
 	r"""The instantiation of gaussian process predictor
 
+	Inducing points are the points used for prediction, while the full training set is just for squared error optimization.
+
 	Parameters
 	----------
+	x_ind : torch.Tensor, of shape (N_IND_PT, PHASEDIM)
+		Inducing Points
+	y_ind : torch.Tensor, of shape (N_IND_PT)
+		Targets of inducing points
 	x_all : torch.Tensor, of shape (N_ALL, PHASEDIM)
 		All training inputs
 	y_all : torch.Tensor, of shape (N_ALL)
@@ -650,18 +635,20 @@ class NadarayaWatson(KernelPredictor):
 
 	def __init__(
 		self,
+		x_ind: torch.Tensor,
+		y_ind: torch.Tensor,
 		x_all: torch.Tensor,
 		y_all: torch.Tensor,
 		lengthscale_initial_value: torch.Tensor,
 		indent: int
 	) -> None:
-		super().__init__(x_all, y_all, lengthscale_initial_value, indent)
+		super().__init__(x_ind, y_ind, x_all, y_all, lengthscale_initial_value, indent)
 
 	@typing.override
 	def predict(self, x_test: torch.Tensor, raw_lengthscale: torch.Tensor | None = None, requires_grad: bool = False) -> torch.Tensor:
 		lengthscale: typing.Final[torch.Tensor] = self.lengthscale if raw_lengthscale is None else self.raw_to_real(raw_lengthscale)
-		kxn: typing.Final[torch.Tensor] = rbf(lengthscale, x_test, self.x_all)
-		result: typing.Final[torch.Tensor] = (kxn @ self.y_all) / (kxn.sum(-1) + NadarayaWatson.NOISE)
+		kxn: typing.Final[torch.Tensor] = rbf(lengthscale, x_test, self.x_ind)
+		result: typing.Final[torch.Tensor] = (kxn @ self.y_ind) / (kxn.sum(-1) + NadarayaWatson.NOISE)
 		if requires_grad:
 			return result
 		else:
@@ -670,26 +657,26 @@ class NadarayaWatson(KernelPredictor):
 	@typing.override
 	def predict_derivative_over_internal(self, x_test: torch.Tensor, chunk_size: int = 1) -> KernelPredictor.InternalDerivativeReturn:
 		with torch.no_grad():
-			x_all: typing.Final[torch.Tensor] = self.x_all.detach().requires_grad_()
-			y_all: typing.Final[torch.Tensor] = self.y_all.detach().requires_grad_()
+			x_ind: typing.Final[torch.Tensor] = self.x_ind.detach().requires_grad_()
+			y_ind: typing.Final[torch.Tensor] = self.y_ind.detach().requires_grad_()
 			raw_lengthscale: typing.Final[torch.Tensor] = self._raw_lengthscale.detach().requires_grad_()
-		kxn: typing.Final[torch.Tensor] = rbf(self.raw_to_real(raw_lengthscale), x_test, x_all)
-		predict: typing.Final[torch.Tensor] = (kxn @ y_all) / (kxn.sum(-1) + NadarayaWatson.NOISE)
+		kxn: typing.Final[torch.Tensor] = rbf(self.raw_to_real(raw_lengthscale), x_test, x_ind)
+		predict: typing.Final[torch.Tensor] = (kxn @ y_ind) / (kxn.sum(-1) + NadarayaWatson.NOISE)
 		N: typing.Final[int] = predict.numel()
 		eye: typing.Final[torch.Tensor] = torch.eye(predict.numel())
 		chunk_range: typing.Final[range] = range(0, N, chunk_size)
 		return KernelPredictor.InternalDerivativeReturn(
-			feature_derivative=torch.cat([torch.autograd.grad(predict, x_all, eye[i:min(i+chunk_size, N)], True, False, True, True, True, True)[0].detach() for i in chunk_range], dim=0),
-			label_derivative=torch.cat([torch.autograd.grad(predict, y_all, eye[i:min(i+chunk_size, N)], True, False, True, True, True, True)[0].detach() for i in chunk_range], dim=0),
+			feature_derivative=torch.cat([torch.autograd.grad(predict, x_ind, eye[i:min(i+chunk_size, N)], True, False, True, True, True, True)[0].detach() for i in chunk_range], dim=0),
+			label_derivative=torch.cat([torch.autograd.grad(predict, y_ind, eye[i:min(i+chunk_size, N)], True, False, True, True, True, True)[0].detach() for i in chunk_range], dim=0),
 			raw_param_derivative=torch.cat([torch.autograd.grad(predict, raw_lengthscale, eye[i:min(i+chunk_size, N)], True, False, True, True, True, True)[0].detach() for i in chunk_range], dim=0)
 		)
 
 	@typing.override
 	def loss_func(self, raw_lengthscale: torch.Tensor) -> torch.Tensor:
-		knn: typing.Final[torch.Tensor] = rbf(self.raw_to_real(raw_lengthscale), self.x_all, self.x_all)
-		num: typing.Final[torch.Tensor] = knn @ self.y_all - self.y_all # subtract self
-		den: typing.Final[torch.Tensor] = knn.sum(-1) + NadarayaWatson.NOISE - 1.0 # subtract Kii
-		return torch.sum((self.y_all - num / den) ** 2) * (self.scale ** 2) # LOOCV error
+		knn: typing.Final[torch.Tensor] = rbf(self.raw_to_real(raw_lengthscale), self.x_ind, self.x_ind)
+		num: typing.Final[torch.Tensor] = knn @ self.y_ind - self.y_ind # subtract self
+		den: typing.Final[torch.Tensor] = knn.sum(-1) - 1.0 + NadarayaWatson.NOISE # subtract Kii
+		return (torch.sum((self.y_ind - num / den) ** 2) + torch.sum((self.y_all - self.predict(self.x_all, raw_lengthscale, True)) ** 2)) * (self.scale ** 2) # LOOCV error + squared error
 
 
 class GP_NW_Mix:
@@ -699,6 +686,8 @@ class GP_NW_Mix:
 	----------
 	x_ind : torch.Tensor, of shape (N_IND, PHASEDIM)
 		Coordinates of inducing points
+	y_ind : torch.Tensor, of shape (N_IND)
+		Targets of inducing points
 	x_all : torch.Tensor, of shape (N_ALL, PHASEDIM)
 		All training inputs
 	y_all : torch.Tensor, of shape (N_ALL)
@@ -719,26 +708,30 @@ class GP_NW_Mix:
 	update(x_ind, x_all, y_all)
 		To update the training features and labels of the model
 	"""
-	__slots__: typing.Final[tuple] = ("gp", "nw", "var_ref")
+	# __VARIANCE_JUDGE_THRESHOLD: float = 1e-6
+	__slots__: typing.Final[tuple] = ("gp", "nw", "var_ref", "rho_ref")
 	gp: typing.Final[GaussianProcess]
 	nw: typing.Final[NadarayaWatson]
 	var_ref: float
+	rho_ref: float
 
 	def __init__(
 		self,
 		x_ind: torch.Tensor,
+		y_ind: torch.Tensor,
 		x_all: torch.Tensor,
 		y_all: torch.Tensor,
 		lengthscale_initial_value: torch.Tensor,
 		indent: int
 	) -> None:
 		print(f"{indent * "\t"}Training Gaussian Process part:")
-		self.gp = GaussianProcess(x_ind, x_all, y_all, lengthscale_initial_value, indent + 1)
+		self.gp = GaussianProcess(x_ind, y_ind, x_all, y_all, lengthscale_initial_value, indent + 1)
 		print(f"{indent * "\t"}Training Nadaraya-Watson part:")
-		self.nw = NadarayaWatson(x_all, y_all, lengthscale_initial_value, indent + 1)
-		print(f"{indent * "\t"}Training variance reference:")
-		self.var_ref = 1.0
-		self.__self_train(indent + 1) # GP and NM have trained in constructor
+		self.nw = NadarayaWatson(x_ind, y_ind, x_all, y_all, lengthscale_initial_value, indent + 1)
+		# print(f"{indent * "\t"}Training variance reference:")
+		self.var_ref = self.gp.variance(self.gp.x_ind).max().item()
+		self.rho_ref = self.gp.predict(self.gp.x_ind).abs().max().item()
+		print(f"{indent * "\t"}Variance reference: {self.var_ref}, Rho reference: {self.rho_ref}")
 
 	def predict(self, x_test: torch.Tensor, var_param: float | None = None) -> torch.Tensor:
 		r"""To predict the average
@@ -761,10 +754,13 @@ class GP_NW_Mix:
 		if nans.any().item():
 			print(f"Number of NaNs in variance: {nans.sum().item()} out of {nans.numel()}")
 			exit(0)
-		gp_weight: typing.Final[torch.Tensor] = torch.exp(-var / var_param)
-		return self.gp.predict(x_test) * gp_weight + self.nw.predict(x_test) * (1.0 - gp_weight)
+		gp_pred: typing.Final[torch.Tensor] = self.gp.predict(x_test)
+		nw_pred: typing.Final[torch.Tensor] = self.nw.predict(x_test)
+		gp_factor: typing.Final[torch.Tensor] = torch.exp(-var / self.var_ref) * torch.minimum(gp_pred.abs() / self.rho_ref, torch.ones_like(gp_pred))
+		print(f"\tGP factor: {gp_factor.max().item()}, {gp_factor.min().item()}")
+		return nw_pred # + gp_factor * (gp_pred - nw_pred)
 
-	def error(self, var_param: float | None = None) -> torch.Tensor:
+	def error(self) -> torch.Tensor:
 		r"""Error function. This function gives the sum of squared error
 
 		Parameters
@@ -777,89 +773,7 @@ class GP_NW_Mix:
 		torch.Tensor
 			The sum of squared prediction error
 		"""
-		return torch.sum((self.gp.y_all - self.predict(self.gp.x_all, var_param)) ** 2) * (self.gp.scale ** 2)
-
-	def __self_train(self, indent: int, print_log: bool = constant.DEBUG_MODE) -> None:
-		r"""To train the parameters of itself only
-
-		Parameters
-		----------
-		indent : int
-			The indent for printing log
-		print_log : bool, optional
-			Whether to print the log to console, by default `constant.DEBUG_MODE`
-		"""
-		# binary search for golden
-		LOWER_BOUND: typing.Final[float] = -sys.float_info.epsilon / math.log(sys.float_info.epsilon) # exp(-epsilon / LB) approx epsilon , LB approx 6.0e-18
-		UPPER_BOUND: typing.Final[float] = -1.0 / math.log(1.0 - sys.float_info.epsilon) # exp(-1.0 / UB) approx 1.0 - epsilon, UB approx 4.5e15
-		mid_val: float = self.error(self.var_ref).item()
-		if mid_val < opt.Optimizer.FTOL:
-			print(f"{indent * "\t"}Initial guess of variance reference = {self.var_ref}, error = {mid_val}, good enough, use it as the variance reference")
-			return
-		guess_param: float = self.var_ref
-		left_val: float = self.error(guess_param / 2.0).item()
-		right_val: float = self.error(guess_param * 2.0).item()
-		print(f"{indent * "\t"}Initial guess of variance reference = {guess_param}, left error = {left_val}, mid error = {mid_val}, right error = {right_val}")
-		bracket: tuple[float, float, float]
-		if left_val >= mid_val and right_val >= mid_val:
-			bracket = (guess_param / 2.0, guess_param, guess_param * 2.0)
-			if print_log:
-				print(f"{indent * "\t"}Initial guess is good, use it as the middle point of golden section search")
-		elif left_val < mid_val:
-			if print_log:
-				print(f"{indent * "\t"}Initial guess is too large, search left")
-			while left_val <= mid_val and guess_param / 2.0 > LOWER_BOUND:
-				guess_param /= 2.0
-				right_val = mid_val
-				mid_val = left_val
-				left_val = self.error(guess_param / 2.0).item()
-				if print_log:
-					print(f"{(indent + 2) * "\t"}Guess of variance reference: {guess_param}, left error: {left_val}, mid error: {mid_val}, right error: {right_val}")
-			if guess_param / 2.0 <= LOWER_BOUND:
-				right_val = mid_val
-				mid_val = left_val
-				left_val = self.error(LOWER_BOUND).item()
-				if print_log:
-					print(f"{(indent + 2) * "\t"}Guess of variance reference: {guess_param}, left error: {left_val}, mid error: {mid_val}, right error: {right_val}")
-				if left_val <= mid_val:
-					print(f"{(indent + 1) * "\t"}Lower bound reached, use it as the variance reference")
-					self.var_ref = guess_param
-					return
-				else:
-					print(f"{(indent + 1) * "\t"}Lower bound reached, use it as the middle point of golden section search")
-					bracket = (LOWER_BOUND, guess_param, guess_param * 2.0)
-			else:
-				print(f"{(indent + 1) * "\t"}Guess of variance reference: {guess_param}, left error: {left_val}, mid error: {mid_val}, right error: {right_val}")
-				bracket = (guess_param / 2.0, guess_param, guess_param * 2.0)
-		else: # right_val < init_val
-			if print_log:
-				print(f"{indent * "\t"}Initial guess is too small, search right")
-			while right_val <= mid_val and guess_param * 2.0 < UPPER_BOUND:
-				guess_param *= 2.0
-				left_val = mid_val
-				mid_val = right_val
-				right_val = self.error(guess_param * 2.0).item()
-				if print_log:
-					print(f"{(indent + 2) * "\t"}Guess of variance reference: {guess_param}, left error: {left_val}, mid error: {mid_val}, right error: {right_val}")
-			if guess_param * 2.0 >= UPPER_BOUND:
-				left_val = mid_val
-				mid_val = right_val
-				right_val = self.error(UPPER_BOUND).item()
-				if print_log:
-					print(f"{(indent + 2) * "\t"}Guess of variance reference: {guess_param}, left error: {left_val}, mid error: {mid_val}, right error: {right_val}")
-				if right_val <= mid_val:
-					print(f"{(indent + 1) * "\t"}Upper bound reached, use it as the variance reference")
-					self.var_ref = UPPER_BOUND
-					return
-				else:
-					print(f"{(indent + 1) * "\t"}Upper bound reached, use it as the middle point of golden section search")
-					bracket = (guess_param / 2.0, guess_param, UPPER_BOUND)
-			else:
-				print(f"{(indent + 1) * "\t"}Guess of variance reference: {guess_param}, left error: {left_val}, mid error: {mid_val}, right error: {right_val}")
-				bracket = (guess_param / 2.0, guess_param, guess_param * 2.0)
-		result: typing.Final[scipy.optimize.OptimizeResult] = scipy.optimize.minimize_scalar(lambda var_ref: self.error(var_ref).item(), bracket, tol=opt.Optimizer.FTOL, options={"maxiter": opt.Optimizer.MAX_ITER, "disp": print_log})
-		print(f"{indent * "\t"}{result.message.replace("\n", " ")}\n{indent * "\t"}Optimal variance reference: {result.x}, error: {result.fun}")
-		self.var_ref = result.x
+		return self.gp.error() + self.nw.error()
 
 	def train(self, indent: int, print_log: bool = constant.DEBUG_MODE) -> None:
 		r"""To train the parameters
@@ -875,12 +789,14 @@ class GP_NW_Mix:
 		self.gp.train(indent + 1, print_log)
 		print(f"{indent * "\t"}Training Nadaraya-Watson part:")
 		self.nw.train(indent + 1, print_log)
-		print(f"{indent * "\t"}Training variance reference:")
-		self.__self_train(indent + 1, print_log)
+		self.var_ref = self.gp.variance(self.gp.x_ind).max().item()
+		self.rho_ref = self.gp.predict(self.gp.x_ind).abs().max().item()
+		print(f"{indent * "\t"}Variance reference: {self.var_ref}, Rho reference: {self.rho_ref}")
 
 	def update(
 		self,
 		x_ind: torch.Tensor,
+		y_ind: torch.Tensor,
 		x_all: torch.Tensor,
 		y_all: torch.Tensor
 	) -> None:
@@ -890,10 +806,15 @@ class GP_NW_Mix:
 		----------
 		x_ind : torch.Tensor, of shape (N_IND_PT, PHASEDIM)
 			Inducing Points
+		y_ind : torch.Tensor, of shape (N_IND_PT)
+			Targets of inducing points
 		x_all : torch.Tensor, of shape (N_ALL_PT, PHASEDIM)
 			All training inputs
 		y_all : torch.Tensor, of shape (N_ALL_PT)
 			All training targets
 		"""
-		self.gp.update(x_ind, x_all, y_all)
-		self.nw.update(x_all, y_all)
+		self.gp.update(x_ind, y_ind, x_all, y_all)
+		self.nw.update(x_ind, y_ind, x_all, y_all)
+		self.var_ref = self.gp.variance(self.gp.x_ind).max().item()
+		self.rho_ref = self.gp.predict(self.gp.x_ind).abs().max().item()
+		print(f"\tVariance reference: {self.var_ref}, Rho reference: {self.rho_ref}")

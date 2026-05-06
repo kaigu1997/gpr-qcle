@@ -161,6 +161,8 @@ class GradientDescend(Optimizer):
 		last_value: float = loss.item()
 		Optimizer.print_stuff(loss.item(), param, lr, grad, None, f"{indent * "\t"}Init ")
 		for i in range(1, Optimizer.MAX_ITER + 1):
+			if torch.isnan(grad).any().item():
+				return Optimizer.Result(param, grad, None, lr, loss.item(), i - 1, Optimizer.ResultMessage.STUCK)
 			if torch.norm(grad).item() < Optimizer.GTOL:
 				return Optimizer.Result(param, grad, None, lr, loss.item(), i - 1, Optimizer.ResultMessage.GRAD)
 			# adjust lr

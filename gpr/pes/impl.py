@@ -384,43 +384,33 @@ class Potential:
 		tuple[torch.Tensor, torch.Tensor]
 			Adiabatic potential and coupling
 		"""
+		need_manual_C: typing.Final[bool] = self.__need_manual("diabatic_to_adiabatic")
 		need_manual_D: typing.Final[bool] = self.__need_manual("coupling")
 		need_manual_E: typing.Final[bool] = self.__need_manual("adiabatic_potential")
-		if not need_manual_D and not need_manual_E:
-			return self.__model.adiabatic_potential(x).detach(), self.__model.coupling(x).detach()
-		else:
-			need_C: typing.Final[bool] = need_manual_D
-			need_manual_C: typing.Final[bool] = self.__need_manual("diabatic_to_adiabatic", need_C)
+		if (need_manual_C or need_manual_E) and need_manual_D:
 			x = x.detach().requires_grad_()
-			C: torch.Tensor | None = None
-			E: torch.Tensor
-			if torch.cuda.is_available():
-				V: torch.Tensor = self.__model(x)
-				E = self.__E(V) if need_manual_E else self.__model.adiabatic_potential(x)
-				if need_C:
-					C = self.__C(V) if need_manual_C else self.__model.diabatic_to_adiabatic(x)
-			else:
-				if need_C and not need_manual_C:
-					C = self.__model.diabatic_to_adiabatic(x)
-				if not need_manual_E:
-					E = self.__model.adiabatic_potential(x)
-				if need_manual_C or need_manual_E: # need V
-					V: torch.Tensor = self.__model(x)
-					if not need_manual_C:
-						E = self.__E(V)
-					elif not need_manual_E:
-						C = self.__C(V)
-					else: # need_manual_C and need_manual_E
-						C, E = self.__C_and_E(V)
-			D: typing.Final[torch.Tensor] = self.__D(
+			C, E = self.__C_and_E(self.__model(x))
+			return E.detach(), self.__D(
 				x,
 				C,
 				x.shape[:-1] + (self.__config.NUM_ELM,),
 				(self.__config.NUM_ELM,) + (1,) * (x.ndim - 1) + (self.__config.NUM_ELM,),
 				(1,) + x.shape[:-1] + (1,),
 				x.shape + (self.__config.NUM_PES, self.__config.NUM_PES)
-			) if C is not None else self.__model.coupling(x)
-			return E.detach(), D.detach()
+			).detach()
+		elif need_manual_D:
+			E = self.__model.adiabatic_potential(x)
+			x = x.detach().requires_grad_()
+			return E.detach(), self.__D(
+				x,
+				self.__model.diabatic_to_adiabatic(x),
+				x.shape[:-1] + (self.__config.NUM_ELM,),
+				(self.__config.NUM_ELM,) + (1,) * (x.ndim - 1) + (self.__config.NUM_ELM,),
+				(1,) + x.shape[:-1] + (1,),
+				x.shape + (self.__config.NUM_PES, self.__config.NUM_PES)
+			).detach()
+		else:
+			return self.__model.adiabatic_potential(x).detach(), self.__model.coupling(x).detach()
 
 	def force(self, x: torch.Tensor) -> torch.Tensor:
 		r"""To calculate the adiabatic force
@@ -441,14 +431,8 @@ class Potential:
 			need_manual_E: typing.Final[bool] = self.__need_manual("adiabatic_potential")
 			# who need C: D, F
 			need_manual_C: typing.Final[bool] = self.__need_manual("diabatic_to_adiabatic")
-			if need_manual_C and need_manual_E:
+			if need_manual_C or need_manual_E:
 				C, E = self.__C_and_E(V)
-			elif need_manual_C: # and not need_manual_E
-				C = self.__C(V)
-				E = self.__model.adiabatic_potential(x)
-			elif need_manual_E: # and not need_manual_C
-				C = self.__model.diabatic_to_adiabatic(x)
-				E = self.__E(V)
 			else: # not need_manual_C and not need_manual_E
 				C = self.__model.diabatic_to_adiabatic(x)
 				E = self.__model.adiabatic_potential(x)

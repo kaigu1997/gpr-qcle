@@ -3,12 +3,15 @@ r"""constant
 Some constant that is used everywhere in the project
 """
 import collections.abc
+import time
 import typing
 
 import matplotlib as mpl
 import torch
 
 HBAR: typing.Final = 1.0
+
+SEED: typing.Final = 0 # int(time.time() * 1e6) % 0xffff_ffff_ffff_ffff
 
 DTYPE: typing.Final = torch.double
 DEVICE: typing.Final = "cuda" if torch.cuda.is_available() else "cpu"
@@ -17,6 +20,8 @@ BYTE_ENC: typing.Final = "utf-8"
 FMT: typing.Final = r"%.18e"
 
 type Predictor = collections.abc.Callable[[torch.Tensor, int], torch.Tensor]
+
+DEBUG_MODE: typing.Final[typing.Literal[True, False]] = True
 
 INPUT_FILENAME: typing.Final = "input"
 

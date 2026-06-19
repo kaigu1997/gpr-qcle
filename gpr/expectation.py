@@ -6,7 +6,6 @@ import abc
 import math
 import typing
 
-import numpy as np
 import torch
 
 import constant
@@ -40,7 +39,6 @@ def normal_sample(
 		Normally distributed point test
 	"""
 	return torch.randn((num_points, mean.numel()), device=stddev.device) * stddev + mean
-
 
 
 class Averager(abc.ABC):

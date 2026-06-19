@@ -36,7 +36,7 @@ def plot_average(config: pes.ModelConfig) -> npt.NDArray[np.double]:
 		Times when output
 	"""
 	NUM_MOMENTS: typing.Final = config.PHASEDIM * (config.PHASEDIM + 3) // 2
-	ave_type_titles: typing.Final[list[str]] = ["Monte Carlo", "Analytical", "Evolving Points Monte Carlo"]
+	ave_type_titles: typing.Final[tuple] = ("Monte Carlo", "Analytical", "Evolving Points Monte Carlo")
 	NUM_AVE_TYPES: typing.Final[int] = len(ave_type_titles)
 	plot_titles: typing.Final[list[str]] = ["Population"]\
 		+ [utility.dimension_name(iDim, config.DIM) for iDim in config.PHASEDIM_RANGE]\
@@ -52,7 +52,7 @@ def plot_average(config: pes.ModelConfig) -> npt.NDArray[np.double]:
 	for iRow in range(NUM_AVE_TYPES * 2):
 		AVE_TYPE_INDEX: int = iRow // 2
 		isOriginal: bool = iRow % 2 == 0
-		ppl_sum: float = 1.0 if isOriginal else np.sum(averages[:, AVE_TYPE_INDEX, :config.NUM_PES], -1)
+		ppl_sum: npt.NDArray[np.double] = np.ones(ticks.size) if isOriginal else np.sum(averages[:, AVE_TYPE_INDEX, :config.NUM_PES], -1)
 		for iCol in range(NUM_TITLE):
 			ax: matplotlib.axes.Axes = axs[iRow, iCol]
 			y_label: str = plot_titles[iCol]
@@ -68,19 +68,23 @@ def plot_average(config: pes.ModelConfig) -> npt.NDArray[np.double]:
 					y_label += r"$^2$"
 			elif iCol == NUM_MOMENTS + 1: # energies
 				ax.plot(ticks, averages[:, AVE_TYPE_INDEX, config.NUM_PES + NUM_MOMENTS + 1] / ppl_sum, label="Kinetic Energy")
-				if AVE_TYPE_INDEX == 0: # only mc has potential and thus total energy
+				if ave_type_titles[AVE_TYPE_INDEX] != "Analytical": # only mc has potential and thus total energy
 					ax.plot(ticks, averages[:, AVE_TYPE_INDEX, config.NUM_PES + NUM_MOMENTS] / ppl_sum, label="Potential Energy")
 					ax.plot(ticks, np.sum(averages[:, AVE_TYPE_INDEX, config.NUM_PES + NUM_MOMENTS:config.NUM_PES + NUM_MOMENTS + 2], -1) / ppl_sum, label="Total Energy")
 				ax.legend()
 				y_label += " / a.u."
 			else: # purity
+				if not isOriginal:
+					ax.set_visible(False)
+					continue
 				for iElement in config.ELEMENT_RANGE:
-					ax.plot(ticks, averages[:, AVE_TYPE_INDEX, config.NUM_PES + NUM_MOMENTS + 2 + iElement] / ppl_sum, label=utility.get_RI_label(iElement, config.NUM_PES))
-				ax.plot(ticks, np.sum(averages[:, AVE_TYPE_INDEX, config.NUM_PES + NUM_MOMENTS + 2:], -1) / ppl_sum, label="Total")
+					ax.plot(ticks, averages[:, AVE_TYPE_INDEX, config.NUM_PES + NUM_MOMENTS + 2 + iElement], label=utility.get_RI_label(iElement, config.NUM_PES))
+				ax.plot(ticks, np.sum(averages[:, AVE_TYPE_INDEX, config.NUM_PES + NUM_MOMENTS + 2:], -1), label="Total")
 				ax.legend()
-			ax.set_xlabel("Time / a.u.")
-			ax.set_ylabel(y_label)
-			ax.set_title(ave_type_titles[AVE_TYPE_INDEX] + ("" if isOriginal else " Rescaled") + " Average of " + plot_titles[iCol])
+			if ax.get_visible():
+				ax.set_xlabel("Time / a.u.")
+				ax.set_ylabel(y_label)
+				ax.set_title(ave_type_titles[AVE_TYPE_INDEX] + ("" if isOriginal or plot_titles[iCol] == "Purity" else " Rescaled") + " Average of " + plot_titles[iCol])
 	fig.savefig(constant.AVERAGE_FILENAME + constant.FIGURE_EXTENSION)
 	plt.close(fig)
 	return ticks
@@ -102,7 +106,7 @@ def plot_error(config: pes.ModelConfig, ticks: npt.NDArray[np.double]) -> None:
 	error: typing.Final[npt.NDArray[np.double]] = np.loadtxt(constant.ERROR_FILENAME + constant.DATA_EXTENSION).reshape(-1, 3, config.NUM_ELM)
 	assert ticks.size >= error.shape[0]
 	ticks = ticks[:error.shape[0]]
-	error_titles: typing.Final[list[str]] = ["Original", "Rescaled", "Evolving"]
+	error_titles: typing.Final[tuple] = ("Original", "Rescaled", "Evolving")
 	for iPlot in range(axs.size):
 		ax: matplotlib.axes.Axes = axs[iPlot]
 		for iElement in config.ELEMENT_RANGE:
@@ -158,8 +162,8 @@ def plot_loss_and_rescale_factors(config: pes.ModelConfig, ticks: npt.NDArray[np
 	npt.NDArray[np.double], shape of (N_TICKS, NUM_ELM)
 		Rescale factors
 	"""
-	loss_scale_titles: typing.Final[list[str]] = ["Loss on Sample Points", "Rescale Factor"]
-	loss_scale_ylabels: typing.Final[list[str]] = ["Loss", "Rescale Factor"]
+	loss_scale_titles: typing.Final[tuple] = ("Loss on Sample Points", "Rescale Factor")
+	loss_scale_ylabels: typing.Final[tuple] = ("Loss", "Rescale Factor")
 	fig: matplotlib.figure.Figure = plt.figure(figsize=(constant.FIGSIZE[0] * 2, constant.FIGSIZE[1]))
 	axs = fig.subplots(1, 2)
 	assert isinstance(axs, np.ndarray)

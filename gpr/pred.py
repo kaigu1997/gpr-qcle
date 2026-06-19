@@ -65,7 +65,7 @@ class GPRPredictors(expectation.Averager):
 		To print hyperparameters to file
 	"""
 	@staticmethod
-	def __check_predictor(predictor: gp.KernelPredictor) -> bool:
+	def __check_predictor(predictor: gp.GaussianProcess) -> bool:
 		r"""To check if the predictor could be used for training / predicting
 
 		If no label is given, or all the labels are 0, training / predicting is not needed.
@@ -80,18 +80,17 @@ class GPRPredictors(expectation.Averager):
 		bool
 			Availability of training / predicting
 		"""
-		return not torch.all(predictor.y_ind == 0).item() if isinstance(predictor, gp.KernelPredictor) else not torch.all(predictor.y_all == 0).item()
+		return not torch.all(predictor.y_all == 0).item()
 
 	drc: typing.Final = evolve.Direction.FORWARD
 	__JUDGE_INCLUDE_THRESHOLD: typing.Final = 0.1
-	__slots__: typing.Final[tuple] = ("__AVERAGE_CONSTANT", "epmca", "__kmeans", "ind_pts", "ind_den", "__predictors", "chunk_size")
-	__AVERAGE_CONSTANT: typing.Final[float]
+	__slots__: typing.Final[tuple] = ("epmca", "__kmeans", "ind_pts", "ind_den", "__kernel", "__predictors")
 	epmca: typing.Final[expectation.EvolvingPointsMCAverage]
 	__kmeans: typing.Final[torch_kmeans.KMeans]
 	ind_pts: torch.Tensor
 	ind_den: torch.Tensor
 	__predictors: typing.Final[list[gp.GaussianProcess]]
-	chunk_size: typing.Final[int]
+	# chunk_size: typing.Final[int]
 
 	def __init__(
 		self,
@@ -103,12 +102,12 @@ class GPRPredictors(expectation.Averager):
 		kernel_initial_value: torch.Tensor,
 	):
 		super().__init__(config)
-		self.__AVERAGE_CONSTANT = (2.0 * math.pi) ** self.config.DIM
 		self.epmca = expectation.EvolvingPointsMCAverage(config, num_pts, init_dist, init_stddev)
 		self.__kmeans = torch_kmeans.KMeans(init_method="k-means++", n_clusters=num_ind, seed=constant.SEED, verbose=constant.DEBUG_MODE)
 		ind_pt: typing.Final[torch.Tensor] = self.__kmeans(self.epmca.point_set[:1, self.epmca.density[0].real > GPRPredictors.__JUDGE_INCLUDE_THRESHOLD * self.epmca.density[0].real.max()]).centers[0]
 		self.ind_pts = torch.repeat_interleave(ind_pt[torch.newaxis], self.config.NUM_TRIG, 0)
 		self.ind_den = init_dist(ind_pt)[:, config.TRIL_ROW_INDICES, config.TRIL_COL_INDICES].T
+		self.__kernel = gp.wendland_rbf(config.PHASEDIM)
 		self.__predictors = []
 		for iElement in config.ELEMENT_RANGE:
 			RowIndex: int = iElement // config.NUM_PES
@@ -122,29 +121,33 @@ class GPRPredictors(expectation.Averager):
 					self.ind_den[TrilIndex].real,
 					self.epmca.point_set[TrilIndex],
 					self.epmca.density[TrilIndex].real,
+					self.__kernel,
 					kernel_initial_value,
+					gp.wendland_rbf.r_c_init,
 					2
 				))
 			else: # RowIndex > ColIndex
 				self.__predictors.append(gp.GaussianProcess(
 					self.ind_pts[TrilIndex],
-					self.ind_den[TrilIndex].imag,
+					self.ind_den[TrilIndex].real,
 					self.epmca.point_set[TrilIndex],
 					self.epmca.density[TrilIndex].imag,
+					self.__kernel,
 					kernel_initial_value,
+					gp.wendland_rbf.r_c_init,
 					2
 				))
 		# then check for chunk size to avoid OOM in autograd
-		self.chunk_size = self.__predictors[0].get_chunk_size(expectation.normal_sample(num_ind, init_dist.r0, init_dist.sigma_r0))
+		# self.chunk_size = self.__predictors[0].get_chunk_size(expectation.normal_sample(num_ind, init_dist.r0, init_dist.sigma_r0))
 
 	def population(self) -> torch.Tensor:
-		return torch.stack([sum((pred.lengthscale.prod() * pred.k_inv_y.sum() for pred in self.__predictors), start=torch.tensor(0.)) for iPES in self.config.PES_RANGE]) * self.__AVERAGE_CONSTANT
+		return torch.tensor([self[iPES * self.config.NUM_PES + iPES].population for iPES in self.config.PES_RANGE], dtype=torch.get_default_dtype(), device=torch.get_default_device())
 
 	def coordinates(self) -> torch.Tensor:
-		return sum((pred.lengthscale.prod() * (pred.k_inv_y[:, None] * pred.x_ind).sum(0) for iPES in self.config.PES_RANGE for pred in self.__predictors), start=torch.zeros(self.config.PHASEDIM)) * self.__AVERAGE_CONSTANT
+		return sum((self[iPES * self.config.NUM_PES + iPES].coordinates for iPES in self.config.PES_RANGE), start=torch.zeros(self.config.PHASEDIM))
 
 	def square_coordinates(self) -> torch.Tensor:
-		return sum((pred.lengthscale.prod() * ((pred.k_inv_y[:, None, None] * pred.x_ind[:, :, None] * pred.x_ind[:, None, :]).sum(0) + pred.k_inv_y.sum() * torch.diagflat(pred.lengthscale ** 2)) for iPES in self.config.PES_RANGE for pred in self.__predictors), start=torch.zeros((self.config.PHASEDIM, self.config.PHASEDIM))) * self.__AVERAGE_CONSTANT
+		return sum((self[iPES * self.config.NUM_PES + iPES].square_coordinates for iPES in self.config.PES_RANGE), start=torch.zeros((self.config.PHASEDIM, self.config.PHASEDIM)))
 
 	def covariance(self) -> torch.Tensor:
 		return super().covariance()
@@ -153,30 +156,8 @@ class GPRPredictors(expectation.Averager):
 		return math.nan
 
 	def purity(self) -> torch.Tensor:
-		def purity_from_preds(pred_left: gp.GaussianProcess, pred_right: gp.GaussianProcess) -> float:
-			r"""To calculate the contribution to purity from two predictors
-
-			Parameters
-			----------
-			pred_left : gp.SinglePredictor
-				The first predictor
-			pred_right : gp.SinglePredictor
-				The second predictor
-
-			Returns
-			-------
-			float
-				The contribution to purity from the two predictors
-			"""
-			length_ij: typing.Final[torch.Tensor] = (pred_left.lengthscale ** 2 + pred_right.lengthscale ** 2).sqrt()
-			return pred_left.lengthscale.prod().item() * pred_right.lengthscale.prod().item() / length_ij.prod().item() * (pred_left.k_inv_y @ gp.rbf(pred_left.x_ind, pred_right.x_ind, lengthscale=length_ij) @ pred_right.k_inv_y).item()
-
-		result: torch.Tensor = torch.empty(self.config.NUM_PES, self.config.NUM_PES)
-		for iPES in range(self.config.NUM_PES):
-			for jPES in range(self.config.NUM_PES):
-				ElementIndex: int = iPES * self.config.NUM_PES + jPES
-				result[iPES, jPES] = purity_from_preds(self.__predictors[ElementIndex], self.__predictors[ElementIndex])
-		return self.PURITY_FACTOR * (2.0 * math.pi) ** self.config.DIM * (result + result.T - torch.diag(torch.diag(result)))
+		result: typing.Final[torch.Tensor] = torch.tensor([pred.purity for pred in self.__predictors]).reshape(self.config.NUM_PES, self.config.NUM_PES)
+		return self.PURITY_FACTOR * (result + result.T - torch.diag(torch.diag(result)))
 
 	def __getitem__(self, ElementIndex: int) -> gp.GaussianProcess:
 		r"""To get corresponding predictor

@@ -743,14 +743,14 @@ class DensityMatrixDrawer:
 				norm=norm
 			)
 			# scatter the central points on top
-			if extra_points is not None:
+			if extra_points is not None and extra_points.shape[0] > 0:
 				ax.scatter(
 					np.clip(extra_points[0], self.__xv[0, 0], self.__xv[-1, -1]),
 					np.clip(extra_points[1], self.__pv[0, 0], self.__pv[-1, -1]),
 					DensityMatrixDrawer.__XTR_PT_SIZE,
 					DensityMatrixDrawer.__XTR_PT_COLOR
 				)
-			if central_points is not None:
+			if central_points is not None and central_points.shape[0] > 0:
 				ax.scatter(
 					np.clip(central_points[0], self.__xv[0, 0], self.__xv[-1, -1]),
 					np.clip(central_points[1], self.__pv[0, 0], self.__pv[-1, -1]),

@@ -145,7 +145,7 @@ class Main:
 					self.__quantity.total_ticks,
 					self.__pred_all_grids,
 					self.__grid_data,
-					[pt.detach().cpu().numpy() for pt in self.__predictors.inducing_points] + [pt.detach().cpu().numpy() for pt in self.__predictors.epmca.point_set],
+					[pt.detach().cpu().numpy() for pt in self.__predictors.ind_pts] + [pt.detach().cpu().numpy() for pt in self.__predictors.epmca.point_set],
 					self.__predictors.scale.detach().cpu().numpy()
 				)
 			self.__wfn_plotter = plot.DensityMatrixMarginalPlotter(
@@ -186,7 +186,7 @@ class Main:
 		# get scale
 		print(f"Tick {iTick}, {plot.format_array(self.__predictors.scale, "scales")}, {datetime.datetime.now()}", flush=constant.DEBUG_MODE)
 		# save points
-		ind_pts: typing.Final[torch.Tensor] = self.__predictors.inducing_points
+		ind_pts: typing.Final[torch.Tensor] = self.__predictors.ind_pts
 		np.savetxt(self.__pts_f, torch.cat((ind_pts, self.__predictors.epmca.point_set), 1).reshape(-1, self.__quantity.config.PHASEDIM).T.detach().cpu().numpy(), constant.FMT, footer='\n', comments="", encoding=constant.ENC)
 		print("", end="", file=self.__pts_f, flush=constant.DEBUG_MODE)
 		np.savetxt(
@@ -319,7 +319,7 @@ class Main:
 				iTick,
 				self.__pred_all_grids,
 				self.__grid_data,
-				[pt.detach().cpu().numpy() for pt in self.__predictors.inducing_points] + [pt.detach().cpu().numpy() for pt in self.__predictors.epmca.point_set],
+				[pt.detach().cpu().numpy() for pt in self.__predictors.ind_pts] + [pt.detach().cpu().numpy() for pt in self.__predictors.epmca.point_set],
 				self.__predictors.scale.detach().cpu().numpy()
 			)
 		if self.__wfn_plotter is not None:
@@ -360,7 +360,7 @@ class Main:
 		self.__print_parameter_scale_loss()
 		# check stopping criteria, when grid solution is not given
 		# use predictors (aia) with old points
-		if self.__grid_data is None and torch.any(self.__predictors.epmca.coordinates()[:self.__quantity.config.DIM] > torch.abs(self.__quantity.x0)).item():
+		if self.__grid_data is None and torch.any(self.__predictors.epmca.coordinates()[:self.__quantity.config.DIM] / self.__predictors.epmca.population().sum() > torch.abs(self.__quantity.x0)).item():
 			return True
 		if self.__end_time is not None:
 			current_time: int = int(time.time())

@@ -129,20 +129,33 @@ def plot_parameters(config: pes.ModelConfig, ticks: npt.NDArray[np.double]) -> N
 	ticks : npt.NDArray[np.double]
 		The time since start for each output, in unit of a.u.
 	"""
-	fig: matplotlib.figure.Figure = plt.figure(figsize=(constant.FIGSIZE[0] * config.PHASEDIM, constant.FIGSIZE[1]))
-	axs = fig.subplots(1, config.PHASEDIM)
+	fig: matplotlib.figure.Figure = plt.figure(figsize=(constant.FIGSIZE[0] * 3, constant.FIGSIZE[1] * config.DIM))
+	axs = fig.subplots(config.DIM, 3, squeeze=False)
 	assert isinstance(axs, np.ndarray)
-	parameters: typing.Final[npt.NDArray[np.double]] = np.loadtxt(constant.PARAMETER_FILENAME + constant.DATA_EXTENSION).reshape(-1, config.NUM_ELM, config.PHASEDIM)[:-1]
+	parameters: typing.Final[npt.NDArray[np.double]] = np.loadtxt(constant.PARAMETER_FILENAME + constant.DATA_EXTENSION).reshape(-1, config.NUM_ELM, config.PHASEDIM + 1)[:-1]
 	assert ticks.size >= parameters.shape[0]
-	parameter_names: typing.Final[list[str]] = [utility.dimension_name(iDim, config.DIM) for iDim in range(config.PHASEDIM)]
-	for iDim in range(config.PHASEDIM):
-		ax: matplotlib.axes.Axes = axs[iDim]
-		for iElement in range(config.NUM_ELM):
-			ax.plot(ticks[:parameters.shape[0]], parameters[:, iElement, iDim], label=utility.get_RI_label(iElement, config.NUM_PES))
-		ax.set_xlabel("Time / a.u.")
-		ax.set_ylabel("Characteristic Length / a.u.")
-		ax.set_title("Characteristic Length of " + parameter_names[iDim])
-		ax.legend()
+	parameter_names: typing.Final[list[str]] = [utility.dimension_name(iDim, config.DIM) for iDim in range(config.PHASEDIM)] + ["Support Radius"]
+	for iDim in config.DIM_RANGE:
+		for iPlot in range(2):
+			PhaseDimIndex: int = iDim * 2 + iPlot
+			ax: matplotlib.axes.Axes = axs[iDim, iPlot]
+			for iElement in range(config.NUM_ELM):
+				ax.plot(ticks[:parameters.shape[0]], parameters[:, iElement, PhaseDimIndex], label=utility.get_RI_label(iElement, config.NUM_PES))
+			ax.set_xlabel("Time / a.u.")
+			ax.set_ylabel("Characteristic Length / a.u.")
+			ax.set_title("Characteristic Length of " + parameter_names[PhaseDimIndex])
+			ax.legend()
+	for iDim in config.DIM_RANGE:
+		ax: matplotlib.axes.Axes = axs[iDim, 2]
+		if iDim == 0:
+			for iElement in range(config.NUM_ELM):
+				ax.plot(ticks[:parameters.shape[0]], parameters[:, iElement, -1], label=utility.get_RI_label(iElement, config.NUM_PES))
+			ax.set_xlabel("Time / a.u.")
+			ax.set_ylabel(parameter_names[-1])
+			ax.set_title(parameter_names[PhaseDimIndex])
+			ax.legend()
+		else:
+			ax.set_visible(False)
 	fig.savefig(constant.PARAMETER_FILENAME + constant.FIGURE_EXTENSION)
 	plt.close(fig)
 

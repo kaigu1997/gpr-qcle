@@ -109,8 +109,8 @@ def plot_error(config: pes.ModelConfig, ticks: npt.NDArray[np.double]) -> None:
 	error_titles: typing.Final[tuple] = ("Original", "Rescaled", "Evolving")
 	for iPlot in range(axs.size):
 		ax: matplotlib.axes.Axes = axs[iPlot]
-		for iElement in config.ELEMENT_RANGE:
-			ax.semilogy(ticks, error[:, iPlot, iElement], label=utility.get_RI_label(iElement, config.NUM_PES))
+		for iTrig, iPES, jPES in zip(config.TRIG_RANGE, config.TRIL_ROW_INDICES, config.TRIL_COL_INDICES):
+			ax.semilogy(ticks, error[:, iPlot, iTrig], label=utility.get_element_label(iPES, jPES))
 		ax.set_xlabel("Time / a.u.")
 		ax.set_ylabel("Error")
 		ax.legend()
@@ -132,15 +132,15 @@ def plot_parameters(config: pes.ModelConfig, ticks: npt.NDArray[np.double]) -> N
 	fig: matplotlib.figure.Figure = plt.figure(figsize=(constant.FIGSIZE[0] * 3, constant.FIGSIZE[1] * config.DIM))
 	axs = fig.subplots(config.DIM, 3, squeeze=False)
 	assert isinstance(axs, np.ndarray)
-	parameters: typing.Final[npt.NDArray[np.double]] = np.loadtxt(constant.PARAMETER_FILENAME + constant.DATA_EXTENSION).reshape(-1, config.NUM_ELM, config.PHASEDIM + 1)[:-1]
+	parameters: typing.Final[npt.NDArray[np.double]] = np.loadtxt(constant.PARAMETER_FILENAME + constant.DATA_EXTENSION).reshape(-1, config.NUM_TRIG, config.PHASEDIM + 1)[:-1]
 	assert ticks.size >= parameters.shape[0]
 	parameter_names: typing.Final[list[str]] = [utility.dimension_name(iDim, config.DIM) for iDim in range(config.PHASEDIM)] + ["Support Radius"]
 	for iDim in config.DIM_RANGE:
 		for iPlot in range(2):
 			PhaseDimIndex: int = iDim * 2 + iPlot
 			ax: matplotlib.axes.Axes = axs[iDim, iPlot]
-			for iElement in range(config.NUM_ELM):
-				ax.plot(ticks[:parameters.shape[0]], parameters[:, iElement, PhaseDimIndex], label=utility.get_RI_label(iElement, config.NUM_PES))
+			for iTrig, iPES, jPES in zip(config.TRIG_RANGE, config.TRIL_ROW_INDICES, config.TRIL_COL_INDICES):
+				ax.plot(ticks[:parameters.shape[0]], parameters[:, iTrig, PhaseDimIndex], label=utility.get_element_label(iPES, jPES))
 			ax.set_xlabel("Time / a.u.")
 			ax.set_ylabel("Characteristic Length / a.u.")
 			ax.set_title("Characteristic Length of " + parameter_names[PhaseDimIndex])
@@ -148,8 +148,8 @@ def plot_parameters(config: pes.ModelConfig, ticks: npt.NDArray[np.double]) -> N
 	for iDim in config.DIM_RANGE:
 		ax: matplotlib.axes.Axes = axs[iDim, 2]
 		if iDim == 0:
-			for iElement in range(config.NUM_ELM):
-				ax.plot(ticks[:parameters.shape[0]], parameters[:, iElement, -1], label=utility.get_RI_label(iElement, config.NUM_PES))
+			for iTrig, iPES, jPES in zip(config.TRIG_RANGE, config.TRIL_ROW_INDICES, config.TRIL_COL_INDICES):
+				ax.plot(ticks[:parameters.shape[0]], parameters[:, iTrig, -1], label=utility.get_element_label(iPES, jPES))
 			ax.set_xlabel("Time / a.u.")
 			ax.set_ylabel(parameter_names[-1])
 			ax.set_title(parameter_names[PhaseDimIndex])
@@ -180,25 +180,22 @@ def plot_loss_and_rescale_factors(config: pes.ModelConfig, ticks: npt.NDArray[np
 	fig: matplotlib.figure.Figure = plt.figure(figsize=(constant.FIGSIZE[0] * 2, constant.FIGSIZE[1]))
 	axs = fig.subplots(1, 2)
 	assert isinstance(axs, np.ndarray)
-	loss_scale: typing.Final[npt.NDArray[np.double]] = np.concatenate(
-		(
-			np.loadtxt(constant.LOSS_FILENAME + constant.DATA_EXTENSION).reshape(-1, config.NUM_ELM, 1),
-			np.loadtxt(constant.SCALE_FILENAME + constant.DATA_EXTENSION).reshape(-1, config.NUM_ELM, 1)
-		),
-		-1
-	)[:-1]
-	assert ticks.size >= loss_scale.shape[0]
+	loss_scale: typing.Final[tuple[npt.NDArray[np.double], npt.NDArray[np.double]]] = (
+		np.loadtxt(constant.LOSS_FILENAME + constant.DATA_EXTENSION).reshape(-1, config.NUM_TRIG, 1),
+		np.loadtxt(constant.SCALE_FILENAME + constant.DATA_EXTENSION).reshape(-1, config.NUM_ELM, 1)
+	)
+	assert all(ticks.size >= data.shape[0] for data in loss_scale)
 	for iPlot in range(axs.size):
 		ax: matplotlib.axes.Axes = axs[iPlot]
-		for iElement in range(config.NUM_ELM):
-			ax.semilogy(ticks[:loss_scale.shape[0]], loss_scale[:, iElement, iPlot], label=utility.get_RI_label(iElement, config.NUM_PES))
+		for iTrig, iPES, jPES, iElement in zip(config.TRIG_RANGE, config.TRIL_ROW_INDICES, config.TRIL_COL_INDICES, config.TRIL_ELEMENT_INDICES):
+			ax.semilogy(ticks[:loss_scale[iPlot].shape[0]], loss_scale[iPlot][:, iTrig if iPlot == 0 else iElement, 0], label=utility.get_element_label(iPES, jPES))
 		ax.set_xlabel("Time / a.u.")
 		ax.set_ylabel(loss_scale_ylabels[iPlot])
 		ax.set_title(loss_scale_titles[iPlot])
 		ax.legend()
 	fig.savefig(constant.LOSS_FILENAME + "-" + constant.SCALE_FILENAME + constant.FIGURE_EXTENSION)
 	plt.close(fig)
-	return loss_scale[:, :, 1]
+	return loss_scale[1]
 
 
 def main(arguments: None | collections.abc.Sequence[str] = None) -> None:

@@ -50,7 +50,7 @@ class DensityMatrixDrawer:
 		Whether to scatter sample points or not, by default False
 	max_outputs : int
 		Estimation of maximum outputs
-	initial_dm : torch.Tensor, dtype of `torch.cdouble`, shape of (N_GRID, ..., N_GRID, ..., NUM_PES, NUM_PES)
+	initial_dm : torch.Tensor, dtype of `torch.double`, shape of (NUM_PES, NUM_PES, N_GRID, ..., N_GRID, ...)
 		Initial adiabatic PWTDM from GPR
 	grid_solution_filename : str, optional
 		The file containing grid solution, by default "" (meaning no such file)
@@ -682,8 +682,10 @@ class DensityMatrixDrawer:
 		----------
 		frame_index : int
 			The index of the frame. Product with output interval gives the duration since beginning
-		dm : torch.Tensor, dtype of `torch.cdouble`, shape of (NUM_PES, NUM_PES, N_GRID, N_GRID)
+		dm : torch.Tensor, dtype of `torch.double`, shape of (NUM_PES, NUM_PES, N_GRID, N_GRID)
 			Adiabatic PWTDM
+		grid_dm : torch.Tensor, dtype of `torch.double`, shape of (NUM_PES, NUM_PES, N_GRID, N_GRID) | None
+			Adiabatic PWTDM from grid solution file, in accordance with `dm`, if provided, by default None
 		points : collections.abc.Sequence[npt.NDArray[np.double]] | None, len of 2 * NUM_TRIG, each of shape (NUM_PTS, PHASEDIM), optional
 			The points to scatter. Only used if `self.__draw_scattered` is True.
 			By default None

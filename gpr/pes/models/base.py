@@ -328,6 +328,7 @@ class ModelConfig:
 	TRIL_COL_INDICES: typing.Final[tuple[int, ...]]
 	TRIL_ELEMENT_INDICES: typing.Final[tuple[int, ...]]
 	FLATTEN_TRIL_INDEX: typing.Final[tuple[int]]
+	FLATTEN_TRIL_DIAG_INDEX: typing.Final[tuple[int, ...]]
 	SUM_DIMS_FOR_PWTDM_MARGINAL: typing.Final[list[tuple[int, ...]]]
 
 	def __init__(self, model: type[ModelBase]) -> None:
@@ -351,4 +352,5 @@ class ModelConfig:
 		flatten_lower_trig: torch.Tensor = torch.zeros(self.NUM_PES, self.NUM_PES, dtype=torch.int)
 		flatten_lower_trig[self.TRIL_ROW_INDICES, self.TRIL_COL_INDICES] = torch.arange(self.NUM_TRIG, dtype=torch.int)
 		self.FLATTEN_TRIL_INDEX = tuple((flatten_lower_trig + torch.tril(flatten_lower_trig, -1).T).flatten().tolist())
+		self.FLATTEN_TRIL_DIAG_INDEX = tuple(flatten_lower_trig[self.PES_RANGE, self.PES_RANGE].tolist())
 		self.SUM_DIMS_FOR_PWTDM_MARGINAL = [tuple(jDim for jDim in self.PHASEDIM_RANGE if jDim != iDim) for iDim in self.PHASEDIM_RANGE]

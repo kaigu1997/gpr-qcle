@@ -199,7 +199,7 @@ class Main:
 		print("", end="", file=self.__bln_f, flush=constant.DEBUG_MODE)
 		# fit
 		if to_train:
-			self.__predictors.train()
+			self.__predictors.train(True)
 
 	def __predict_and_save_to_file(self, iTick: int) -> None:
 		r"""To make predictions on marginal/grids
@@ -331,7 +331,7 @@ class Main:
 		self.__predictors.print(self.__prm_f)
 		np.savetxt(self.__scl_f, self.__predictors.scale.detach().cpu().numpy(), constant.FMT, footer="\n", comments="", encoding=constant.ENC)
 		print("", file=self.__scl_f, flush=constant.DEBUG_MODE)
-		for i in self.__quantity.config.ELEMENT_RANGE:
+		for i in self.__quantity.config.TRIG_RANGE:
 			print(self.__predictors[i].error().item(), file=self.__lss_f)
 		print("\n", file=self.__lss_f, flush=constant.DEBUG_MODE)
 

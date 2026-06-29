@@ -288,19 +288,31 @@ class Quantity:
 		self.p0 = self.r0[self.config.DIM:]
 		self.sigma_p0 = self.sigma_r0[self.config.DIM:]
 		# x
-		dx_from_wavelength: typing.Final[torch.Tensor] = (2.0 * math.pi * constant.HBAR) / ((self.p0 + 3.0 * self.sigma_p0) * Quantity.__NUM_GRIDS_PER_WAVELENGTH) # N grids per de Broglie wavelength
-		resolution: typing.Final[torch.Tensor] = self.sigma_x0 / dx_from_wavelength # also sigma_p0/dp
-		dp_theory: typing.Final[torch.Tensor] = self.sigma_p0 / resolution # in real, dx*dp=2*pi*hbar/(4*N+1)
-		self.dx = torch.minimum(dx, dx_from_wavelength) # .apply_(cutoff)
-		half_grids_theory: typing.Final[torch.Tensor] = torch.ceil((2.0 * math.pi * constant.HBAR / self.dx / dp_theory - 1) / 4).to(torch.int64)
-		half_grids_x0: typing.Final[torch.Tensor] = torch.ceil(2.0 * self.x0.abs() / self.dx).to(torch.int64)
-		N_lowerbound: typing.Final[torch.Tensor] = 2 * torch.maximum(half_grids_theory, half_grids_x0) + 1
-		self.num_grids_on_each_dimension = Quantity.__get_fft_grids(N_lowerbound)
-		half_grids: typing.Final[torch.Tensor] = (self.num_grids_on_each_dimension - 1) // 2 # since x_max could > from_spacing, n_grids might be adjusted
-		self.x_max = half_grids * self.dx
-		self.x_min = -self.x_max
-		self.x_range = self.x_max - self.x_min
-		self.num_grids_in_total = int(self.num_grids_on_each_dimension.prod().item())
+		value_from_total_grids: bool = False
+		if total_grids is not None:
+			n_grids_each_dim = int(round(math.pow(total_grids, 1.0 / self.config.PHASEDIM)))
+			if n_grids_each_dim ** self.config.PHASEDIM == total_grids:
+				self.num_grids_in_total = total_grids
+				self.num_grids_on_each_dimension = torch.full((self.config.DIM,), n_grids_each_dim, dtype=torch.int64)
+				self.x_max = 2.0 * self.x0.abs()
+				self.x_min = -self.x_max
+				self.x_range = self.x_max - self.x_min
+				self.dx = self.x_range / self.num_grids_on_each_dimension
+				value_from_total_grids = True
+		if not value_from_total_grids:
+			dx_from_wavelength: typing.Final[torch.Tensor] = (2.0 * math.pi * constant.HBAR) / ((self.p0 + 3.0 * self.sigma_p0) * Quantity.__NUM_GRIDS_PER_WAVELENGTH) # N grids per de Broglie wavelength
+			resolution: typing.Final[torch.Tensor] = self.sigma_x0 / dx_from_wavelength # also sigma_p0/dp
+			dp_theory: typing.Final[torch.Tensor] = self.sigma_p0 / resolution # in real, dx*dp=2*pi*hbar/(4*N+1)
+			self.dx = torch.minimum(dx, dx_from_wavelength) # .apply_(cutoff)
+			half_grids_theory: typing.Final[torch.Tensor] = torch.ceil((2.0 * math.pi * constant.HBAR / self.dx / dp_theory - 1) / 4).to(torch.int64)
+			half_grids_x0: typing.Final[torch.Tensor] = torch.ceil(2.0 * self.x0.abs() / self.dx).to(torch.int64)
+			N_lowerbound: typing.Final[torch.Tensor] = 2 * torch.maximum(half_grids_theory, half_grids_x0) + 1
+			self.num_grids_on_each_dimension = Quantity.__get_fft_grids(N_lowerbound)
+			half_grids: typing.Final[torch.Tensor] = (self.num_grids_on_each_dimension - 1) // 2 # since x_max could > from_spacing, n_grids might be adjusted
+			self.x_max = half_grids * self.dx
+			self.x_min = -self.x_max
+			self.x_range = self.x_max - self.x_min
+			self.num_grids_in_total = int(self.num_grids_on_each_dimension.prod().item())
 		self.x_grids_each_dim = [torch.linspace(self.x_min[iDim], self.x_max[iDim], int(self.num_grids_on_each_dimension[iDim].item())) for iDim in self.config.DIM_RANGE]
 		# p
 		self.dp = 2.0 * math.pi * constant.HBAR / (4 * half_grids + 1.0) / self.dx

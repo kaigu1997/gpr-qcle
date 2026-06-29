@@ -180,17 +180,11 @@ def file_read_density_matrix_format(
 
 	Returns
 	-------
-	torch.Tensor, dtype of `torch.cdouble`, shape of (N_GRIDS, ..., N_GRIDS, ..., NUM_PES, NUM_PES)
+	torch.Tensor, dtype of `torch.double`, shape of (NUM_PES, NUM_PES, N_GRIDS, ..., N_GRIDS, ...)
 		The formatted PWTDM
 	"""
-	n_sq: list[int] = num_grids_on_each_dimension * 2
-	result: torch.Tensor = torch.empty(n_sq + [num_pes, num_pes], dtype=torch.cdouble)
-	for iPES in range(num_pes):
-		for jPES in range(iPES):
-			result[..., iPES, jPES] = (pwtdm_from_file[jPES * num_pes + iPES] + 1.0j * pwtdm_from_file[iPES * num_pes + jPES]).reshape(n_sq)
-			result[..., jPES, iPES] = result[..., iPES, jPES].conj()
-		result[..., iPES, iPES] = pwtdm_from_file[iPES * num_pes + iPES].reshape(n_sq)
-	return result
+	n_grids_total: typing.Final[int] = math.prod(num_grids_on_each_dimension)
+	return pwtdm_from_file.reshape(num_pes, num_pes, n_grids_total, n_grids_total).mT.reshape([num_pes, num_pes] + num_grids_on_each_dimension * 2)
 
 
 def format_array(arr: typing.Any, arr_name : str | None = None, sep: str = " ") -> str:

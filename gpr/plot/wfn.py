@@ -276,7 +276,7 @@ class DensityMatrixMarginalPlotter(MarginalProbabilityPlot):
 		if dm is None:
 			return []
 		else:
-			dm_diag: typing.Final[npt.NDArray[np.double]] = dm[..., config.PES_RANGE, config.PES_RANGE].real.detach().cpu().numpy()
+			dm_diag: typing.Final[npt.NDArray[np.double]] = dm.real[config.PES_RANGE, config.PES_RANGE].detach().cpu().numpy()
 			return [dm_diag.sum(config.SUM_DIMS_FOR_PWTDM_MARGINAL[iDim]) * DensityMatrixMarginalPlotter.__volume_elements_reduce_to_each_dim[iDim].item() for iDim in config.PHASEDIM_RANGE]
 
 	def __init__(

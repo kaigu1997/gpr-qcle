@@ -6,7 +6,6 @@ import collections.abc
 import math
 import typing
 
-import numpy as np
 import torch
 import torch_kmeans
 
@@ -86,7 +85,7 @@ class GPRPredictors(expectation.Averager):
 
 	drc: typing.Final = evolve.Direction.FORWARD
 	__JUDGE_INCLUDE_THRESHOLD: typing.Final = 0.1
-	__slots__: typing.Final[tuple] = ("epmca", "__kmeans", "ind_pts", "ind_den", "__kernel", "__predictors", "__lr", "__last_ppl", "__last_prt", "chunk_size")
+	__slots__: typing.Final[tuple] = ("epmca", "__kmeans", "ind_pts", "ind_den", "__kernel", "__predictors", "__lr", "__last_ppl", "__last_prt", "__last_param", "__purity_weight", "chunk_size")
 	epmca: typing.Final[expectation.EvolvingPointsMCAverage]
 	__kmeans: typing.Final[torch_kmeans.KMeans]
 	ind_pts: torch.Tensor
@@ -95,6 +94,8 @@ class GPRPredictors(expectation.Averager):
 	__lr: float
 	__last_ppl: float
 	__last_prt: float
+	__last_param: torch.Tensor
+	__purity_weight: typing.Final[torch.Tensor]
 	chunk_size: typing.Final[int]
 
 	def __init__(
@@ -118,60 +119,47 @@ class GPRPredictors(expectation.Averager):
 		print("\tInitial Training " + plot.get_RI_label(0, config.NUM_PES))
 		self.__predictors.append(gp.GaussianProcess(
 			self.ind_pts[0],
-			self.ind_den[0].real,
+			self.ind_den[0],
 			self.epmca.point_set[0],
-			self.epmca.density[0].real,
+			self.epmca.density[0],
 			self.__kernel,
 			kernel_initial_value,
 			wendland.wendland_rbf.r_c_init,
 			2,
-			True
+			False # True
 		))
-		for iElement in config.ELEMENT_RANGE[1:]:
-			RowIndex: int = iElement // config.NUM_PES
-			ColIndex: int = iElement % config.NUM_PES
-			print("\tInitial Training " + plot.get_RI_label(iElement, config.NUM_PES))
-			TrilIndex: int = self.config.FLATTEN_TRIL_INDEX[iElement]
+		self.__last_param = torch.full((config.NUM_ELM,), self[0].r_cutoff, dtype=torch.float64)
+		for iTrig, iPES, jPES in zip(config.TRIG_RANGE[1:], config.TRIL_ROW_INDICES[1:], config.TRIL_COL_INDICES[1:]):
+			print("\tInitial Training " + plot.get_element_label(iPES, jPES))
 			# this includes training of initial distribution
-			if RowIndex <= ColIndex:
-				self.__predictors.append(gp.GaussianProcess(
-					self.ind_pts[TrilIndex],
-					self.ind_den[TrilIndex].real,
-					self.epmca.point_set[TrilIndex],
-					self.epmca.density[TrilIndex].real,
-					self.__kernel,
-					kernel_initial_value,
-					self[0].r_cutoff,
-					2,
-					False
-				))
-			else: # RowIndex > ColIndex
-				self.__predictors.append(gp.GaussianProcess(
-					self.ind_pts[TrilIndex],
-					self.ind_den[TrilIndex].real,
-					self.epmca.point_set[TrilIndex],
-					self.epmca.density[TrilIndex].imag,
-					self.__kernel,
-					kernel_initial_value,
-					self[0].r_cutoff,
-					2,
-					False
-				))
+			self.__predictors.append(gp.GaussianProcess(
+				self.ind_pts[iTrig],
+				self.ind_den[iTrig],
+				self.epmca.point_set[iTrig],
+				self.epmca.density[iTrig],
+				self.__kernel,
+				kernel_initial_value,
+				self[0].r_cutoff,
+				2,
+				False
+			))
 		self.__lr = 1.0
 		self.__last_ppl = 1.0
 		self.__last_prt = 1.0
-		self.train()
+		self.__last_param = self.__real_to_raw()
+		self.__purity_weight = torch.ones(config.NUM_TRIG) * 2 - torch.eye(config.NUM_PES)[config.TRIL_ROW_INDICES, config.TRIL_COL_INDICES]
+		self.train(False)
 		# then check for chunk size to avoid OOM in autograd
-		self.chunk_size = self.__predictors[0].get_chunk_size(expectation.normal_sample(num_ind, init_dist.r0, init_dist.sigma_r0))
+		self.chunk_size = num_ind # self.__predictors[0].get_chunk_size(expectation.normal_sample(num_ind, init_dist.r0, init_dist.sigma_r0))
 
 	def population(self) -> torch.Tensor:
-		return torch.tensor([self[iPES * self.config.NUM_PES + iPES].population for iPES in self.config.PES_RANGE], dtype=torch.get_default_dtype(), device=torch.get_default_device())
+		return torch.tensor([self[iDiag].population for iDiag in self.config.FLATTEN_TRIL_DIAG_INDEX], dtype=torch.get_default_dtype(), device=torch.get_default_device())
 
 	def coordinates(self) -> torch.Tensor:
-		return sum((self[iPES * self.config.NUM_PES + iPES].coordinates for iPES in self.config.PES_RANGE), start=torch.zeros(self.config.PHASEDIM))
+		return sum((self[iDiag].coordinates for iDiag in self.config.FLATTEN_TRIL_DIAG_INDEX), start=torch.zeros(self.config.PHASEDIM))
 
 	def square_coordinates(self) -> torch.Tensor:
-		return sum((self[iPES * self.config.NUM_PES + iPES].square_coordinates for iPES in self.config.PES_RANGE), start=torch.zeros((self.config.PHASEDIM, self.config.PHASEDIM)))
+		return sum((self[iDiag].square_coordinates for iDiag in self.config.FLATTEN_TRIL_DIAG_INDEX), start=torch.zeros((self.config.PHASEDIM, self.config.PHASEDIM)))
 
 	def covariance(self) -> torch.Tensor:
 		return super().covariance()
@@ -180,7 +168,8 @@ class GPRPredictors(expectation.Averager):
 		return math.nan
 
 	def purity(self) -> torch.Tensor:
-		result: typing.Final[torch.Tensor] = torch.tensor([pred.purity for pred in self.__predictors]).reshape(self.config.NUM_PES, self.config.NUM_PES)
+		result: torch.Tensor = torch.zeros(self.config.NUM_PES, self.config.NUM_PES, dtype=torch.double)
+		result[self.config.TRIL_ROW_INDICES, self.config.TRIL_COL_INDICES] = torch.tensor([pred.purity for pred in self.__predictors])
 		return self.PURITY_FACTOR * (result + result.T - torch.diag(torch.diag(result)))
 
 	def __getitem__(self, ElementIndex: int) -> gp.GaussianProcess:
@@ -208,51 +197,9 @@ class GPRPredictors(expectation.Averager):
 		torch.Tensor, shape of (NUM_ELM,)
 			The rescaling factor
 		"""
-		result: torch.Tensor = torch.empty(self.config.NUM_ELM)
-		for iTrig, iPES, jPES, iElement in zip(self.config.TRIG_RANGE, self.config.TRIL_ROW_INDICES, self.config.TRIL_COL_INDICES, self.config.TRIL_ELEMENT_INDICES):
-			if iPES == jPES:
-				result[iElement] = 1.0 / self.epmca.density[iTrig].real.abs().max()
-			else:
-				result[iElement] = 1.0 / self.epmca.density[iTrig].imag.abs().max()
-				result[jPES * self.config.NUM_PES + iPES] = 1.0 / self.epmca.density[iTrig].real.abs().max()
-		return result
-
-	def __combine_to_complex[**P](
-		self,
-		x_input: torch.Tensor,
-		RowIndex: int,
-		ColIndex: int,
-		call_single_predictor: collections.abc.Callable[typing.Concatenate[gp.GaussianProcess, torch.Tensor, P], collections.abc.Iterable[torch.Tensor]],
-		*args: P.args,
-		**kwargs: P.kwargs
-	) -> tuple[torch.Tensor, ...]:
-		r"""To combine results from single predictor into complex arrays
-
-		Parameters
-		----------
-		x_input : torch.Tensor, shape of (..., PHASEDIM)
-			Test inputs
-		RowIndex : int
-			Index of row of the element in density matrix
-		ColIndex : int
-			Index of column of the element in density matrix
-		call_single_predictor : collections.abc.Callable[typing.Concatenate[gp.GaussianProcess, torch.Tensor, P], collections.abc.Iterable[torch.Tensor]]
-			The function that takes the single predictor and generates some Tensor (prediction, derivatives, marginals, etc)
-
-		Returns
-		-------
-		tuple[torch.Tensor, ...]
-			Combined complex arrays from single predictor
-		"""
-		assert 0 <= RowIndex < self.config.NUM_PES and 0 <= ColIndex < self.config.NUM_PES
-		x_test: typing.Final[torch.Tensor] = x_input.reshape(-1, x_input.shape[-1])
-		# pred_call: typing.Final[collections.abc.Callable[[gp.GaussianProcess], collections.abc.Iterable[torch.Tensor]]] = lambda pred: call_single_predictor(pred, x_test, *args, **kwargs)
-		if RowIndex == ColIndex:
-			return tuple(item + 0.j for item in call_single_predictor(self.__predictors[RowIndex * self.config.NUM_PES + ColIndex], x_test, *args, **kwargs))
-		elif RowIndex > ColIndex:
-			return tuple(real + 1.j * imag for real, imag in zip(call_single_predictor(self.__predictors[ColIndex * self.config.NUM_PES + RowIndex], x_test, *args, **kwargs), call_single_predictor(self.__predictors[RowIndex * self.config.NUM_PES + ColIndex], x_test, *args, **kwargs)))
-		else: # RowIndex < ColIndex
-			return tuple(real - 1.j * imag for real, imag in zip(call_single_predictor(self.__predictors[RowIndex * self.config.NUM_PES + ColIndex], x_test, *args, **kwargs), call_single_predictor(self.__predictors[ColIndex * self.config.NUM_PES + RowIndex], x_test, *args, **kwargs)))
+		result: torch.Tensor = torch.zeros(self.config.NUM_PES, self.config.NUM_PES)
+		result[self.config.TRIL_ROW_INDICES, self.config.TRIL_COL_INDICES] = 1.0 / torch.amax(self.epmca.density.abs(), -1)
+		return (result + result.T - torch.diag(torch.diag(result))).reshape(-1)
 
 	def predict(
 		self,
@@ -275,12 +222,12 @@ class GPRPredictors(expectation.Averager):
 		torch.Tensor, shape of (...)
 			Density of the element of all test inputs
 		"""
-		return self.__combine_to_complex(
-			x_input.reshape(-1, x_input.shape[-1]),
-			ElementIndex // self.config.NUM_PES,
-			ElementIndex % self.config.NUM_PES,
-			lambda pred, x_test: (pred.predict(x_test),) if GPRPredictors.__check_predictor(pred) else (torch.zeros(x_test.shape[0]),)
-		)[0].reshape(x_input.shape[:-1])
+		assert 0 <= ElementIndex < self.config.NUM_ELM
+		pred: typing.Final[gp.GaussianProcess] = self.__predictors[self.config.FLATTEN_TRIL_INDEX[ElementIndex]]
+		if GPRPredictors.__check_predictor(pred):
+			return pred.predict(x_input)
+		else:
+			return torch.zeros(x_input.shape[:-1], dtype=torch.cdouble)
 
 	def get_marginal(
 		self,
@@ -306,41 +253,17 @@ class GPRPredictors(expectation.Averager):
 		torch.Tensor, shape of (...)
 			Marginal distribution on the inputs
 		"""
-		def call_single_predictor(pred: gp.GaussianProcess, x_test: torch.Tensor, dims: collections.abc.Sequence[int]) -> tuple[torch.Tensor]:
-			r"""To do prediction of a single predictor
-
-			Parameters
-			----------
-			pred : gp.GaussianProcess
-				The predictor
-			x_test : torch.Tensor, shape of (N, len(dimensions))
-				Test inputs
-			dims : collections.abc.Sequence[int]
-				The dims to be kept
-
-			Returns
-			-------
-			torch.Tensor, shape of (N,)
-				Test targets by the predictor
-			"""
-			if GPRPredictors.__check_predictor(pred):
-				return (pred.get_marginal(x_test, dims),)
-			else:
-				return (torch.zeros(x_test.shape[0]),)
-
 		if isinstance(dimensions, int):
 			dimensions = [dimensions]
 		else:
 			dimensions = tuple(set(dimensions)) # remove duplicate
 		assert all(0 <= dim <= self.config.PHASEDIM for dim in dimensions)
 		assert x_input.shape[-1] == len(dimensions)
-		return self.__combine_to_complex(
-			x_input,
-			ElementIndex // self.config.NUM_PES,
-			ElementIndex % self.config.NUM_PES,
-			call_single_predictor,
-			dimensions
-		)[0]
+		pred: typing.Final[gp.GaussianProcess] = self.__predictors[self.config.FLATTEN_TRIL_INDEX[ElementIndex]]
+		if GPRPredictors.__check_predictor(pred):
+			return pred.get_marginal(x_input, dimensions)
+		else:
+			return torch.zeros(x_input.shape[0], dtype=torch.cdouble)
 
 	def evolve_update(
 		self,
@@ -442,10 +365,10 @@ class GPRPredictors(expectation.Averager):
 		# 	for iPES in self.config.PES_RANGE:
 		# 		if iPES != RowIndex:
 		# 			pred_kj, grad_kj = predict_derivative_over_input(x, iPES, ColIndex)
-		# 			time_deriv -= (D[..., RowIndex, iPES] * (v * pred_kj[..., np.newaxis] + (E[..., RowIndex] - E[..., iPES])[..., np.newaxis] / 2.0 * grad_kj[..., self.config.DIM:])).sum(-1)
+		# 			time_deriv -= (D[..., RowIndex, iPES] * (v * pred_kj[..., torch.newaxis] + (E[..., RowIndex] - E[..., iPES])[..., torch.newaxis] / 2.0 * grad_kj[..., self.config.DIM:])).sum(-1)
 		# 		if iPES != ColIndex:
 		# 			pred_ik, grad_ik = predict_derivative_over_input(x, RowIndex, iPES)
-		# 			time_deriv += (D[..., iPES, ColIndex] * (v * pred_ik[..., np.newaxis] + (E[..., ColIndex] - E[..., iPES])[..., np.newaxis] / 2.0 * grad_ik[..., self.config.DIM:])).sum(-1)
+		# 			time_deriv += (D[..., iPES, ColIndex] * (v * pred_ik[..., torch.newaxis] + (E[..., ColIndex] - E[..., iPES])[..., torch.newaxis] / 2.0 * grad_ik[..., self.config.DIM:])).sum(-1)
 		# 	return time_deriv
 
 		# def evolve_parameter(
@@ -552,12 +475,8 @@ class GPRPredictors(expectation.Averager):
 		self.epmca.evolve(model, mass, dt, self.predict)
 		evolve.evolve(model, [*self.ind_pts], [*self.ind_den], mass, dt, self.predict)
 		# and update the predictor
-		for iPES, jPES, iTrig, iElement in zip(self.config.TRIL_ROW_INDICES, self.config.TRIL_COL_INDICES, self.config.TRIG_RANGE, self.config.TRIL_ELEMENT_INDICES):
-			if iPES == jPES:
-				self.__predictors[iElement].update(self.ind_pts[iTrig], self.ind_den[iTrig].real, self.epmca.point_set[iTrig], self.epmca.density[iTrig].real)
-			else:
-				self.__predictors[iElement].update(self.ind_pts[iTrig], self.ind_den[iTrig].imag, self.epmca.point_set[iTrig], self.epmca.density[iTrig].imag)
-				self.__predictors[jPES * self.config.NUM_PES + iPES].update(self.ind_pts[iTrig], self.ind_den[iTrig].real, self.epmca.point_set[iTrig], self.epmca.density[iTrig].real)
+		for iTrig in self.config.TRIG_RANGE:
+			self.__predictors[iTrig].update(self.ind_pts[iTrig], self.ind_den[iTrig], self.epmca.point_set[iTrig], self.epmca.density[iTrig])
 
 	def __real_to_raw(self, real_param: torch.Tensor | None = None) -> torch.Tensor:
 		r"""To convert real parameters to raw parameters
@@ -573,10 +492,9 @@ class GPRPredictors(expectation.Averager):
 			The raw parameters
 		"""
 		if real_param is None:
-			return torch.cat([pred.raw_param for pred in self.__predictors])
+			return torch.stack([pred.raw_cutoff for pred in self.__predictors])
 		else:
-			real_param = real_param.reshape(self.config.NUM_ELM, -1)
-			return torch.cat([pred.real_to_raw(real_param[i]) for i, pred in enumerate(self.__predictors)])
+			return torch.stack([pred.rc_real_to_raw(real_param[i]) for i, pred in enumerate(self.__predictors)])
 
 	def __raw_to_real(self, raw_param: torch.Tensor | None = None) -> torch.Tensor:
 		r"""To convert raw parameters to real parameters
@@ -592,45 +510,52 @@ class GPRPredictors(expectation.Averager):
 			The real parameters
 		"""
 		if raw_param is None:
-			return torch.cat([pred.param for pred in self.__predictors])
+			return torch.tensor([pred.r_cutoff for pred in self.__predictors])
 		else:
-			raw_param = raw_param.reshape(self.config.NUM_ELM, -1)
-			return torch.cat([pred.raw_to_real(raw_param[i]) for i, pred in enumerate(self.__predictors)])
+			return torch.stack([pred.rc_raw_to_real(raw_param[i]) for i, pred in enumerate(self.__predictors)])
 
 	def __loss_func(self, raw_param: torch.Tensor) -> torch.Tensor:
-		ppl_err: typing.Final[torch.Tensor] = self.__last_ppl - sum((self[iPES * self.config.NUM_PES + iPES].population_with_lengthscale(self[iPES * self.config.NUM_PES + iPES].raw_lengthscale, raw_param[iPES * self.config.NUM_PES + iPES]) for iPES in self.config.PES_RANGE), start=torch.tensor(0.))
-		prt: typing.Final[torch.Tensor] = torch.stack([pred.purity_with_lengthscale(pred.raw_lengthscale, raw_param[i]) for i, pred in enumerate(self.__predictors)]).reshape(self.config.NUM_PES, self.config.NUM_PES)
-		prt_err: typing.Final[torch.Tensor] = self.__last_prt - self.PURITY_FACTOR * (prt + prt.T - torch.diag(torch.diag(prt))).sum()
-		loss: typing.Final[torch.Tensor] = sum((pred.loss_func(pred.raw_lengthscale, raw_param[i]) for i, pred in enumerate(self.__predictors)), start=torch.tensor(0))
-		return loss + self.epmca.point_set.shape[1] * (prt_err ** 2 + ppl_err ** 2)
+		param: typing.Final[torch.Tensor] = self.__raw_to_real(raw_param)
+		# strict lower, replace the upper one
+		ppl_err: typing.Final[torch.Tensor] = self.__last_ppl - sum((self.__predictors[iDiag].population_with_lengthscale(self.__predictors[iDiag].lengthscale, param[iDiag]) for iDiag in self.config.FLATTEN_TRIL_DIAG_INDEX), start=torch.tensor(0.))
+		prt: typing.Final[torch.Tensor] = torch.stack([pred.purity_with_lengthscale(pred.lengthscale, param[i]) for i, pred in enumerate(self.__predictors)])
+		prt_err: typing.Final[torch.Tensor] = self.__last_prt - self.PURITY_FACTOR * (prt * self.__purity_weight).sum()
+		loss: typing.Final[torch.Tensor] = sum((pred.loss_func(pred.lengthscale, param[i], False) for i, pred in enumerate(self.__predictors)), start=torch.tensor(0))
+		return loss + self.epmca.point_set.shape[1] * (prt_err ** 2 + ppl_err ** 2 + (param - self.__last_param).square().sum())
 
-	def train(self, print_log: bool = constant.DEBUG_MODE) -> None:
+	def train(self, reg: bool, print_log: bool = constant.DEBUG_MODE) -> None:
 		r"""To train each residual predictor
 
 		Parameters
 		----------
+		reg : bool
+			Whether to use regularization on the change of lengthscale
 		print_log : bool, optional
 			Whether to print the log to console, by default `constant.DEBUG_MODE`
 		"""
 		indent: typing.Final[int] = 1
 		# then train the residual predictors
-		for iElement, pred in enumerate(self.__predictors):
-			print(f"{indent * "\t"}Training {plot.get_RI_label(iElement, self.config.NUM_PES)}")
-			pred.train(2, False, print_log)
+		for iTrig, iPES, jPES in zip(self.config.TRIG_RANGE, self.config.TRIL_ROW_INDICES, self.config.TRIL_COL_INDICES):
+			print(f"{indent * '\t'}Training {plot.get_element_label(iPES, jPES)}")
+			self[iTrig].train(
+				2,
+				reg,
+				False,
+				print_log
+			)
 		# global training with population and purity penalty
-		print(f"{indent * "\t"}Training All")
-		raw_param: torch.Tensor = torch.stack([pred.raw_cutoff for pred in self.__predictors])
-		print(f"{indent * "\t"}{plot.format_array(self.scale, "scale")}\n{indent * "\t"}", end="")
-		opt.Optimizer.print_model(self.__raw_to_real())
-		result = opt.GradientDescend(raw_param, self.__loss_func, indent, self.__lr, print_log)
-		print(f"{indent * "\t"}Iter = {result.num_iter} - {result.message}")
-		opt.Optimizer.print_stuff(result.func_value, self.__raw_to_real(result.param), result.lr, extra_start_str=indent)
-		N_param: typing.Final[int] = raw_param.numel() // self.config.NUM_ELM
-		raw_param = result.param.reshape(self.config.NUM_ELM, N_param)
-		for i, pred in enumerate(self.__predictors):
-			pred.raw_cutoff = raw_param[i]
-		self.__last_ppl = self.population().sum().item()
-		self.__last_prt = self.purity().sum().item()
+		# print(f"{indent * "\t"}Training All")
+		# self.__last_ppl = self.population().sum().item()
+		# self.__last_prt = self.purity().sum().item()
+		# self.__last_param = self.__raw_to_real().detach()
+		# raw_param: torch.Tensor = torch.stack([pred.raw_cutoff for pred in self.__predictors])
+		# print(f"{indent * "\t"}{plot.format_array(self.scale, "scale")}\n{indent * "\t"}", end="")
+		# opt.Optimizer.print_model(self.__raw_to_real())
+		# result = opt.GradientDescend(raw_param, self.__loss_func, indent, self.__lr, print_log)
+		# print(f"{indent * "\t"}Iter = {result.num_iter} - {result.message}")
+		# opt.Optimizer.print_stuff(result.func_value, self.__raw_to_real(result.param), result.lr, extra_start_str=indent)
+		# for iTrig in self.config.TRIG_RANGE:
+		# 	self[iTrig].raw_cutoff = raw_param[iTrig]
 
 	def print(self, f: typing.IO) -> None:
 		r"""To print the parameters to file

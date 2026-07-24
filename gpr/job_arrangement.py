@@ -42,9 +42,9 @@ class Arguments:
 	extra_arguments() 
 		Extra arguments from command line
 	"""
-	__slots__: typing.Final[tuple] = ("__config", "__extra_args", "__x0", "__mass", "__all_vals", "__is_lnE", "__all_p", "__output_interval")
+	__slots__: typing.Final[tuple] = ("config", "__extra_args", "__x0", "__mass", "__all_vals", "__is_lnE", "__all_p", "__output_interval")
 	__STEP_BETWEEN_OUTPUT: typing.Final[float] = 0.5
-	__config: typing.Final[pes.ModelConfig]
+	config: typing.Final[pes.ModelConfig]
 	__extra_args: typing.Final[list[str]]
 	__x0: typing.Final[npt.NDArray[np.double]]
 	__mass: typing.Final[npt.NDArray[np.double]]
@@ -76,21 +76,21 @@ class Arguments:
 			Each row is the momenta/ln(E) for one case
 		"""
 		num_p: typing.Final[npt.NDArray[np.int_]] = ((max_vals - min_vals) / dp).round().astype(np.int_) + 1
-		return np.stack(np.meshgrid(*[np.linspace(pmin, pmax, n) for pmin, pmax, n in zip(min_vals, max_vals, num_p)], indexing="ij"), -1, None).reshape(-1, self.__config.DIM)
+		return np.stack(np.meshgrid(*[np.linspace(pmin, pmax, n) for pmin, pmax, n in zip(min_vals, max_vals, num_p)], indexing="ij"), -1, None).reshape(-1, self.config.DIM)
 
 	def __init__(self, arguments: None | collections.abc.Sequence[str] = None) -> None:
 		model_parser: typing.Final[argparse.ArgumentParser] = argparse.ArgumentParser(description="Provide model to use", add_help=False)
 		model_parser.add_argument("--model", default="dac", type=str, choices=pes.MODEL_DICT.keys(), help="Model to use")
 		model_args, remaining_args = model_parser.parse_known_args(arguments)
-		self.__config = pes.ModelConfig(pes.MODEL_DICT[model_args.model])
+		self.config = pes.ModelConfig(pes.MODEL_DICT[model_args.model])
 
 		parser: typing.Final[argparse.ArgumentParser] = argparse.ArgumentParser(description="Generate multiple inputs and run them on slurm", epilog="Extra arguments will be passed to `input_generation.py` and see its documentation", parents=[model_parser])
-		parser.add_argument("min", nargs=self.__config.DIM, type=float, help="Minimum momentum/ln(energy), where to start from")
-		parser.add_argument("max", nargs=self.__config.DIM, type=float, help="Maximum momentum/ln(energy), where to end")
-		parser.add_argument("--dp", nargs=self.__config.DIM, default=[0.1] * self.__config.DIM, type=float, help="Momentum/energy spacing")
+		parser.add_argument("min", nargs=self.config.DIM, type=float, help="Minimum momentum/ln(energy), where to start from")
+		parser.add_argument("max", nargs=self.config.DIM, type=float, help="Maximum momentum/ln(energy), where to end")
+		parser.add_argument("--dp", nargs=self.config.DIM, default=[0.1] * self.config.DIM, type=float, help="Momentum/energy spacing")
 		parser.add_argument("-e", "--energy", action="store_true", help="By default the input is momenta; this option would assume the input to be ln(energy)")
-		parser.add_argument("--x0", nargs=self.__config.DIM, default=[-15.0] * self.__config.DIM, type=float, help="Initial positions")
-		parser.add_argument("-m", "--mass", nargs=self.__config.DIM, default=[2000.0] * self.__config.DIM, type=float, help="Mass")
+		parser.add_argument("--x0", nargs=self.config.DIM, default=[-15.0] * self.config.DIM, type=float, help="Initial positions")
+		parser.add_argument("-m", "--mass", nargs=self.config.DIM, default=[2000.0] * self.config.DIM, type=float, help="Mass")
 		parser.add_argument("-t", "--output-interval", type=float, help="Interval between outputs (in a.u.)")
 		known_args: argparse.Namespace
 		known_args, self.__extra_args = parser.parse_known_args(remaining_args)
@@ -214,7 +214,7 @@ class Script:
 			raise ValueError("Empty line not found") from ve
 		assert all(s[:len(Script.__BATCH_COMMAND_NAME)] == Script.__BATCH_COMMAND_NAME for s in lines[:idx])
 		self.__head = f"""#!/usr/bin/env bash
-#SBATCH --job-name=grid_solution
+#SBATCH --job-name=gpr
 {"".join(lines[:idx])}"""
 		self.__mid = f"""srun hostname | sort
 
@@ -223,14 +223,14 @@ class Script:
 #begins here
 cd ${working_dir}
 echo $(date +"%Y-%m-%d %H:%M:%S.%N")
-python main.py -e
+python main.py
 echo $(date +"%Y-%m-%d %H:%M:%S.%N")
 #ends here
 
-echo "scontrol show job $SLURM_JOB_ID"
-scontrol show job $SLURM_JOB_ID
-echo "sacct -j $SLURM_JOB_ID"
-sacct -j $SLURM_JOB_ID --format="jobid,start,end,elapsed,nodelist,exitcode,state"
+#echo "scontrol show job $SLURM_JOB_ID"
+#scontrol show job $SLURM_JOB_ID
+#echo "sacct -j $SLURM_JOB_ID"
+#sacct -j $SLURM_JOB_ID --format="jobid,start,end,elapsed,nodelist,exitcode,state"
 """
 
 	def __call__(self, job_set: set[str]) -> str:
@@ -257,11 +257,11 @@ def main() -> None:
 	r"""The main routine
 	"""
 	args: typing.Final[Arguments] = Arguments()
-	file_list: typing.Final[list[str]] = ["constant.py", "pes", "plot", "evolve.py", "gp.py", "expectation.py", "point.py", "main.py"] # all py scripts, exclude this file and input generation
+	file_list: typing.Final[list[str]] = ["constant.py", "pes", "plot", "param.py", "evolve.py", "opt.py", "wendland.py", "gp.py", "expectation.py", "pred.py", "main.py"] # all py scripts, exclude this file and input generation
 	job_set: set[str] = set()
 	for value, momentum, output_interval in zip(args.all_values, args.all_momenta, args.output_interval):
 		dir_name: str = f"gpr_{"_".join([f"{v:g}" for v in value])}"
-		ig.main([str(x0i) for x0i in args.x0] + [str(p) for p in momentum] + [str(output_interval), "--model", args.__config.NAME] + ["-m"] + [str(m) for m in args.mass] + args.extra_arguments) # generate input. qcle as job type for grid solution is not used
+		ig.main([str(x0i) for x0i in args.x0] + [str(p) for p in momentum] + [str(output_interval), "--model", args.config.NAME] + ["-m"] + [str(m) for m in args.mass] + args.extra_arguments) # generate input. qcle as job type for grid solution is not used
 		subprocess.run(["mkdir", "-p", dir_name]) # make directory
 		subprocess.run(["cp", "-rL"] + file_list + ["input", dir_name], check=False) # copy elf and input file to dir
 		job_set.add(dir_name)

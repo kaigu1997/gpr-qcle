@@ -19,6 +19,7 @@
 *out*
 *put
 *result*/
+*.pdf
 *.tar.*
 *.tgz
 

@@ -3,9 +3,9 @@ r"""plot.wfn
 Implementation of plotting marginal distributions
 """
 import io
-import os
 import subprocess
 import typing
+import warnings
 
 import matplotlib
 import matplotlib.axes
@@ -195,7 +195,7 @@ class MarginalProbabilityPlot:
 		frame_index : int
 			The index of the frame.
 			Product with `self.__output_interval` gives the duration since beginning
-		probability : list[npt.NDArray[np.double]], len of (1~2) * PHASEDIM, each of shape (NUM_PES, NUM_PES, N_GRIDS)
+		probability : list[npt.NDArray[np.double]], len of (1~2) * PHASEDIM, each of shape (NUM_PES, N_GRIDS)
 			Probability of each dimension
 		picnames : str | None, optional
 			Naming template, should be used with `.format(frame_index)`, by default None (and use the class picname instead)
@@ -211,7 +211,7 @@ class MarginalProbabilityPlot:
 			for iPES in self.config.PES_RANGE:
 				ax.plot(
 					self.__grids_each_dim[iDim],
-					probability[iDim][iPES, iPES] * rescale_factor[iPES],
+					probability[iDim][iPES] * rescale_factor[iPES],
 					color=self.__wfn_colors[iPES],
 					lw=utility.LINE_WIDTH,
 					label=utility.pes_name(iPES, self.config.NUM_PES)
@@ -263,14 +263,14 @@ class DensityMatrixMarginalPlotter(MarginalProbabilityPlot):
 
 		Parameters
 		----------
-		dm : torch.Tensor, dtype of `torch.cdouble`, shape of (N_GRID, ..., N_GRID, ..., NUM_PES, NUM_PES) | None
+		dm : torch.Tensor, dtype of `torch.cdouble`, shape of (NUM_PES, NUM_PES, N_GRID, ..., N_GRID, ...) | None
 			Adiabatic PWTDM
 		config : pes.ModelConfig
 			The configuration of the model
 
 		Returns
 		-------
-		list[npt.NDArray[np.double]], len of PHASEDIM, each of shape (N_GRIDS, NUM_PES)
+		list[npt.NDArray[np.double]], len of PHASEDIM, each of shape (NUM_PES, N_GRIDS)
 			Probability on each dimension of each surface
 		"""
 		if dm is None:
@@ -332,7 +332,7 @@ class DensityMatrixMarginalPlotter(MarginalProbabilityPlot):
 
 
 @typing.final
-class DMMarginalPlotterFromFile(DensityMatrixMarginalPlotter):
+class DMMarginalPlotterFromFile(DensityMatrixMarginalPlotter, utility.FromFile):
 	r"""To plot wavefunctions from marginal density matrices whose data is read from file
 
 	Parameters
@@ -355,12 +355,21 @@ class DMMarginalPlotterFromFile(DensityMatrixMarginalPlotter):
 	frame_index()
 		To get the number of plots already drawn
 	"""
-	__slots__: typing.Final[tuple] = ("__n_grids_each_dim", "__max_outputs", "__marginal_file", "__current_idx", "__grid_solution_file")
+	__slots__: typing.Final[tuple] = ("__n_grids_each_dim", "__grid_solution_file")
 	__n_grids_each_dim: typing.Final[list[int]]
-	__max_outputs: typing.Final[int]
-	__marginal_file: typing.Final[io.TextIOWrapper]
-	__current_idx: int
 	__grid_solution_file: typing.Final[utility.FromFile | None]
+
+	@staticmethod
+	def __diagonal_marginal_from_file(file: utility.FromFile, config: pes.ModelConfig) -> list[npt.NDArray[np.double]]:
+		r"""To read the diagonal marginal distribution from file
+
+		Returns
+		-------
+		list[npt.NDArray[np.double]], len of PHASEDIM, each of shape (NUM_PES, N_GRIDS)
+			The diagonal marginal distribution on each dimension of each surface
+		"""
+		data: typing.Final[npt.NDArray[np.double]] = file.get_data().reshape(config.PHASEDIM, config.NUM_PES, config.NUM_PES, -1)[:, config.PES_RANGE, config.PES_RANGE]
+		return [datum for datum in data]
 
 	def __init__(
 		self,
@@ -369,68 +378,41 @@ class DMMarginalPlotterFromFile(DensityMatrixMarginalPlotter):
 		marginal_filename: str = constant.MARGINAL_FILENAME + constant.DATA_EXTENSION,
 		grid_solution_filename: str = "",
 	) -> None:
+		utility.FromFile.__init__(self, marginal_filename, quantity.config.NUM_ELM * quantity.config.PHASEDIM)
 		# get shape
 		self.__n_grids_each_dim = quantity.num_grids_on_each_dimension.tolist()
-		# get from file
-		self.__max_outputs = int(subprocess.check_output(("wc", "-l", marginal_filename)).split()[0]) // (quantity.config.PHASEDIM + 1)
-		self.__marginal_file = open(marginal_filename, "r", encoding=constant.ENC)
 		if grid_solution_filename != "":
 			self.__grid_solution_file = utility.FromFile(grid_solution_filename, quantity.config.NUM_ELM)
+		else:
+			self.__grid_solution_file = None
 		# first frame
-		super().__init__(
+		DensityMatrixMarginalPlotter.__init__(
+			self,
 			quantity,
 			draw_rescaled,
-			self.__max_outputs,
-			[np.loadtxt(self.__marginal_file, encoding=constant.ENC, max_rows=1).reshape(-1) for _ in quantity.config.PHASEDIM_RANGE],
+			self.total_ticks if self.total_ticks != -1 else quantity.total_ticks,
+			DMMarginalPlotterFromFile.__diagonal_marginal_from_file(self, quantity.config),
 			file_data_to_dm(self.__grid_solution_file, quantity.config, self.__n_grids_each_dim) if self.__grid_solution_file is not None else None
 		)
-		self.__marginal_file.readline()
-		self.__current_idx = 0
-
-	@property
-	def total_ticks(self) -> int:
-		r"""To get the total number of outputs
-
-		Returns
-		-------
-		int
-			The total number of outputs frames from file
-		"""
-		if self.__grid_solution_file is not None and self.__grid_solution_file.total_ticks != -1:
-			return min(self.__grid_solution_file.total_ticks, self.__max_outputs)
-		else:
-			return self.__max_outputs
-
-	@property
-	def frame_index(self) -> int:
-		r"""To get the number of plots already drawn
-
-		Returns
-		-------
-		int
-			The number of plots that has already been drawn
-		"""
-		return self.__current_idx
 
 	def __call__(self) -> bool:
-		self.__current_idx += 1
-		if self.__current_idx < self.__max_outputs and (self.__grid_solution_file is None or self.__grid_solution_file.have_content):
+		if self.have_content and (self.__grid_solution_file is None or self.__grid_solution_file.have_content):
 			try:
+				data: typing.Final[list[npt.NDArray[np.double]]] = DMMarginalPlotterFromFile.__diagonal_marginal_from_file(self, self.config)
 				DensityMatrixMarginalPlotter.__call__(
 					self,
-					self.__current_idx,
-					[np.loadtxt(self.__marginal_file, encoding=constant.ENC, max_rows=1).reshape(-1) for _ in self.config.PHASEDIM_RANGE],
+					self.frame_index - 1,
+					data,
 					file_data_to_dm(self.__grid_solution_file, self.config, self.__n_grids_each_dim) if self.__grid_solution_file is not None else None
 				) # this already increase frame index for grid solution file
-				self.__marginal_file.readline()
 				return True
 			except EOFError:
-				self.__marginal_file.close()
+				self.close()
 				if self.__grid_solution_file is not None:
 					self.__grid_solution_file.close()
 				return False
 		else:
-			self.__marginal_file.close()
+			self.close()
 			if self.__grid_solution_file is not None:
 				self.__grid_solution_file.close()
 			return False

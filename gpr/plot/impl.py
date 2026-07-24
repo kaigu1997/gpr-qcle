@@ -181,14 +181,14 @@ def plot_loss_and_rescale_factors(config: pes.ModelConfig, ticks: npt.NDArray[np
 	axs = fig.subplots(1, 2)
 	assert isinstance(axs, np.ndarray)
 	loss_scale: typing.Final[tuple[npt.NDArray[np.double], npt.NDArray[np.double]]] = (
-		np.loadtxt(constant.LOSS_FILENAME + constant.DATA_EXTENSION).reshape(-1, config.NUM_TRIG, 1),
-		np.loadtxt(constant.SCALE_FILENAME + constant.DATA_EXTENSION).reshape(-1, config.NUM_ELM, 1)
+		np.loadtxt(constant.LOSS_FILENAME + constant.DATA_EXTENSION).reshape(-1, config.NUM_TRIG),
+		np.loadtxt(constant.SCALE_FILENAME + constant.DATA_EXTENSION).reshape(-1, config.NUM_ELM)
 	)
 	assert all(ticks.size >= data.shape[0] for data in loss_scale)
 	for iPlot in range(axs.size):
 		ax: matplotlib.axes.Axes = axs[iPlot]
 		for iTrig, iPES, jPES, iElement in zip(config.TRIG_RANGE, config.TRIL_ROW_INDICES, config.TRIL_COL_INDICES, config.TRIL_ELEMENT_INDICES):
-			ax.semilogy(ticks[:loss_scale[iPlot].shape[0]], loss_scale[iPlot][:, iTrig if iPlot == 0 else iElement, 0], label=utility.get_element_label(iPES, jPES))
+			ax.semilogy(ticks[:loss_scale[iPlot].shape[0]], loss_scale[iPlot][:, iTrig if iPlot == 0 else iElement], label=utility.get_element_label(iPES, jPES))
 		ax.set_xlabel("Time / a.u.")
 		ax.set_ylabel(loss_scale_ylabels[iPlot])
 		ax.set_title(loss_scale_titles[iPlot])
@@ -225,7 +225,7 @@ def main(arguments: None | collections.abc.Sequence[str] = None) -> None:
 	# parameters, loss and rescale factor
 	param_loss_scale_ticks: typing.Final[npt.NDArray[np.double]] = np.concatenate([np.arange(i * quantity.output_ticks, (i + 1) * quantity.output_ticks + 1) for i in range(ticks.size)]) * np.double(quantity.dt) # This should be size of (total_ticks - 1) * (output_steps + 1)
 	plot_parameters(quantity.config, param_loss_scale_ticks)
-	scale: typing.Final[npt.NDArray[np.double]] = plot_loss_and_rescale_factors(quantity.config, param_loss_scale_ticks)
+	scale: typing.Final[npt.NDArray[np.double]] = plot_loss_and_rescale_factors(quantity.config, param_loss_scale_ticks)[::quantity.output_ticks + 1]
 	# plot from dm: including marginal, or its marginal only
 	try:
 		if quantity.config.PHASEDIM == dm.DIM_PLOT_DM:
@@ -240,7 +240,7 @@ def main(arguments: None | collections.abc.Sequence[str] = None) -> None:
 				initial_scale=scale[0]
 			)
 			print("pwtdm:", dm_drawer.frame_index, datetime.datetime.now())
-			while dm_drawer(scale[dm_drawer.frame_index]): # pylint: disable=while-used
+			while dm_drawer(scale[dm_drawer.frame_index - 1]): # pylint: disable=while-used
 				print("pwtdm:", dm_drawer.frame_index, datetime.datetime.now())
 			if ani_sep != 0: # draw animation
 				utility.draw_animation(dm_drawer.picname, dm_drawer.total_ticks, ani_sep)

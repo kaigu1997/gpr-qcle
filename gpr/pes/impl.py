@@ -327,6 +327,24 @@ class Potential:
 		"""
 		return D @ D + torch.autograd.grad(D.reshape(tensor_to_supervector_shape), x, torch.eye(self.__config.NUM_ELM).reshape(tensor_eye_broadcast_shape).repeat(tensor_eye_repeat_shape), True, True, True, True, True, True)[0].moveaxis(0, -1).reshape(deriv_result_shape)
 
+	def diabatic_to_adiabatic(self, x: torch.Tensor) -> torch.Tensor:
+		r"""To calculate the transformation matrix from diabatic state to adiabatic state
+
+		Parameters
+		----------
+		x : torch.Tensor, shape of (..., DIM)
+			All cooridnates
+
+		Returns
+		-------
+		torch.Tensor, shape of (..., NUM_PES, NUM_PES)
+			adiabatic potential
+		"""
+		if self.__need_manual("diabatic_to_adiabatic"):
+			return self.__C(self.__model(x)).detach()
+		else:
+			return self.__model.diabatic_to_adiabatic(x).detach()
+
 	def adiabatic_potential(self, x: torch.Tensor) -> torch.Tensor:
 		r"""To calculate adiabatic potential
 
@@ -712,13 +730,15 @@ class InitialDistribution:
 		"""
 		return self.__model.config
 
-	def __call__(self, r: torch.Tensor) -> torch.Tensor:
+	def __call__(self, r: torch.Tensor, to_adiabatic: bool = True) -> torch.Tensor:
 		r"""To calculate the initial density of the given element at the given phase point
 
 		Parameters
 		----------
 		r : torch.Tensor, shape of (..., PHASEDIM)
 			Phase space coordinates of initerest
+		to_adiabatic : bool, optional
+			Whether to transform the density matrix to adiabatic basis, by default True
 
 		Returns
 		-------
@@ -755,4 +775,7 @@ class InitialDistribution:
 					materialize_grads=True
 				)[0][..., torch.newaxis, torch.newaxis] * (G @ self.__factors + (G @ self.__factors).conj().mT + 2.0 * D @ self.__factors @ D)).sum(-3)
 			result += constant.HBAR / 2.0 * 1.0j * (dXdP[..., torch.newaxis, torch.newaxis] * (self.__factors @ D + D @ self.__factors)).sum(-3)
+		elif to_adiabatic:
+			C: typing.Final[torch.Tensor] = self.__model.diabatic_to_adiabatic(x)
+			result = torch.complex(C.mH @ result.real @ C, C.mH @ result.imag @ C)
 		return result.detach()

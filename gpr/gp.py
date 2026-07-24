@@ -80,10 +80,10 @@ class GaussianProcess:
 	rc_real_to_raw: collections.abc.Callable[[torch.Tensor], torch.Tensor] = staticmethod(lambda x: torch.log(x / wendland.wendland_rbf.max_support) - torch.log(1.0 - x / wendland.wendland_rbf.max_support))
 	raw_to_real: collections.abc.Callable[[torch.Tensor], torch.Tensor] = staticmethod(lambda x: torch.cat([GaussianProcess.length_raw_to_real(x[:-1]), GaussianProcess.rc_raw_to_real(x[-1]).reshape(1)]))
 	real_to_raw: collections.abc.Callable[[torch.Tensor], torch.Tensor] = staticmethod(lambda x: torch.cat([GaussianProcess.length_real_to_raw(x[:-1]), GaussianProcess.rc_real_to_raw(x[-1]).reshape(1)]))
-	__slots__: typing.Final[tuple] = ("__PHASEDIM", "__AVERAGE_CONSTANT", "__kernel", "x_ind", "y_ind", "x_all", "y_all", "scale", "__raw_lengthscale", "__raw_cutoff", "__old_parameters", "__lr", "__k_inv_y", "__weights_updated")
+	__slots__: typing.Final[tuple] = ("__PHASEDIM", "__AVERAGE_CONSTANT", "kernel", "x_ind", "y_ind", "x_all", "y_all", "scale", "__raw_lengthscale", "__raw_cutoff", "__old_parameters", "__lr", "__k_inv_y", "__weights_updated")
 	__PHASEDIM: typing.Final[int]
 	__AVERAGE_CONSTANT: typing.Final[float]
-	__kernel: typing.Final[wendland.wendland_rbf]
+	kernel: typing.Final[wendland.wendland_rbf]
 	x_ind: torch.Tensor
 	y_ind: torch.Tensor
 	x_all: torch.Tensor
@@ -112,7 +112,7 @@ class GaussianProcess:
 		assert self.__PHASEDIM % 2 == 0
 		DIM: typing.Final = x_all.shape[-1] // 2
 		self.__AVERAGE_CONSTANT = (2.0 * math.pi) ** DIM / math.factorial(DIM)
-		self.__kernel = kernel
+		self.kernel = kernel
 		self.__weights_updated = False
 		self.x_ind = x_ind.detach().clone()
 		self.y_ind = y_ind.detach().clone()
@@ -122,7 +122,7 @@ class GaussianProcess:
 		self.__raw_lengthscale = GaussianProcess.length_real_to_raw(lengthscale_initial_value).detach()
 		self.__raw_cutoff = GaussianProcess.rc_real_to_raw(torch.tensor(cutoff)).detach()
 		self.__lr = 1.0 if lengthscale_initial_value.numel() > 10 else None # use gradient descend if dimension is large, otherwise use newton method
-		self.__old_parameters = torch.cat([self.lengthscale, torch.tensor([self.r_cutoff])]).detach()
+		self.__old_parameters = torch.cat([self.lengthscale, self.r_c.reshape(1)]).detach()
 		self.train(indent, False, train_rc)
 		self.__k_inv_y = self.__calculate_k_inv_y().detach()
 
@@ -188,6 +188,17 @@ class GaussianProcess:
 		self.__weights_updated = False
 
 	@property
+	def r_c(self) -> torch.Tensor:
+		r"""To access the cutoff radius in kernel function
+
+		Returns
+		-------
+		torch.Tensor
+			Cutoff radius in kernel function
+		"""
+		return GaussianProcess.rc_raw_to_real(self.__raw_cutoff)
+
+	@property
 	def r_cutoff(self) -> float:
 		r"""To access the cutoff radius in kernel function
 
@@ -196,7 +207,7 @@ class GaussianProcess:
 		float
 			Cutoff radius in kernel function
 		"""
-		return GaussianProcess.rc_raw_to_real(self.__raw_cutoff).item()
+		return self.r_c.item()
 
 	@property
 	def raw_cutoff(self) -> torch.Tensor:
@@ -240,7 +251,7 @@ class GaussianProcess:
 		torch.Tensor
 			The transformed parameters
 		"""
-		return torch.cat([self.lengthscale, torch.tensor([self.r_cutoff])])
+		return torch.cat([self.lengthscale, self.r_c.reshape(1)])
 
 	@property
 	def old_param(self) -> torch.Tensor:
@@ -289,11 +300,11 @@ class GaussianProcess:
 		# 	self.y_all,
 		# 	bicgstab
 		# )
-		return torch.view_as_complex((linear_operator.utils.stable_pinverse(self.__kernel(
+		return torch.view_as_complex((linear_operator.utils.stable_pinverse(self.kernel(
 			self.x_all if x_all is None else x_all,
 			self.x_ind if x_ind is None else x_ind,
 			lengthscale=self.lengthscale if lengthscale is None else lengthscale,
-			r_c=self.r_cutoff if r_c is None else r_c
+			r_c=self.r_c if r_c is None else r_c
 		)) @ torch.view_as_real(self.y_all if y_all is None else y_all)).contiguous())
 
 	def __update_weights(self) -> None:
@@ -345,9 +356,9 @@ class GaussianProcess:
 		if r_c is None:
 			r_c = torch.tensor(self.r_cutoff)
 		if requires_grad:
-			return torch.view_as_complex((self.__kernel(x_test, self.x_ind, lengthscale=lengthscale, r_c=r_c) @ torch.view_as_real(self.__calculate_k_inv_y(lengthscale, r_c))).contiguous())
+			return torch.view_as_complex((self.kernel(x_test, self.x_ind, lengthscale=lengthscale, r_c=r_c) @ torch.view_as_real(self.__calculate_k_inv_y(lengthscale, r_c))).contiguous())
 		else:
-			return torch.view_as_complex((self.__kernel(x_test, self.x_ind, lengthscale=lengthscale, r_c=r_c) @ torch.view_as_real(self.k_inv_y)).detach().contiguous())
+			return torch.view_as_complex((self.kernel(x_test, self.x_ind, lengthscale=lengthscale, r_c=r_c) @ torch.view_as_real(self.k_inv_y)).detach().contiguous())
 
 	def predict_derivative_over_input(self, x_test: torch.Tensor) -> InputDerivativeReturn:
 		r"""To give the derivative of prediction over the input
@@ -392,7 +403,7 @@ class GaussianProcess:
 			raw_param: typing.Final[torch.Tensor] = self.raw_param.detach().requires_grad_()
 		lengthscale: typing.Final[torch.Tensor] = GaussianProcess.length_raw_to_real(raw_param[:-1])
 		r_c: typing.Final[torch.Tensor] = GaussianProcess.rc_raw_to_real(raw_param[-1])
-		predict: typing.Final[torch.Tensor] = torch.view_as_complex((self.__kernel(x_test.detach(), x_ind, lengthscale=lengthscale, r_c=r_c) @ torch.view_as_real(self.__calculate_k_inv_y(lengthscale, r_c, x_ind, x_all, y_all))).contiguous())
+		predict: typing.Final[torch.Tensor] = torch.view_as_complex((self.kernel(x_test.detach(), x_ind, lengthscale=lengthscale, r_c=r_c) @ torch.view_as_real(self.__calculate_k_inv_y(lengthscale, r_c, x_ind, x_all, y_all))).contiguous())
 		N: typing.Final[int] = predict.numel()
 		eye: typing.Final[torch.Tensor] = torch.eye(N)
 		chunk_range: typing.Final[range] = range(0, N, chunk_size)
@@ -520,9 +531,9 @@ class GaussianProcess:
 			else:
 				return GaussianProcess.length_raw_to_real(raw_param)
 
-		loss_func: typing.Final[collections.abc.Callable[[torch.Tensor], torch.Tensor]] = lambda raw_param: self.loss_func(GaussianProcess.length_raw_to_real(raw_param[:-1]), GaussianProcess.rc_raw_to_real(raw_param[-1]), reg) if train_rc else self.loss_func(GaussianProcess.length_raw_to_real(raw_param), torch.tensor(self.r_cutoff), reg)
+		loss_func: typing.Final[collections.abc.Callable[[torch.Tensor], torch.Tensor]] = lambda raw_param: self.loss_func(GaussianProcess.length_raw_to_real(raw_param[:-1]), GaussianProcess.rc_raw_to_real(raw_param[-1]), reg) if train_rc else self.loss_func(GaussianProcess.length_raw_to_real(raw_param), self.r_c, reg)
 		# train model
-		self.__old_parameters = torch.cat([self.lengthscale, torch.tensor([self.r_cutoff])]).detach()
+		self.__old_parameters = torch.cat([self.lengthscale, self.r_c.reshape(1)]).detach()
 		print(f"{indent * "\t"}scale = {self.scale}\n{indent * "\t"}", end="")
 		opt.Optimizer.print_model(self.lengthscale)
 		if self.__lr is None:
@@ -564,7 +575,7 @@ class GaussianProcess:
 
 	@property
 	def connectivity_and_total_weight(self) -> tuple[float, float, float, float]:
-		k_mat = self.__kernel(self.x_all, lengthscale=self.lengthscale, r_c=self.r_cutoff)
+		k_mat = self.kernel(self.x_all, lengthscale=self.lengthscale, r_c=self.r_c)
 		k_eigh: typing.Final[float] = torch.linalg.eigvalsh(k_mat.sum(-1).diag() - k_mat)[1].item()
 		k_weight: typing.Final[float] = torch.tril(k_mat, -1).sum().item()
 		k_mat = k_mat * torch.sqrt(torch.abs(self.y_all.reshape(1, -1))) * torch.sqrt(torch.abs(self.y_all.reshape(-1, 1)))
@@ -579,7 +590,7 @@ class GaussianProcess:
 		float
 			The population of the model
 		"""
-		return self.__AVERAGE_CONSTANT * self.lengthscale.prod().item() * self.k_inv_y.real.sum().item() * self.__kernel.integral(self.__PHASEDIM - 1, self.r_cutoff)
+		return self.__AVERAGE_CONSTANT * self.lengthscale.prod().item() * self.k_inv_y.real.sum().item() * self.kernel.integral(self.__PHASEDIM - 1, self.r_cutoff)
 
 	def population_with_lengthscale(self, lengthscale: torch.Tensor, r_c: torch.Tensor) -> torch.Tensor:
 		r"""To get the purity of the model
@@ -596,7 +607,7 @@ class GaussianProcess:
 		float
 			The purity of the model
 		"""
-		return self.__AVERAGE_CONSTANT * lengthscale.prod() * self.__calculate_k_inv_y(lengthscale, r_c).real.sum() * self.__kernel.integral_d_1(r_c)
+		return self.__AVERAGE_CONSTANT * lengthscale.prod() * self.__calculate_k_inv_y(lengthscale, r_c).real.sum() * self.kernel.integral_d_1(r_c)
 
 	@property
 	def coordinates(self) -> torch.Tensor:
@@ -607,7 +618,7 @@ class GaussianProcess:
 		torch.Tensor
 			The average coordinates of the model
 		"""
-		return self.__AVERAGE_CONSTANT * self.lengthscale.prod() * (self.k_inv_y.real[:, None] * self.x_ind).sum(0) * self.__kernel.integral(self.__PHASEDIM - 1, self.r_cutoff)
+		return self.__AVERAGE_CONSTANT * self.lengthscale.prod() * (self.k_inv_y.real[:, None] * self.x_ind).sum(0) * self.kernel.integral(self.__PHASEDIM - 1, self.r_cutoff)
 
 	@property
 	def square_coordinates(self) -> torch.Tensor:
@@ -618,7 +629,7 @@ class GaussianProcess:
 		torch.Tensor, shape of (PHASEDIM, PHASEDIM)
 			The average square coordinates of the model
 		"""
-		return self.__AVERAGE_CONSTANT * self.lengthscale.prod() * ((self.k_inv_y.real[:, None, None] * self.x_ind[:, :, None] * self.x_ind[:, None, :]).sum(0) * self.__kernel.integral(self.__PHASEDIM - 1, self.r_cutoff) + self.k_inv_y.real.sum() * torch.diagflat(self.lengthscale ** 2) / self.__PHASEDIM * self.__kernel.integral(self.__PHASEDIM + 1, self.r_cutoff))
+		return self.__AVERAGE_CONSTANT * self.lengthscale.prod() * ((self.k_inv_y.real[:, None, None] * self.x_ind[:, :, None] * self.x_ind[:, None, :]).sum(0) * self.kernel.integral(self.__PHASEDIM - 1, self.r_cutoff) + self.k_inv_y.real.sum() * torch.diagflat(self.lengthscale ** 2) / self.__PHASEDIM * self.kernel.integral(self.__PHASEDIM + 1, self.r_cutoff))
 
 	@property
 	def purity(self) -> float:
@@ -630,7 +641,7 @@ class GaussianProcess:
 			The purity of the model
 		"""
 		k_inv_y_real_view: typing.Final[torch.Tensor] = torch.view_as_real(self.k_inv_y)
-		return torch.einsum("ij,jk,ki->", k_inv_y_real_view.T, self.__kernel.square_integral(self.x_ind, lengthscale=self.lengthscale, r_c=self.r_cutoff), k_inv_y_real_view).item() * self.lengthscale.prod().item()
+		return torch.einsum("ij,jk,ki->", k_inv_y_real_view.T, self.kernel.square_integral(self.x_ind, lengthscale=self.lengthscale, r_c=self.r_cutoff), k_inv_y_real_view).item() * self.lengthscale.prod().item()
 
 	def purity_with_lengthscale(self, lengthscale: torch.Tensor, r_c: torch.Tensor) -> torch.Tensor:
 		r"""To get the purity of the model
@@ -648,7 +659,7 @@ class GaussianProcess:
 			The purity of the model
 		"""
 		k_inv_y_real_view: typing.Final[torch.Tensor] = torch.view_as_real(self.__calculate_k_inv_y(lengthscale, r_c))
-		return torch.einsum("ij,jk,ki->", k_inv_y_real_view.T, self.__kernel.square_integral(self.x_ind, lengthscale=lengthscale, r_c=r_c), k_inv_y_real_view).reshape([]) * lengthscale.prod()
+		return torch.einsum("ij,jk,ki->", k_inv_y_real_view.T, self.kernel.square_integral(self.x_ind, lengthscale=lengthscale, r_c=r_c), k_inv_y_real_view).reshape([]) * lengthscale.prod()
 
 	def get_marginal(self, x_test: torch.Tensor, dimensions: collections.abc.Sequence[int]) -> torch.Tensor:
 		r"""To get the marginal distribution of current gaussian process regression
@@ -667,4 +678,4 @@ class GaussianProcess:
 		"""
 		phasedim: typing.Final[int] = self.x_all.shape[-1]
 		prefactor: typing.Final[float] = math.sqrt((2.0 * torch.pi) ** (phasedim - len(dimensions))) * self.lengthscale[[i for i in range(phasedim) if i not in dimensions]].prod().item()
-		return torch.view_as_complex((prefactor * self.__kernel(x_test, self.x_ind[:, dimensions], lengthscale=self.lengthscale[dimensions], r_c=self.r_cutoff).to_dense() @ torch.view_as_real(self.k_inv_y)).contiguous())
+		return torch.view_as_complex((prefactor * self.kernel(x_test, self.x_ind[:, dimensions], lengthscale=self.lengthscale[dimensions], r_c=self.r_c).to_dense() @ torch.view_as_real(self.k_inv_y)).contiguous())

@@ -26,7 +26,7 @@ import constant
 _EPS: typing.Final = math.sqrt(torch.finfo(torch.float).eps * torch.finfo(torch.double).eps)
 
 
-class _cdist:
+class cdist2:
 	r"""To calculate the pairwise distance in a numerically stable way
 
 	Parameters
@@ -57,7 +57,7 @@ class _cdist:
 	"""
 	__EPS: typing.Final = torch.finfo(torch.get_default_dtype()).eps ** 2
 	def __new__(cls, x1: torch.Tensor, x2: torch.Tensor, eps: float = __EPS) -> torch.Tensor:
-		return torch.sqrt(((x1 ** 2).sum(dim=-1, keepdim=True) + (x2 ** 2).sum(dim=-1, keepdim=True).mT - 2 * x1 @ x2.mT).clamp(min=eps))
+		return ((x1 ** 2).sum(dim=-1, keepdim=True) + (x2 ** 2).sum(dim=-1, keepdim=True).mT - 2 * x1 @ x2.mT).clamp(min=eps)
 
 
 @typing.final
@@ -411,7 +411,7 @@ class wendland_rbf:
 		x2: torch.Tensor | None = None,
 		/, *,
 		lengthscale: torch.Tensor,
-		r_c: torch.Tensor | float
+		r_c: torch.Tensor
 	) -> torch.Tensor:
 		r"""To calculate the covariance matrix
 
@@ -423,7 +423,7 @@ class wendland_rbf:
 			The second feature set
 		lengthscale : torch.Tensor, shape of (D,)
 			The characteristic lengths
-		r_c : torch.Tensor | float
+		r_c : torch.Tensor
 			The support radius
 
 		Returns
@@ -434,19 +434,19 @@ class wendland_rbf:
 		assert x1.shape[-1] == lengthscale.numel() and x1.ndim >= 2
 		lengthscale = lengthscale.reshape(-1)
 		x1 = x1 / lengthscale
-		dist: torch.Tensor
+		dist2: torch.Tensor
 		mask: torch.Tensor
 		if x2 is not None:
 			assert x2.shape[-1] == lengthscale.numel() and x2.ndim >= 2
 			x2 = x2 / lengthscale
-			dist = torch.cdist(x1, x2)
-			mask = dist < r_c
+			dist2 = cdist2(x1, x2)
+			mask = dist2 < r_c ** 2
 		else:
 			# just calculate the strict lower triangle to save time, since the covariance matrix is symmetric
-			dist = torch.cdist(x1, x1)
-			mask = torch.tril(dist < r_c, -1)
-		result: torch.Tensor = torch.zeros_like(dist)
-		result[mask] = self.__poly(dist[mask] / r_c) * torch.exp(-dist[mask] ** 2 / 2.0)
+			dist2 = cdist2(x1, x1)
+			mask = torch.tril(dist2 < r_c ** 2, -1)
+		result: torch.Tensor = torch.zeros_like(dist2)
+		result[mask] = self.__poly(torch.sqrt(dist2[mask]) / r_c) * torch.exp(-dist2[mask] / 2.0)
 		if x2 is not None:
 			return result
 		else:
@@ -548,9 +548,9 @@ class wendland_rbf:
 		assert x.shape[-1] == lengthscale.numel() and x.ndim == 2
 		lengthscale = lengthscale.reshape(-1).detach()
 		x = x / (r_c * lengthscale)
-		dist: typing.Final[torch.Tensor] = torch.cdist(x, x)
-		mask: typing.Final[torch.Tensor] = torch.tril(dist < 2.0, -1) # diagonal has 0 dist, and can be calculated easily
-		values: typing.Final[torch.Tensor] = dist[mask]
+		dist2: typing.Final[torch.Tensor] = cdist2(x, x)
+		mask: typing.Final[torch.Tensor] = torch.tril(dist2 < 2.0, -1) # diagonal has 0 dist, and can be calculated easily
+		values: typing.Final[torch.Tensor] = torch.sqrt(dist2[mask])
 		func_vals: typing.Final[torch.Tensor] = rc_fit()
 		# check if close to grids
 		fit: torch.Tensor = torch.empty(values.numel())
@@ -563,7 +563,7 @@ class wendland_rbf:
 		div: typing.Final[torch.Tensor] = self.__rc_chebyshev_weights / grid_dist[noclose, :]
 		fit[noclose] = (div * func_vals).sum(-1) / div.sum(-1)
 		# only strict lower triangle
-		result: torch.Tensor = torch.zeros_like(dist)
+		result: torch.Tensor = torch.zeros_like(dist2)
 		result[mask] = fit
 		# coo: typing.Final[torch.Tensor] = torch.sparse_coo_tensor(mask.nonzero().T, fit, dist.shape)
 		# # add diagonal fit from analytical integral

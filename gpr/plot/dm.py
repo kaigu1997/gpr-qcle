@@ -648,7 +648,7 @@ class DensityMatrixDrawer:
 			self.__fig,
 			self.__axs,
 			quantity.config,
-			1.0 if draw_rescaled else utility.I_UB * np.max(np.abs(initial_dm)),
+			1.0 if draw_rescaled else utility.I_UB * torch.amax(torch.abs(initial_dm)).item(),
 			self.__draw_logscale,
 			self.__draw_scattered,
 			self.__xv,
@@ -726,10 +726,8 @@ class DensityMatrixDrawer:
 			rescale_factor: float
 			if self.__draw_rescaled:
 				# get rescaled factor, print it, and rescale the data
-				if scale is not None:
-					rescale_factor = scale[row_idx * self.config.NUM_PES + col_idx // (1 if self.__axs.shape[1] == self.config.NUM_PES else 2)]
-				else:
-					rescale_factor = 1.0 / np.max(np.abs(data))
+				assert scale is not None
+				rescale_factor = scale[row_idx * self.config.NUM_PES + col_idx // (1 if self.__axs.shape[1] == self.config.NUM_PES else 2)]
 				ax.set_title(
 					DensityMatrixDrawer.__get_ax_title(row_idx, col_idx, self.config.NUM_PES, grid_dm is not None) + "\n" + constant.RESCALE_TEMPLATE.format(rescale_factor),
 					fontproperties=utility.TITLE_PROPERTY
@@ -760,6 +758,15 @@ class DensityMatrixDrawer:
 					DensityMatrixDrawer.__CEN_PT_COLOR
 				)
 
+		if scale is None:
+			scale = np.zeros((self.config.NUM_PES, self.config.NUM_PES))
+			for iPES, jPES in zip(self.config.TRIL_ROW_INDICES, self.config.TRIL_COL_INDICES):
+				if iPES == jPES:
+					scale[iPES, jPES] = 1.0 / torch.amax(torch.abs(dm[iPES, jPES])).item()
+				else:
+					scale[iPES, jPES] = scale[jPES, iPES] = 1.0 / torch.amax(torch.sqrt(dm[iPES, jPES] ** 2 + dm[jPES, iPES] ** 2)).item()
+			scale = (scale + scale.T - np.diag(np.diag(scale)))
+		scale = scale.reshape(-1)
 		dm_to_draw: typing.Final[list[npt.NDArray[np.double]]] = [d[::self.__row_divisor, ::self.__col_divisor] for d in dm.detach().cpu().numpy().reshape(self.config.NUM_ELM, *dm.shape[2:])] + ([d[::self.__row_divisor, ::self.__col_divisor] for d in grid_dm.detach().cpu().numpy().reshape(self.config.NUM_ELM, *grid_dm.shape[2:])] if grid_dm is not None else []) # gpr first, then grid
 		if not self.__draw_rescaled: # update colorbar
 			DensityMatrixDrawer.__update_colorbar_limit(
@@ -880,7 +887,7 @@ class DMDrawerFromFile(DensityMatrixDrawer, utility.FromFile):
 			draw_logscale,
 			draw_scattered,
 			self.total_ticks if self.total_ticks != -1 else quantity.total_ticks,
-			wfn.file_data_to_dm(self, quantity.config, [quantity.num_grids_in_total]),
+			wfn.file_data_to_dm(self, quantity.config, [quantity.num_grids_in_total]).mT,
 			wfn.file_data_to_dm(self.__grid_solution, quantity.config, [quantity.num_grids_in_total]) if self.__grid_solution is not None else None,
 			([self.__points[0, :, self.__belongings[0] == idx] for idx in quantity.config.TRIL_ELEMENT_INDICES] + [self.__points[0, :, self.__belongings[0] == idx + quantity.config.NUM_ELM] for idx in quantity.config.TRIL_ELEMENT_INDICES]) if self.__points is not None and self.__belongings is not None else None,
 			initial_scale
@@ -899,12 +906,13 @@ class DMDrawerFromFile(DensityMatrixDrawer, utility.FromFile):
 		bool
 			Whether there are remaining figures to draw or not
 		"""
-		if self.have_content:
+		if self.have_content and (self.__grid_solution is None or self.__grid_solution.have_content):
 			try:
+				data: typing.Final[torch.Tensor] = torch.from_numpy(self.get_data())
 				DensityMatrixDrawer.__call__(
 					self,
 					self.frame_index - 1,
-					wfn.file_data_to_dm(self, self.config, [self.n_grids]),
+					utility.file_read_density_matrix_format(data, [self.n_grids], self.config.NUM_PES).mT,
 					wfn.file_data_to_dm(self.__grid_solution, self.config, [self.n_grids]) if self.__grid_solution is not None else None,
 					([self.__points[self.frame_index - 1, :, self.__belongings[self.frame_index - 1] == idx] for idx in self.config.TRIL_ELEMENT_INDICES] + [self.__points[self.frame_index - 1, :, self.__belongings[self.frame_index - 1] == idx + self.config.NUM_ELM] for idx in self.config.TRIL_ELEMENT_INDICES]) if self.__points is not None and self.__belongings is not None else None,
 					scale
